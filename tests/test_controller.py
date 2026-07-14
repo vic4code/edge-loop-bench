@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from edgeloopbench.config import LogicalBudget
-from edgeloopbench.controller import ModelOutput, run_strategy
+from edgeloopbench.controller import ModelOutput, RunContext, run_strategy
 from edgeloopbench.tasks import prepare_task
 
 
@@ -24,6 +24,12 @@ def clamp_page(page: int, total_pages: int) -> int:
         raise ValueError("total_pages must be positive")
     return max(1, min(page, total_pages))
 '''
+
+    def context(self) -> RunContext:
+        return RunContext(
+            experiment_id="test-loop", budget_tier="small",
+            manifest_sha256="sha256:" + "a" * 64,
+        )
 
     def budget(self, model_calls: int) -> LogicalBudget:
         return LogicalBudget(
@@ -49,6 +55,7 @@ def clamp_page(page: int, total_pages: int) -> int:
             result = run_strategy(
                 "direct", worktree, task, model, self.budget(1), seed=11,
                 event_log=events, evaluate=lambda _root, _task: True,
+                context=self.context(),
             )
 
             self.assertTrue(result.objective_success)
@@ -56,6 +63,8 @@ def clamp_page(page: int, total_pages: int) -> int:
             self.assertEqual((result.prompt_tokens, result.completion_tokens), (600, 120))
             records = [json.loads(line) for line in events.read_text().splitlines()]
             self.assertEqual([record["sequence"] for record in records], list(range(1, len(records) + 1)))
+            self.assertTrue(all(record["experiment_id"] == "test-loop" for record in records))
+            self.assertTrue(all(record["budget_tier"] == "small" for record in records))
 
     def test_bounded_retry_uses_feedback_after_invalid_edit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -78,6 +87,7 @@ def clamp_page(page: int, total_pages: int) -> int:
                 "bounded_retry", worktree, task, model, self.budget(2), seed=29,
                 event_log=Path(directory) / "events.jsonl",
                 evaluate=lambda _root, _task: True,
+                context=self.context(),
             )
 
             self.assertTrue(result.objective_success)
@@ -103,6 +113,7 @@ def clamp_page(page: int, total_pages: int) -> int:
                 lambda _prompt, _seed, _limit: ModelOutput("{}", "", 600, 1, 1),
                 budget, seed=11, event_log=Path(directory) / "events.jsonl",
                 evaluate=lambda _root, _task: True,
+                context=self.context(),
             )
 
             self.assertEqual(result.run_status, "budget_exhausted")
@@ -142,6 +153,7 @@ def canonical_key(label: str) -> str:
                 "maker_verifier", worktree, task, model, self.budget(2), seed=11,
                 event_log=Path(directory) / "events.jsonl",
                 evaluate=lambda root, _task: ".split()" in (root / "src/keys.py").read_text(),
+                context=self.context(),
             )
 
             self.assertTrue(result.objective_success)

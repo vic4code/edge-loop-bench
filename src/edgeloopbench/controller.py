@@ -27,6 +27,19 @@ class ModelOutput:
     total_duration_ns: int
 
 
+@dataclass(frozen=True)
+class RunContext:
+    experiment_id: str
+    budget_tier: str
+    manifest_sha256: str
+
+    def __post_init__(self) -> None:
+        if not self.experiment_id or not self.budget_tier:
+            raise ValueError("run context identifiers must not be empty")
+        if not self.manifest_sha256.startswith("sha256:") or len(self.manifest_sha256) != 71:
+            raise ValueError("run context manifest_sha256 must be a SHA-256 reference")
+
+
 ModelCall = Callable[[str, int, int], ModelOutput]
 Evaluator = Callable[[Path, TaskManifest], bool]
 
@@ -55,6 +68,7 @@ def run_strategy(
     seed: int,
     event_log: str | Path,
     evaluate: Evaluator,
+    context: RunContext,
 ) -> StrategyResult:
     """Run direct or bounded-retry using only sanitized public feedback."""
 
@@ -75,6 +89,9 @@ def run_strategy(
                 "task_id": task.id,
                 "strategy": strategy,
                 "seed": seed,
+                "experiment_id": context.experiment_id,
+                "budget_tier": context.budget_tier,
+                "manifest_sha256": context.manifest_sha256,
                 **fields,
             },
         )
