@@ -7,6 +7,9 @@ import textwrap
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
+
+from edgeloopbench.controller import ModelOutput
 
 from edgeloopbench.cli import main
 
@@ -159,6 +162,46 @@ class CliTests(unittest.TestCase):
             self.assertTrue(index.is_file())
             self.assertTrue(data.is_file())
             self.assertEqual(payload["index"], "index.html")
+
+    def test_run_command_can_execute_a_bounded_manifest_slice(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = '''"""One-based pagination helpers."""
+
+
+def clamp_page(page: int, total_pages: int) -> int:
+    """Return *page* constrained to the inclusive valid page range."""
+
+    if total_pages <= 0:
+        raise ValueError("total_pages must be positive")
+    return max(1, min(page, total_pages))
+'''
+
+        def fake_model(_prompt: str, _seed: int, _limit: int) -> ModelOutput:
+            text = json.dumps({"edits": [{"path": "src/pagination.py", "content": source}]})
+            return ModelOutput(text, "", 600, 120, 1_000_000_000)
+
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "edgeloopbench.cli.build_ollama_model", return_value=fake_model
+        ), patch(
+            "edgeloopbench.cli.build_isolated_evaluator",
+            return_value=lambda _worktree, _task: True,
+        ):
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main([
+                    "run", str(root / "configs/experiments/smoke.toml"),
+                    "--results", str(Path(directory) / "runs.jsonl"),
+                    "--events", str(Path(directory) / "events.jsonl"),
+                    "--task-catalog", str(root / "tasks/micro"),
+                    "--evaluator-catalog", str(root / "evaluators"),
+                    "--work-root", str(Path(directory) / "work"),
+                    "--max-runs", "1", "--json",
+                ])
+            payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["executed_runs"], 1)
+        self.assertEqual(payload["planned_runs"], 72)
 
 
 if __name__ == "__main__":

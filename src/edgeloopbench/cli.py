@@ -7,10 +7,18 @@ import json
 import subprocess
 import sys
 from collections.abc import Sequence
+from dataclasses import asdict
 from pathlib import Path
 
 from .config import ValidationError, load_experiment
 from .doctor import collect_host_info
+from .experiment import (
+    ExperimentError,
+    build_isolated_evaluator,
+    build_ollama_model,
+    execute_plan,
+)
+from .ollama import OllamaError
 from .results import (
     ResultError,
     load_results,
@@ -72,6 +80,16 @@ def build_parser() -> EdgeLoopArgumentParser:
         help="render partial coverage instead of rejecting missing declared runs",
     )
     report.add_argument("--json", action="store_true", dest="as_json")
+
+    run = subparsers.add_parser("run", help="execute missing agent runs from a manifest")
+    run.add_argument("manifest")
+    run.add_argument("--results", required=True)
+    run.add_argument("--events")
+    run.add_argument("--task-catalog", default="tasks/micro")
+    run.add_argument("--evaluator-catalog", default="evaluators")
+    run.add_argument("--work-root", default="results/work")
+    run.add_argument("--max-runs", type=int)
+    run.add_argument("--json", action="store_true", dest="as_json")
 
     doctor = subparsers.add_parser(
         "doctor", help="inspect the local host without changing it"
@@ -149,6 +167,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 print(f"Rendered report to {Path(arguments.output) / 'index.html'}")
             return 0
+        if arguments.command == "run":
+            plan = load_experiment(arguments.manifest)
+            model = build_ollama_model(plan)
+            evaluator = build_isolated_evaluator(arguments.evaluator_catalog)
+            event_log = arguments.events or str(
+                Path(arguments.results).with_suffix(".events.jsonl")
+            )
+            execution = execute_plan(
+                plan,
+                arguments.task_catalog,
+                arguments.work_root,
+                event_log,
+                arguments.results,
+                model=model,
+                evaluate=evaluator,
+                max_runs=arguments.max_runs,
+            )
+            payload = asdict(execution)
+            if arguments.as_json:
+                _print_json(payload)
+            else:
+                print(
+                    f"Executed {execution.executed_runs} runs; "
+                    f"skipped {execution.skipped_runs} existing runs."
+                )
+            return 0
         if arguments.command == "doctor":
             payload = collect_host_info()
             if arguments.as_json:
@@ -183,7 +227,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 print(result.output, end="" if result.output.endswith("\n") else "\n")
             return 0 if result.passed else 1
-    except (ValidationError, ResultError, TaskManifestError) as error:
+    except (
+        ValidationError,
+        ResultError,
+        TaskManifestError,
+        OllamaError,
+        ExperimentError,
+    ) as error:
         if getattr(arguments, "as_json", False):
             print(
                 json.dumps({"error": str(error), "exit_code": 2}, sort_keys=True),
