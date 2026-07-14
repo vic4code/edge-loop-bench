@@ -61,6 +61,18 @@ class StaticReportTests(unittest.TestCase):
         )
         second_coverage = validate_results_for_plan(second_records, second_plan)
         second_report = summarize(second_records, second_plan, second_coverage)
+        second_report = replace(
+            second_report,
+            arms=tuple(
+                replace(
+                    arm,
+                    successes=0,
+                    success_rate=0.0,
+                    success_per_1k_tokens=0.0,
+                )
+                for arm in second_report.arms
+            ),
+        )
 
         with tempfile.TemporaryDirectory() as directory:
             index_path = render_model_comparison(
@@ -74,6 +86,12 @@ class StaticReportTests(unittest.TestCase):
             data = json.loads((Path(directory) / "comparison.json").read_text())
 
         self.assertIn("Loop effect by model", html)
+        self.assertIn("Verified success", html)
+        self.assertIn("Logical token cost", html)
+        self.assertIn("Mean episode time", html)
+        self.assertEqual(html.count('<article class="metric-card '), 3)
+        self.assertIn('class="zero-marker"', html)
+        self.assertIn("0% verified success", html)
         self.assertIn("Rescued", html)
         self.assertIn("Regressed", html)
         self.assertIn("Serving efficiency is reported separately", html)
