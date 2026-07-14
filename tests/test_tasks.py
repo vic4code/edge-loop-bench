@@ -188,6 +188,7 @@ class MicroRepairSuiteTests(unittest.TestCase):
         "python-localized-001",
         "python-localized-002",
         "python-cross-file-001",
+        "python-cross-file-002",
     )
 
     def test_every_task_fails_initially_and_gold_passes_isolated_evaluation(self) -> None:

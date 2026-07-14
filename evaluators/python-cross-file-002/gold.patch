@@ -1,0 +1,6 @@
+diff --git a/src/inventory.py b/src/inventory.py
+--- a/src/inventory.py
++++ b/src/inventory.py
+@@ -18 +18,2 @@ class Inventory:
+         self.available -= quantity
++        self.reserved += quantity
