@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from .config import ValidationError, load_experiment
 from .doctor import collect_host_info
@@ -16,6 +18,8 @@ from .results import (
     summarize,
     validate_results_for_plan,
 )
+from .runner import run_public_tests
+from .tasks import TaskManifestError, load_task_manifest, prepare_task
 
 
 class ArgumentParsingError(ValueError):
@@ -60,6 +64,18 @@ def build_parser() -> EdgeLoopArgumentParser:
         "doctor", help="inspect the local host without changing it"
     )
     doctor.add_argument("--json", action="store_true", dest="as_json")
+
+    task = subparsers.add_parser("task", help="prepare and test public task worktrees")
+    task_commands = task.add_subparsers(dest="task_command", required=True)
+    task_prepare = task_commands.add_parser("prepare", help="prepare a pinned task worktree")
+    task_prepare.add_argument("task_id")
+    task_prepare.add_argument("--work-root", required=True)
+    task_prepare.add_argument("--catalog-root", default="tasks/micro")
+    task_prepare.add_argument("--json", action="store_true", dest="as_json")
+    task_test = task_commands.add_parser("public-test", help="run a worktree's public tests")
+    task_test.add_argument("worktree")
+    task_test.add_argument("--catalog-root", default="tasks/micro")
+    task_test.add_argument("--json", action="store_true", dest="as_json")
     return parser
 
 
@@ -113,7 +129,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 print(_render_doctor(payload))
             return 0
-    except (ValidationError, ResultError) as error:
+        if arguments.command == "task" and arguments.task_command == "prepare":
+            task_root = Path(arguments.catalog_root) / arguments.task_id
+            task_manifest = prepare_task(task_root, arguments.work_root)
+            payload = {
+                "task_id": task_manifest.id,
+                "initial_commit": task_manifest.initial_commit,
+            }
+            if arguments.as_json:
+                _print_json(payload)
+            else:
+                print(f"Prepared {task_manifest.id} at commit {task_manifest.initial_commit}.")
+            return 0
+        if arguments.command == "task" and arguments.task_command == "public-test":
+            worktree = Path(arguments.worktree)
+            task_manifest = _task_for_worktree(worktree, Path(arguments.catalog_root))
+            result = run_public_tests(worktree, task_manifest)
+            payload = {
+                "task_id": task_manifest.id,
+                "passed": result.passed,
+                "returncode": result.returncode,
+                "output": result.output,
+            }
+            if arguments.as_json:
+                _print_json(payload)
+            else:
+                print(result.output, end="" if result.output.endswith("\n") else "\n")
+            return 0 if result.passed else 1
+    except (ValidationError, ResultError, TaskManifestError) as error:
         if getattr(arguments, "as_json", False):
             print(
                 json.dumps({"error": str(error), "exit_code": 2}, sort_keys=True),
@@ -124,6 +167,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     parser.error(f"unknown command: {arguments.command}")
     return 2
+
+
+def _task_for_worktree(worktree: Path, catalog_root: Path):
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, check=True,
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise TaskManifestError("worktree does not have a readable Git commit") from error
+    commit = completed.stdout.strip()
+    matches = []
+    for manifest_path in sorted(catalog_root.glob("*/task.toml")):
+        manifest = load_task_manifest(manifest_path)
+        if manifest.initial_commit == commit:
+            matches.append(manifest)
+    if len(matches) != 1:
+        raise TaskManifestError(
+            f"worktree commit does not identify exactly one task in {catalog_root}"
+        )
+    return matches[0]
 
 
 def _print_json(payload: object) -> None:

@@ -110,6 +110,35 @@ class CliTests(unittest.TestCase):
         self.assertIn("runtimes", payload)
         self.assertNotIn(str(Path.home()), json.dumps(payload))
 
+    def test_task_prepare_and_public_test_commands(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "worktree"
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                prepare_exit = main([
+                    "task", "prepare", "python-localized-001",
+                    "--work-root", str(worktree),
+                    "--catalog-root", str(root / "tasks/micro"),
+                    "--json",
+                ])
+            prepared = json.loads(stdout.getvalue())
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                test_exit = main([
+                    "task", "public-test", str(worktree),
+                    "--catalog-root", str(root / "tasks/micro"),
+                    "--json",
+                ])
+            tested = json.loads(stdout.getvalue())
+
+        self.assertEqual(prepare_exit, 0)
+        self.assertEqual(prepared["task_id"], "python-localized-001")
+        self.assertEqual(test_exit, 1)
+        self.assertFalse(tested["passed"])
+        self.assertNotIn(str(worktree), tested["output"])
+
 
 if __name__ == "__main__":
     unittest.main()
