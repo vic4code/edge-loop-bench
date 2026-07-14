@@ -1,10 +1,9 @@
 # MicroRepair-6 task suite
 
-The v0.1 scaffold names six task slots. Executable task bundles are now being
-implemented under the accepted
+The six v0.1 executable task bundles are implemented under the accepted
 [`runnable experiment specification`](../../docs/runnable-experiment-spec.md).
-Until every qualification gate passes, this remains a harness shakeout suite,
-not a published benchmark.
+All deterministic preparation and isolated gold-evaluation gates pass. This
+remains a harness shakeout suite, not a published benchmark dataset.
 
 ## MVP composition
 
