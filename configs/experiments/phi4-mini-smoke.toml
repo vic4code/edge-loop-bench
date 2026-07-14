@@ -1,0 +1,60 @@
+schema_version = 1
+id = "apple-silicon-loop-phi4-mini"
+track = "effectiveness"
+draft = false
+
+tasks = [
+  "python-localized-001",
+  "python-localized-002",
+  "python-cross-file-001",
+  "python-cross-file-002",
+  "python-diagnosis-001",
+  "python-adversarial-001",
+]
+strategies = ["direct", "bounded_retry", "maker_verifier"]
+seeds = [11, 29]
+
+[generation]
+thinking = false
+temperature = 0.0
+edit_schema_revision = "full-file-edits-v1"
+controller_revision = "4e64e12f258e4fd27173a2d50279d8957ba3fd27"
+
+[model]
+id = "phi4-mini:latest"
+revision = "sha256:3c168af1dea0a414299c7d9077e100ac763370e5a98b3c53801a958a47f0a5db"
+artifact_sha256 = "sha256:3c168af1dea0a414299c7d9077e100ac763370e5a98b3c53801a958a47f0a5db"
+weight_quantization = "Q4_K_M"
+context_limit_tokens = 4096
+
+[backend]
+name = "ollama"
+version = "0.31.1"
+artifact_sha256 = "sha256:67d4b4e0e8a6742b8fec7491ea67653c4cc802651a8fa396aa569af4e12026a2"
+command = ["ollama", "serve"]
+
+[backend.environment]
+OLLAMA_HOST = "127.0.0.1:11434"
+OLLAMA_NO_CLOUD = "1"
+OLLAMA_NUM_PARALLEL = "1"
+OLLAMA_MAX_LOADED_MODELS = "1"
+OLLAMA_KEEP_ALIVE = "-1"
+OLLAMA_CONTEXT_LENGTH = "4096"
+OLLAMA_FLASH_ATTENTION = "1"
+OLLAMA_KV_CACHE_TYPE = "q8_0"
+
+[budgets.small]
+prompt_tokens = 12000
+completion_tokens = 4000
+model_calls = 3
+tool_calls = 20
+public_test_runs = 3
+per_call_context_tokens = 4096
+
+[budgets.medium]
+prompt_tokens = 24000
+completion_tokens = 8000
+model_calls = 6
+tool_calls = 40
+public_test_runs = 6
+per_call_context_tokens = 4096
