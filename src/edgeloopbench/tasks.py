@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -142,6 +145,77 @@ def validate_task_manifest(
         public_test=public_test,
         hidden_evaluation=hidden_evaluation,
     )
+
+
+def prepare_task(task_root: str | Path, destination: str | Path) -> TaskManifest:
+    """Create a pinned Git worktree containing only a task's public bundle."""
+
+    source = Path(task_root)
+    public_root = source / "public"
+    target = Path(destination)
+    task = load_task_manifest(source / "task.toml")
+    if not public_root.is_dir():
+        raise TaskManifestError(f"public task bundle not found: {public_root}")
+    if target.exists():
+        raise TaskManifestError(f"task destination already exists: {target}")
+    for path in public_root.rglob("*"):
+        if path.is_symlink():
+            raise TaskManifestError("public task bundles must not contain symlinks")
+        if path.name == ".git":
+            raise TaskManifestError("public task bundles must not contain Git metadata")
+
+    try:
+        shutil.copytree(public_root, target)
+        _run_git(target, ["init", "-q", "--initial-branch=main"])
+        _run_git(target, ["add", "--all"])
+        _run_git(target, ["commit", "-q", "-m", f"Initialize {task.id}"])
+        commit = _run_git(target, ["rev-parse", "HEAD"]).strip()
+    except (OSError, subprocess.SubprocessError) as error:
+        shutil.rmtree(target, ignore_errors=True)
+        raise TaskManifestError(
+            f"failed to prepare public task {task.id}: {error}"
+        ) from error
+    if commit != task.initial_commit:
+        shutil.rmtree(target, ignore_errors=True)
+        raise TaskManifestError(
+            f"public task {task.id} produced commit {commit}, expected {task.initial_commit}"
+        )
+    return task
+
+
+def _run_git(worktree: Path, arguments: list[str]) -> str:
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+    environment.update(
+        {
+            "GIT_AUTHOR_NAME": "EdgeLoopBench",
+            "GIT_AUTHOR_EMAIL": "bench@example.invalid",
+            "GIT_AUTHOR_DATE": "2026-07-14T00:00:00Z",
+            "GIT_COMMITTER_NAME": "EdgeLoopBench",
+            "GIT_COMMITTER_EMAIL": "bench@example.invalid",
+            "GIT_COMMITTER_DATE": "2026-07-14T00:00:00Z",
+            "LC_ALL": "C",
+            "TZ": "UTC",
+        }
+    )
+    completed = subprocess.run(
+        [
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.autocrlf=false",
+            *arguments,
+        ],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+    return completed.stdout
 
 
 def _test_command(raw: Mapping[str, Any], source: str) -> TestCommand:

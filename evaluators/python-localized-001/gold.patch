@@ -1,0 +1,9 @@
+diff --git a/src/pagination.py b/src/pagination.py
+index 43d5499..418770e 100644
+--- a/src/pagination.py
++++ b/src/pagination.py
+@@ -7,3 +7,3 @@ def clamp_page(page: int, total_pages: int) -> int:
+     if total_pages <= 0:
+         raise ValueError("total_pages must be positive")
+-    return max(1, min(page, total_pages - 1))
++    return max(1, min(page, total_pages))

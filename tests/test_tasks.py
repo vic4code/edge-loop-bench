@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import textwrap
 import unittest
+from hashlib import sha256
 from pathlib import Path
 
-from edgeloopbench.tasks import TaskManifestError, load_task_manifest
+from edgeloopbench.tasks import TaskManifestError, load_task_manifest, prepare_task
 
 
 VALID_TASK = """
@@ -89,6 +91,95 @@ class TaskManifestTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskManifestError, "public_test.command.*module"):
             self.load_text(invalid)
+
+
+class TaskPreparationTests(unittest.TestCase):
+    project_root = Path(__file__).parents[1]
+    task_root = project_root / "tasks" / "micro" / "python-localized-001"
+    evaluator_root = project_root / "evaluators" / "python-localized-001"
+
+    def test_prepares_pinned_agent_worktree_without_evaluator_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "worktree"
+
+            task = prepare_task(self.task_root, worktree)
+
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=worktree,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            self.assertEqual(commit, task.initial_commit)
+            visible_paths = [
+                str(path.relative_to(worktree)) for path in worktree.rglob("*")
+            ]
+            self.assertFalse(
+                any("evaluator" in path or "hidden" in path for path in visible_paths)
+            )
+
+    def test_initial_public_test_fails_for_intended_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "worktree"
+            task = prepare_task(self.task_root, worktree)
+
+            completed = subprocess.run(
+                task.public_test.command,
+                cwd=worktree,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=task.public_test.timeout_seconds,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("4 != 5", completed.stderr)
+
+    def test_gold_patch_passes_public_and_isolated_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "worktree"
+            task = prepare_task(self.task_root, worktree)
+            gold_patch = self.evaluator_root / "gold.patch"
+            self.assertEqual(
+                f"sha256:{sha256(gold_patch.read_bytes()).hexdigest()}",
+                task.gold_patch_sha256,
+            )
+            subprocess.run(
+                ["git", "apply", str(gold_patch)],
+                cwd=worktree,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            public = subprocess.run(
+                task.public_test.command,
+                cwd=worktree,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=task.public_test.timeout_seconds,
+            )
+            hidden = subprocess.run(
+                [
+                    "python3",
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    str(self.evaluator_root / "tests"),
+                    "-v",
+                ],
+                cwd=worktree,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=task.hidden_evaluation.timeout_seconds,
+            )
+
+            self.assertEqual(public.returncode, 0, public.stderr)
+            self.assertEqual(hidden.returncode, 0, hidden.stderr)
 
 
 if __name__ == "__main__":
