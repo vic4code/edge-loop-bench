@@ -40,3 +40,23 @@ The thinking-enabled response contained 244 characters in Ollama's separate
 `thinking` field but did not reach a final answer. Therefore thinking mode is
 an explicit controller factor. The initial control shakeout disables it; any
 thinking-enabled run must use its own labeled manifest.
+
+## First repair-path qualification
+
+Task `python-localized-001` was prepared in an isolated worktree and presented
+as a public-only snapshot. With the pinned full-file edit JSON schema, one
+direct call at seed 11 produced an allowed source replacement that passed both
+the public tests and the isolated evaluator.
+
+- Prompt tokens: 631
+- Completion tokens: 119
+- Total duration: 7.393 seconds
+- Stop reason: `stop`
+- Public tests: passed
+- Isolated evaluation: passed
+
+Before schema-constrained edits were enabled, three attempts proposed the
+correct semantic change but emitted invalid unified-diff hunk metadata. Those
+attempts are interface qualification evidence, not effectiveness scores. The
+accepted controller contract avoids treating diff serialization as repair
+ability.

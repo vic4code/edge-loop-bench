@@ -69,6 +69,28 @@ class OllamaClientTests(unittest.TestCase):
         with self.assertRaisesRegex(OllamaError, "loopback"):
             OllamaClient("https://models.example.com")
 
+    def test_generate_can_pin_a_structured_output_schema(self) -> None:
+        captured: list[dict[str, object]] = []
+
+        def transport(_url: str, payload: dict[str, object], _timeout: float):
+            captured.append(payload)
+            return {
+                "response": '{"edits":[]}', "done": True,
+                "prompt_eval_count": 1, "eval_count": 1,
+                "total_duration": 1, "load_duration": 0,
+                "prompt_eval_duration": 1, "eval_duration": 1,
+            }
+
+        schema = {"type": "object", "properties": {"edits": {"type": "array"}}}
+        OllamaClient("http://localhost:11434", transport=transport).generate(
+            OllamaGenerateRequest(
+                model="qwen3.5:4b", prompt="test", context_window=4096,
+                max_output_tokens=8, thinking=False, response_schema=schema,
+            )
+        )
+
+        self.assertEqual(captured[0]["format"], schema)
+
     def test_rejects_incomplete_generation_response(self) -> None:
         client = OllamaClient(
             "http://localhost:11434",

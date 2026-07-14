@@ -30,6 +30,7 @@ class OllamaGenerateRequest:
     thinking: bool
     seed: int = 0
     temperature: float = 0.0
+    response_schema: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not self.model:
@@ -44,6 +45,8 @@ class OllamaGenerateRequest:
             raise ValueError("thinking must be a boolean")
         if not math.isfinite(self.temperature) or self.temperature < 0:
             raise ValueError("temperature must be finite and nonnegative")
+        if self.response_schema is not None and not isinstance(self.response_schema, Mapping):
+            raise ValueError("response_schema must be a mapping or null")
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,8 @@ class OllamaClient:
                 "temperature": request.temperature,
             },
         }
+        if request.response_schema is not None:
+            payload["format"] = dict(request.response_schema)
         raw = self.transport(
             f"{self.endpoint}/api/generate", payload, self.timeout_seconds
         )

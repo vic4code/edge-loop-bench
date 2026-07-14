@@ -95,6 +95,9 @@ is deterministic and offline.
   model server, downloaded weights, network, or privileged access.
 - A manual local smoke test validates the real Ollama adapter before measured
   runs but is not part of `make check`.
+- Candidate edits use a pinned JSON schema containing full-file replacements.
+  The runner validates every path against the task allowlist before writing.
+  Unified-diff syntax is not scored as a proxy for repair ability.
 
 ## Reporting contract
 
