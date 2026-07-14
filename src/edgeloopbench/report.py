@@ -199,6 +199,8 @@ def _comparison_document(
             )
     metric_cards = _comparison_metric_cards(items)
     uplift = _baseline_uplift(items)
+    study_snapshot = _study_snapshot(items)
+    conclusion = _comparison_conclusion(items)
     controller_flow = _controller_flow()
     task_suite = _task_suite(items[0][0])
     return f"""<!doctype html>
@@ -207,7 +209,7 @@ def _comparison_document(
 <body><header><a class="brand" href="#top">EDGE<span>LOOP</span>BENCH</a><div class="meta">{models} · {total_runs} runs</div></header>
 <main id="top"><div class="eyebrow">PAIRED MODEL ANALYSIS</div><h1>Loop effect by model</h1>
 <p class="lede">Objective repair success under identical tasks, seeds, logical budgets, controller, and Ollama runtime.</p>
-<section><div class="section-head"><div><div class="eyebrow">AGENT TRACK</div><h2>Success and cost</h2></div><div class="direction">Primary charts use the medium budget tier</div></div>
+{study_snapshot}{conclusion}<section><div class="section-head"><div><div class="eyebrow">AGENT TRACK</div><h2>Success and cost</h2></div><div class="direction">Primary charts use the medium budget tier</div></div>
 {metric_cards}
 {uplift}
 <div class="chart-title heat-title"><h3>Complete results</h3><span>Loop delta is relative to Direct within model</span></div>
@@ -217,6 +219,96 @@ def _comparison_document(
 </section>{controller_flow}{task_suite}<section class="serving"><div class="section-head"><div><div class="eyebrow">SERVING TRACK</div><h2>Serving efficiency is reported separately</h2></div></div>
 <div class="empty"><strong>No composite score</strong><span>GPU throughput, memory, and energy ablations must not be presented as agent-effectiveness gains.</span></div></section>
 <footer>Complete manifest-bound experiments · model artifact is the only varying factor</footer></main></body></html>"""
+
+
+def _study_snapshot(
+    items: tuple[
+        tuple[ExperimentPlan, SummaryReport, tuple[RunRecord, ...]], ...
+    ],
+) -> str:
+    plan = items[0][0]
+    task_count = len(plan.tasks)
+    seed_count = len(plan.seeds)
+    budget_count = len(plan.budgets or {})
+    strategy_count = len(plan.strategies)
+    episode_count = sum(len(records) for _, _, records in items)
+    dataset = "MicroRepair-6" if set(plan.tasks) == set(_TASK_SUMMARIES) else "Configured repair suite"
+    facts = (
+        ("Dataset", dataset),
+        ("Workload", f"{task_count} offline Python repair tasks"),
+        ("Pairing", f"{seed_count} seeds × {budget_count} budget tiers"),
+        ("Arms", f"{len(items)} models × {strategy_count} strategies"),
+        ("Observed", f"{episode_count} complete episodes"),
+    )
+    return (
+        '<section class="snapshot-section"><div class="section-head"><div><div class="eyebrow">EXPERIMENT SCOPE</div>'
+        '<h2>Study snapshot</h2></div><div class="direction">What this result actually contains</div></div>'
+        '<div class="snapshot-grid">'
+        + "".join(
+            f'<div class="snapshot-fact"><span>{_e(label)}</span><strong>{_e(value)}</strong></div>'
+            for label, value in facts
+        )
+        + '</div></section>'
+    )
+
+
+def _comparison_conclusion(
+    items: tuple[
+        tuple[ExperimentPlan, SummaryReport, tuple[RunRecord, ...]], ...
+    ],
+) -> str:
+    budgets = tuple((items[0][0].budgets or {}).keys())
+    budget = "medium" if "medium" in budgets else budgets[0]
+    direct_candidates: list[tuple[float, str]] = []
+    loop_candidates: list[tuple[float, str, str, int, int]] = []
+    maker_rescued = maker_regressed = maker_pairs = 0
+
+    for plan, report, records in items:
+        arms = {
+            arm.strategy: arm
+            for arm in report.arms
+            if arm.budget_tier == budget
+        }
+        direct_rate = 100 * (arms["direct"].success_rate or 0)
+        model = _short_model_label(plan.model.id)
+        direct_candidates.append((direct_rate, model))
+        transitions = {
+            str(row["strategy"]): row
+            for row in _transition_rows(plan, records)
+            if row["budget_tier"] == budget
+        }
+        for strategy, label in (
+            ("bounded_retry", "Bounded Retry"),
+            ("maker_verifier", "Maker–Verifier"),
+        ):
+            delta = 100 * (arms[strategy].success_rate or 0) - direct_rate
+            row = transitions[strategy]
+            rescued = int(row["rescued"])
+            regressed = int(row["regressed"])
+            loop_candidates.append((delta, model, label, rescued, regressed))
+            if strategy == "maker_verifier":
+                maker_rescued += rescued
+                maker_regressed += regressed
+                maker_pairs += rescued + regressed + int(row["unchanged"])
+
+    direct_rate, direct_model = max(direct_candidates)
+    delta, loop_model, loop_label, rescued, regressed = max(loop_candidates)
+    if delta > 0:
+        loop_finding = (
+            f"{loop_model} {loop_label} produced the largest measured uplift: "
+            f"{delta:+.1f} percentage points, with {rescued} rescued and {regressed} regressed paired outcomes."
+        )
+    else:
+        loop_finding = "No tested loop improved verified success over its own Direct baseline in this budget tier."
+
+    return f'''<section class="conclusion-section"><div class="section-head"><div><div class="eyebrow">BOTTOM LINE</div>
+<h2>What the evidence supports</h2></div><div class="direction">Medium-budget paired comparison</div></div>
+<div class="conclusion-lead"><strong>{_e(loop_finding)}</strong><span>The strongest Direct baseline was {_e(direct_model)} at {direct_rate:.1f}% verified success.</span></div>
+<div class="conclusion-grid">
+<article><span>Measured finding</span><h3>Loops can help, do nothing, or regress</h3><p>Judge each loop against Direct within the same model. More calls are useful only when rescued outcomes exceed regressions at an acceptable cost.</p></article>
+<article class="warning"><span>Design limitation</span><h3>Current Maker–Verifier is not the target verifier</h3><p>It rescued {maker_rescued} and regressed {maker_regressed} of {maker_pairs} paired outcomes here. It is a second edit call, not a read-only judge, so this is not evidence that verifier loops generally fail.</p></article>
+<article><span>Inference boundary</span><h3>Qualification, not a general coding leaderboard</h3><p>The result applies to this small deterministic repair suite. It does not establish broad model quality or serving efficiency.</p></article>
+</div></section>'''
 
 
 def _baseline_uplift(
@@ -621,7 +713,7 @@ def _e(value: object) -> str:
 
 
 _COMPARISON_CSS = """
-.uplift-title{margin-top:38px}.uplift-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.uplift-card{border:1px solid var(--line);border-radius:8px;background:var(--panel);overflow:hidden}.uplift-model{display:grid;grid-template-columns:1fr auto;gap:1px 12px;padding:15px 16px;border-bottom:1px solid var(--line)}.uplift-model h4{grid-row:1/3;margin:0;align-self:center;font:500 18px/1.2 ui-serif,Georgia,serif}.uplift-model span{color:var(--muted);font-size:11px}.uplift-model>strong{font-size:20px;text-align:right}.uplift-row{display:grid;grid-template-columns:1.2fr repeat(3,1fr);align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line)}.uplift-row:last-child{border-bottom:0}.uplift-row>strong{font-size:12px}.uplift-row span{display:grid;text-align:right}.uplift-row small{font-size:10px}.uplift-row b{font-weight:500;font-variant-numeric:tabular-nums}.neutral{color:var(--muted)}.flow-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:28px}.flow-lane{min-width:0}.flow-head{min-height:72px;padding:15px 16px;background:var(--bar-direct);color:var(--panel);border-radius:8px 8px 0 0}.flow-lane:nth-child(2) .flow-head{background:var(--bar-retry)}.flow-lane:nth-child(3) .flow-head{background:var(--bar-maker)}.flow-head h3{font:500 20px/1.2 ui-serif,Georgia,serif}.flow-head span{display:block;margin-top:5px;font-size:11px}.flow-lane ol{list-style:none;margin:0;padding:14px;border:1px solid var(--line);border-top:0;border-radius:0 0 8px 8px;background:var(--panel)}.flow-lane li{position:relative;padding:10px 11px;border:1px solid var(--line);background:var(--bg);font-size:12px}.flow-lane li:not(:last-child){margin-bottom:20px}.flow-lane li:not(:last-child)::after{content:"↓";position:absolute;left:50%;bottom:-20px;transform:translateX(-50%);color:var(--muted)}.boundary-note{display:grid;grid-template-columns:auto 1fr;gap:16px;margin-top:18px;padding:15px 16px;border-left:4px solid var(--metric-success);background:var(--panel)}.boundary-note span,.task-boundary{color:var(--muted)}.task-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;margin-top:28px;background:var(--line);border:1px solid var(--line)}.task-card{min-width:0;padding:16px;background:var(--panel)}.task-card>span{color:var(--green-dark);font-size:10px;font-weight:500;letter-spacing:.08em;text-transform:uppercase}.task-card h3{margin-top:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;overflow-wrap:anywhere}.task-card p{margin:8px 0 0;color:var(--muted);font-size:12px}.task-boundary{margin:14px 0 0;font-size:12px}.flow-head,.flow-lane:nth-child(2) .flow-head,.flow-lane:nth-child(3) .flow-head{background:var(--panel);color:var(--text);border:1px solid var(--line);border-top:5px solid var(--bar-direct);padding-top:11px}.flow-lane:nth-child(2) .flow-head{border-top-color:var(--bar-retry)}.flow-lane:nth-child(3) .flow-head{border-top-color:var(--bar-maker)}.flow-head span{color:var(--muted)}@media(max-width:980px){.uplift-grid,.flow-grid{grid-template-columns:1fr}.flow-head{min-height:0}.task-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:560px){.uplift-row{grid-template-columns:1fr repeat(3,minmax(0,1fr));padding:11px 10px}.uplift-row>strong{font-size:11px}.uplift-row small{font-size:9px}.boundary-note{grid-template-columns:1fr;gap:4px}.task-grid{grid-template-columns:1fr}}
+.snapshot-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));margin-top:25px;border:1px solid var(--line);background:var(--panel)}.snapshot-fact{min-width:0;padding:15px;border-right:1px solid var(--line)}.snapshot-fact:last-child{border-right:0}.snapshot-fact span,.conclusion-grid article>span{display:block;color:var(--muted);font-size:10px;font-weight:500;letter-spacing:.08em;text-transform:uppercase}.snapshot-fact strong{display:block;margin-top:6px;font-size:15px}.conclusion-section{padding-top:40px}.conclusion-lead{display:grid;grid-template-columns:1.3fr .7fr;gap:28px;align-items:end;margin-top:25px;padding:22px 0;border-top:4px solid var(--text);border-bottom:1px solid var(--line)}.conclusion-lead strong{font:500 25px/1.25 ui-serif,Georgia,serif}.conclusion-lead span{color:var(--muted)}.conclusion-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line)}.conclusion-grid article{background:var(--panel);padding:18px}.conclusion-grid article.warning{box-shadow:inset 0 4px var(--bar-maker)}.conclusion-grid h3{margin-top:8px;font-size:16px}.conclusion-grid p{margin:8px 0 0;color:var(--muted);font-size:12px}.uplift-title{margin-top:38px}.uplift-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.uplift-card{border:1px solid var(--line);border-radius:8px;background:var(--panel);overflow:hidden}.uplift-model{display:grid;grid-template-columns:1fr auto;gap:1px 12px;padding:15px 16px;border-bottom:1px solid var(--line)}.uplift-model h4{grid-row:1/3;margin:0;align-self:center;font:500 18px/1.2 ui-serif,Georgia,serif}.uplift-model span{color:var(--muted);font-size:11px}.uplift-model>strong{font-size:20px;text-align:right}.uplift-row{display:grid;grid-template-columns:1.2fr repeat(3,1fr);align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line)}.uplift-row:last-child{border-bottom:0}.uplift-row>strong{font-size:12px}.uplift-row span{display:grid;text-align:right}.uplift-row small{font-size:10px}.uplift-row b{font-weight:500;font-variant-numeric:tabular-nums}.neutral{color:var(--muted)}.flow-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:28px}.flow-lane{min-width:0}.flow-head{min-height:72px;padding:15px 16px;background:var(--bar-direct);color:var(--panel);border-radius:8px 8px 0 0}.flow-lane:nth-child(2) .flow-head{background:var(--bar-retry)}.flow-lane:nth-child(3) .flow-head{background:var(--bar-maker)}.flow-head h3{font:500 20px/1.2 ui-serif,Georgia,serif}.flow-head span{display:block;margin-top:5px;font-size:11px}.flow-lane ol{list-style:none;margin:0;padding:14px;border:1px solid var(--line);border-top:0;border-radius:0 0 8px 8px;background:var(--panel)}.flow-lane li{position:relative;padding:10px 11px;border:1px solid var(--line);background:var(--bg);font-size:12px}.flow-lane li:not(:last-child){margin-bottom:20px}.flow-lane li:not(:last-child)::after{content:"↓";position:absolute;left:50%;bottom:-20px;transform:translateX(-50%);color:var(--muted)}.boundary-note{display:grid;grid-template-columns:auto 1fr;gap:16px;margin-top:18px;padding:15px 16px;border-left:4px solid var(--metric-success);background:var(--panel)}.boundary-note span,.task-boundary{color:var(--muted)}.task-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;margin-top:28px;background:var(--line);border:1px solid var(--line)}.task-card{min-width:0;padding:16px;background:var(--panel)}.task-card>span{color:var(--green-dark);font-size:10px;font-weight:500;letter-spacing:.08em;text-transform:uppercase}.task-card h3{margin-top:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;overflow-wrap:anywhere}.task-card p{margin:8px 0 0;color:var(--muted);font-size:12px}.task-boundary{margin:14px 0 0;font-size:12px}.flow-head,.flow-lane:nth-child(2) .flow-head,.flow-lane:nth-child(3) .flow-head{background:var(--panel);color:var(--text);border:1px solid var(--line);border-top:5px solid var(--bar-direct);padding-top:11px}.flow-lane:nth-child(2) .flow-head{border-top-color:var(--bar-retry)}.flow-lane:nth-child(3) .flow-head{border-top-color:var(--bar-maker)}.flow-head span{color:var(--muted)}@media(max-width:980px){.snapshot-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.snapshot-fact{border-bottom:1px solid var(--line)}.snapshot-fact:nth-child(even){border-right:0}.snapshot-fact:last-child{border-bottom:0}.conclusion-lead{grid-template-columns:1fr}.conclusion-grid,.uplift-grid,.flow-grid{grid-template-columns:1fr}.flow-head{min-height:0}.task-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:560px){.snapshot-grid{grid-template-columns:1fr}.snapshot-fact{border-right:0}.conclusion-lead strong{font-size:21px}.uplift-row{grid-template-columns:1fr repeat(3,minmax(0,1fr));padding:11px 10px}.uplift-row>strong{font-size:11px}.uplift-row small{font-size:9px}.boundary-note{grid-template-columns:1fr;gap:4px}.task-grid{grid-template-columns:1fr}}
 .uplift-row small{font-size:10px}
 """
 

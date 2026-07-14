@@ -86,6 +86,11 @@ class StaticReportTests(unittest.TestCase):
             data = json.loads((Path(directory) / "comparison.json").read_text())
 
         self.assertIn("Loop effect by model", html)
+        self.assertIn("Study snapshot", html)
+        self.assertIn("What the evidence supports", html)
+        self.assertIn("Measured finding", html)
+        self.assertIn("Design limitation", html)
+        self.assertIn("not evidence that verifier loops generally fail", html)
         self.assertIn("Verified success", html)
         self.assertIn("Logical token cost", html)
         self.assertIn("Mean episode time", html)

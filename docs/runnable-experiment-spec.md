@@ -107,17 +107,28 @@ self-contained HTML plus machine-readable JSON from validated results.
 
 Required views:
 
-1. verified-success leaderboard with observed counts;
-2. paired task-level direct-to-loop dumbbells;
-3. verified success versus logical tokens and versus wall time;
-4. marginal gain by model call or retry;
-5. task-strategy-budget heatmap;
-6. a separate serving panel for TTFT, decode rate, latency, memory, and energy.
+1. a study snapshot naming the dataset, task count, seeds, budgets, models, and
+   total episode count;
+2. a result-derived conclusion that separates measured findings from design
+   limitations and does not generalize beyond the declared suite;
+3. an agent-visible task catalog with category, source stratum, repair contract,
+   and evaluation boundary, without evaluator identifiers or gold details;
+4. verified-success leaderboard with observed counts;
+5. paired task-level direct-to-loop transitions;
+6. verified success versus logical tokens and versus wall time;
+7. marginal gain by model call or retry;
+8. task-strategy-budget heatmap;
+9. a separate serving panel for TTFT, decode rate, latency, memory, and energy.
 
 Charts must label higher/lower-is-better direction, sample size, model digest,
 runtime version, context, weight quantization, KV-cache quantization, and local
 versus cloud-assisted execution. Agent effectiveness and serving efficiency
 must not be collapsed into one score.
+
+When the tested controller differs from the preregistered target design, the
+HTML must name the tested behavior beside the conclusion. In particular, a
+review-and-revise second edit call must not be described as evidence about an
+independent read-only verifier.
 
 ## Boundaries
 
