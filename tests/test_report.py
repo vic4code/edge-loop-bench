@@ -7,12 +7,35 @@ from dataclasses import replace
 from pathlib import Path
 
 from edgeloopbench.config import load_experiment
-from edgeloopbench.report import ComparisonError, render_model_comparison, render_report
+from edgeloopbench.report import (
+    ComparisonError,
+    _task_suite,
+    render_model_comparison,
+    render_report,
+)
 from edgeloopbench.results import load_results, summarize, validate_results_for_plan
 
 
 class StaticReportTests(unittest.TestCase):
     project_root = Path(__file__).parents[1]
+
+    def test_renders_agent_visible_microrepair_task_catalog(self) -> None:
+        plan = load_experiment(
+            self.project_root / "configs/experiments/smoke.toml"
+        )
+
+        html = _task_suite(plan)
+
+        self.assertIn("MicroRepair-6 task catalog", html)
+        self.assertEqual(html.count('<article class="task-card">'), 6)
+        self.assertIn("Pagination upper bound", html)
+        self.assertIn("Comma-separated tags", html)
+        self.assertIn("Inventory reservation state", html)
+        self.assertIn("Generated mutation", html)
+        self.assertIn("Verifier adversarial", html)
+        self.assertIn("Agent-visible repair contract", html)
+        self.assertIn("Public tests", html)
+        self.assertIn("Hidden evaluation", html)
 
     def test_renders_self_contained_effectiveness_and_separate_serving_panels(self) -> None:
         plan = load_experiment(self.project_root / "examples/results/sample-plan.toml")
