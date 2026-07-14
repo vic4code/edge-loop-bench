@@ -61,15 +61,21 @@ The checked-in, privacy-scrubbed inventory is an **M4 MacBook Air with 16 GB uni
 
 ## Repository status
 
-Version `0.1.0` is the protocol and analysis scaffold. It provides:
+Version `0.1.0` is a runnable Mac-native qualification harness. It provides:
 
 - a frozen experimental vocabulary and causal boundary;
 - machine-readable experiment manifests;
 - validation for unfair or malformed experiment plans;
 - manifest-bound JSONL result summaries that expose their bindings, reject mixed revisions, enforce logical and deployment budgets, and compute paired strategy deltas;
-- runtime setup profiles and an evidence-backed model shortlist.
+- runtime setup profiles and an evidence-backed model shortlist;
+- six deterministic offline repair tasks with isolated evaluation;
+- direct, bounded-retry, and maker-verifier controllers with logical-token accounting;
+- append-only, resumable manifest execution through loopback Ollama; and
+- self-contained HTML plus JSON reports that keep effectiveness separate from serving.
 
-It does **not** yet let a model edit arbitrary repositories. Controller execution, sandboxed tools, hidden-test isolation, and energy collection are later milestones.
+It deliberately does **not** edit arbitrary repositories or expose evaluator
+assets to the model. Energy collection, a measured serving report, and the
+confirmatory multi-seed study remain later milestones.
 
 ## Quick start
 
@@ -91,6 +97,37 @@ Summarize append-only JSONL results:
 PYTHONPATH=src python3 -m edgeloopbench summarize \
   examples/results/sample-runs.jsonl \
   --manifest examples/results/sample-plan.toml
+```
+
+Prepare and inspect one public task:
+
+```bash
+PYTHONPATH=src python3 -m edgeloopbench task prepare python-localized-001 \
+  --work-root /tmp/edgeloop-localized-001
+PYTHONPATH=src python3 -m edgeloopbench task public-test \
+  /tmp/edgeloop-localized-001
+```
+
+Run or resume the pinned 72-run Ollama shakeout. Raw model events and derived
+run records are appended separately under the ignored `results/` directory:
+
+```bash
+PYTHONPATH=src python3 -m edgeloopbench run \
+  configs/experiments/smoke.toml \
+  --results results/qwen35-4b-smoke-runs.jsonl \
+  --events results/qwen35-4b-smoke-events.jsonl
+```
+
+Use `--max-runs 1` for a short qualification slice. Repeating the command
+skips run identities already present in the result log.
+
+Render the offline analysis page:
+
+```bash
+PYTHONPATH=src python3 -m edgeloopbench report \
+  results/qwen35-4b-smoke-runs.jsonl \
+  --manifest configs/experiments/smoke.toml \
+  --output results/qwen35-4b-report
 ```
 
 Summaries reject undeclared, over-budget, manifest-mismatched, or silently missing runs by default. Manifest-bound agent results must report the largest context observed in any model call; deployment runs must also satisfy their declared wall-time and energy budgets. Use `--allow-incomplete` only when the resulting coverage counts are intentionally part of an exploratory partial analysis.
