@@ -6,6 +6,12 @@ tasks = ["task-001", "task-002"]
 strategies = ["direct", "bounded_retry", "maker_verifier"]
 seeds = [11]
 
+[generation]
+thinking = false
+temperature = 0.0
+edit_schema_revision = "full-file-edits-v1"
+controller_revision = "commit-deadbeef"
+
 [model]
 id = "synthetic-model"
 revision = "UNPINNED"

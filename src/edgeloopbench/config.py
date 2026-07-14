@@ -73,6 +73,14 @@ class BackendConfig:
 
 
 @dataclass(frozen=True)
+class GenerationConfig:
+    thinking: bool
+    temperature: float
+    edit_schema_revision: str
+    controller_revision: str
+
+
+@dataclass(frozen=True)
 class LogicalBudget:
     prompt_tokens: int
     completion_tokens: int
@@ -104,6 +112,7 @@ class ExperimentPlan:
     draft: bool
     model: ModelConfig
     backend: BackendConfig
+    generation: GenerationConfig | None = None
     tasks: tuple[str, ...] = ()
     strategies: tuple[str, ...] = ()
     seeds: tuple[int, ...] = ()
@@ -152,6 +161,11 @@ class ExperimentPlan:
             result["strategies"] = list(self.strategies)
             result["seeds"] = list(self.seeds)
             result["budget_tiers"] = list((self.budgets or {}).keys())
+            assert self.generation is not None
+            result["thinking"] = self.generation.thinking
+            result["temperature"] = self.generation.temperature
+            result["edit_schema_revision"] = self.generation.edit_schema_revision
+            result["controller_revision"] = self.generation.controller_revision
         return result
 
 
@@ -216,6 +230,7 @@ def validate_experiment(
         "draft",
         "model",
         "backend",
+        "generation",
         "tasks",
         "strategies",
         "seeds",
@@ -261,6 +276,8 @@ def validate_experiment(
             )
 
     if track == "serving":
+        if "generation" in raw:
+            raise ValidationError(f"{source}: serving track cannot define generation")
         plan = _parse_serving(
             raw,
             source=source,
@@ -272,6 +289,7 @@ def validate_experiment(
             manifest_sha256=manifest_sha256,
         )
     else:
+        generation = _parse_generation(_table(raw, "generation", source), source)
         plan = _parse_agent_track(
             raw,
             source=source,
@@ -281,6 +299,7 @@ def validate_experiment(
             draft=draft,
             model=model,
             backend=backend,
+            generation=generation,
             manifest_sha256=manifest_sha256,
         )
     if plan.run_count > MAX_PLANNED_RUNS:
@@ -354,6 +373,30 @@ def _parse_backend(raw: Mapping[str, Any], source: str) -> BackendConfig:
     )
 
 
+def _parse_generation(raw: Mapping[str, Any], source: str) -> GenerationConfig:
+    field = f"{source}: generation"
+    _reject_unknown(
+        raw,
+        {"thinking", "temperature", "edit_schema_revision", "controller_revision"},
+        field,
+    )
+    temperature = raw.get("temperature")
+    if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+        raise ValidationError(f"{field}: temperature must be a number")
+    temperature = float(temperature)
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValidationError(f"{field}: temperature must be finite and nonnegative")
+    controller_revision = _string(raw, "controller_revision", field)
+    if not _is_immutable_pin(controller_revision):
+        raise ValidationError(f"{field}: controller_revision must be immutable")
+    return GenerationConfig(
+        thinking=_boolean(raw, "thinking", field),
+        temperature=temperature,
+        edit_schema_revision=_identifier(raw, "edit_schema_revision", field),
+        controller_revision=controller_revision,
+    )
+
+
 def _parse_agent_track(
     raw: Mapping[str, Any],
     *,
@@ -364,6 +407,7 @@ def _parse_agent_track(
     draft: bool,
     model: ModelConfig,
     backend: BackendConfig,
+    generation: GenerationConfig,
     manifest_sha256: str | None,
 ) -> ExperimentPlan:
     if "request_shapes" in raw or "measurement" in raw:
@@ -419,6 +463,7 @@ def _parse_agent_track(
         draft=draft,
         model=model,
         backend=backend,
+        generation=generation,
         tasks=tasks,
         strategies=strategies,
         seeds=seeds,

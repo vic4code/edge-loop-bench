@@ -21,6 +21,12 @@ tasks = ["task-a", "task-b"]
 strategies = ["direct", "bounded_retry", "maker_verifier"]
 seeds = [1, 2]
 
+[generation]
+thinking = false
+temperature = 0.0
+edit_schema_revision = "full-file-edits-v1"
+controller_revision = "35f7f97000000000000000000000000000000000"
+
 [model]
 id = "example/model"
 revision = "abc1234"
@@ -96,7 +102,19 @@ class ExperimentConfigTests(unittest.TestCase):
         self.assertEqual(plan.strategies, ("direct", "bounded_retry", "maker_verifier"))
         self.assertEqual(plan.budgets["medium"].completion_tokens, 4000)
         self.assertEqual(plan.backend.environment["OLLAMA_HOST"], "127.0.0.1:11434")
+        self.assertFalse(plan.generation.thinking)
+        self.assertEqual(plan.generation.edit_schema_revision, "full-file-edits-v1")
+        self.assertEqual(plan.generation.controller_revision, "35f7f97000000000000000000000000000000000")
         self.assertEqual(plan.run_count, 12)
+
+    def test_effectiveness_plan_requires_explicit_generation_contract(self) -> None:
+        invalid = VALID_EFFECTIVENESS.replace(
+            '[generation]\nthinking = false\ntemperature = 0.0\nedit_schema_revision = "full-file-edits-v1"\ncontroller_revision = "35f7f97000000000000000000000000000000000"\n',
+            "",
+        )
+
+        with self.assertRaisesRegex(ValidationError, "generation"):
+            self.load_text(invalid)
 
     def test_loads_serving_plan(self) -> None:
         plan = self.load_text(VALID_SERVING)

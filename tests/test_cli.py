@@ -95,7 +95,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["coverage"]["missing_runs"], 0)
         self.assertEqual(
             payload["manifest_bindings"][0]["manifest_sha256"],
-            "sha256:4f88916713f12e764feca93c62a36ed0004eadc37c6fa16942d7bf63b8f548fd",
+            "sha256:db82951d377e1b07ea368103ae0d6371d34943fae533ef17133b627bd884894b",
         )
 
     def test_doctor_json_never_requires_a_server(self) -> None:

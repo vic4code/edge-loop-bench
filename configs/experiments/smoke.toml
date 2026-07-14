@@ -1,7 +1,7 @@
 schema_version = 1
 id = "apple-silicon-loop-smoke"
 track = "effectiveness"
-draft = true
+draft = false
 
 tasks = [
   "python-localized-001",
@@ -14,17 +14,23 @@ tasks = [
 strategies = ["direct", "bounded_retry", "maker_verifier"]
 seeds = [11, 29]
 
+[generation]
+thinking = false
+temperature = 0.0
+edit_schema_revision = "full-file-edits-v1"
+controller_revision = "35f7f976bf7c536f030d93a780f1d8df4f203057"
+
 [model]
-id = "gemma-4-e2b-or-e4b"
-revision = "UNPINNED"
-artifact_sha256 = "UNPINNED"
-weight_quantization = "q4-candidate"
-context_limit_tokens = 16384
+id = "qwen3.5:4b"
+revision = "sha256:81fb60c7daa80fc1123380b98970b320ae233409f0f71a72ed7b9b0d62f40490"
+artifact_sha256 = "sha256:81fb60c7daa80fc1123380b98970b320ae233409f0f71a72ed7b9b0d62f40490"
+weight_quantization = "Q4_K_M"
+context_limit_tokens = 4096
 
 [backend]
 name = "ollama"
-version = "UNPINNED"
-artifact_sha256 = "UNPINNED"
+version = "0.31.1"
+artifact_sha256 = "sha256:67d4b4e0e8a6742b8fec7491ea67653c4cc802651a8fa396aa569af4e12026a2"
 command = ["ollama", "serve"]
 
 [backend.environment]
@@ -33,7 +39,7 @@ OLLAMA_NO_CLOUD = "1"
 OLLAMA_NUM_PARALLEL = "1"
 OLLAMA_MAX_LOADED_MODELS = "1"
 OLLAMA_KEEP_ALIVE = "-1"
-OLLAMA_CONTEXT_LENGTH = "16384"
+OLLAMA_CONTEXT_LENGTH = "4096"
 OLLAMA_FLASH_ATTENTION = "1"
 OLLAMA_KV_CACHE_TYPE = "q8_0"
 
@@ -43,7 +49,7 @@ completion_tokens = 4000
 model_calls = 3
 tool_calls = 20
 public_test_runs = 3
-per_call_context_tokens = 8192
+per_call_context_tokens = 4096
 
 [budgets.medium]
 prompt_tokens = 24000
@@ -51,4 +57,4 @@ completion_tokens = 8000
 model_calls = 6
 tool_calls = 40
 public_test_runs = 6
-per_call_context_tokens = 16384
+per_call_context_tokens = 4096
