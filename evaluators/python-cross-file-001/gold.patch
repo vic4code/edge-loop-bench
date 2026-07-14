@@ -1,0 +1,11 @@
+diff --git a/src/service.py b/src/service.py
+--- a/src/service.py
++++ b/src/service.py
+@@ -9,4 +9,5 @@ def display_name(records: dict[int, str], user_id: int) -> str:
+-    name = lookup_name(records, user_id)
+-    if name is None:
++    found, name = lookup_name(records, user_id)
++    if not found:
+         return "UNKNOWN"
++    assert name is not None
+     return name.upper()
