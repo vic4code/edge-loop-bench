@@ -1,0 +1,8 @@
+diff --git a/src/batch.py b/src/batch.py
+--- a/src/batch.py
++++ b/src/batch.py
+@@ -11,3 +11,3 @@ def summarize(rows: list[dict[str, object]]) -> dict[str, int]:
+         amount = int(row["amount"])
+-        totals[kind] = amount
++        totals[kind] = totals.get(kind, 0) + amount
+     return totals
