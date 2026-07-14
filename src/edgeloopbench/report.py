@@ -198,21 +198,155 @@ def _comparison_document(
                 f"<td>{row['unchanged']}</td></tr>"
             )
     metric_cards = _comparison_metric_cards(items)
+    uplift = _baseline_uplift(items)
+    controller_flow = _controller_flow()
+    task_suite = _task_suite(items[0][0])
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,">
-<title>EdgeLoopBench model comparison</title><style>{_CSS}</style></head>
+<title>EdgeLoopBench model comparison</title><style>{_CSS}{_COMPARISON_CSS}</style></head>
 <body><header><a class="brand" href="#top">EDGE<span>LOOP</span>BENCH</a><div class="meta">{models} · {total_runs} runs</div></header>
 <main id="top"><div class="eyebrow">PAIRED MODEL ANALYSIS</div><h1>Loop effect by model</h1>
 <p class="lede">Objective repair success under identical tasks, seeds, logical budgets, controller, and Ollama runtime.</p>
 <section><div class="section-head"><div><div class="eyebrow">AGENT TRACK</div><h2>Success and cost</h2></div><div class="direction">Primary charts use the medium budget tier</div></div>
 {metric_cards}
+{uplift}
 <div class="chart-title heat-title"><h3>Complete results</h3><span>Loop delta is relative to Direct within model</span></div>
 <div class="table-wrap"><table class="leaderboard comparison-leaderboard"><thead><tr><th>Model</th><th>Budget</th><th>Strategy</th><th>Success</th><th>vs Direct</th><th>Mean logical tokens</th><th>Mean wall</th></tr></thead><tbody>{''.join(leaderboard_rows)}</tbody></table></div>
 <div class="chart-title heat-title"><h3>Paired outcome transitions</h3><span>Same task, budget, and seed</span></div>
 <div class="table-wrap"><table class="transitions"><thead><tr><th>Model</th><th>Budget</th><th>Loop</th><th>Rescued</th><th>Regressed</th><th>Unchanged</th></tr></thead><tbody>{''.join(transition_rows)}</tbody></table></div>
-</section><section class="serving"><div class="section-head"><div><div class="eyebrow">SERVING TRACK</div><h2>Serving efficiency is reported separately</h2></div></div>
+</section>{controller_flow}{task_suite}<section class="serving"><div class="section-head"><div><div class="eyebrow">SERVING TRACK</div><h2>Serving efficiency is reported separately</h2></div></div>
 <div class="empty"><strong>No composite score</strong><span>GPU throughput, memory, and energy ablations must not be presented as agent-effectiveness gains.</span></div></section>
 <footer>Complete manifest-bound experiments · model artifact is the only varying factor</footer></main></body></html>"""
+
+
+def _baseline_uplift(
+    items: tuple[
+        tuple[ExperimentPlan, SummaryReport, tuple[RunRecord, ...]], ...
+    ],
+) -> str:
+    budgets = tuple((items[0][0].budgets or {}).keys())
+    budget = "medium" if "medium" in budgets else budgets[0]
+    cards: list[str] = []
+    for plan, report, _records in items:
+        arms = {
+            arm.strategy: arm
+            for arm in report.arms
+            if arm.budget_tier == budget
+        }
+        direct = arms["direct"]
+        direct_rate = 100 * (direct.success_rate or 0)
+        rows: list[str] = []
+        for strategy, label in (
+            ("bounded_retry", "Bounded Retry"),
+            ("maker_verifier", "Maker–Verifier"),
+        ):
+            arm = arms[strategy]
+            delta = 100 * (arm.success_rate or 0) - direct_rate
+            delta_class = "positive" if delta > 0 else "negative" if delta < 0 else "neutral"
+            rows.append(
+                f'<div class="uplift-row"><strong>{_e(label)}</strong>'
+                f'<span><small>Success Δ</small><b class="{delta_class}">{delta:+.1f} pp</b></span>'
+                f'<span><small>Token cost</small><b>{_ratio(arm.mean_total_tokens, direct.mean_total_tokens)}</b></span>'
+                f'<span><small>Wall time</small><b>{_ratio(arm.mean_wall_seconds, direct.mean_wall_seconds)}</b></span></div>'
+            )
+        cards.append(
+            f'<article class="uplift-card"><div class="uplift-model"><h4>{_e(_short_model_label(plan.model.id))}</h4>'
+            f'<span>Direct baseline</span><strong>{direct_rate:.1f}%</strong></div>'
+            f'{"".join(rows)}</article>'
+        )
+    return (
+        '<div class="chart-title uplift-title"><h3>Baseline → loop uplift</h3>'
+        '<span>Paired success difference; cost is a multiplier of Direct</span></div>'
+        f'<div class="uplift-grid">{"".join(cards)}</div>'
+    )
+
+
+def _ratio(candidate: float | None, baseline: float | None) -> str:
+    if candidate is None or baseline is None or baseline == 0:
+        return "n/a"
+    return f"{candidate / baseline:.2f}×"
+
+
+def _controller_flow() -> str:
+    lanes = (
+        (
+            "Direct baseline",
+            "One attempt; no controller retry",
+            (
+                "Reset clean task worktree",
+                "One model call returns replacement-edit JSON",
+                "Validate paths and apply candidate",
+                "Run public tests once",
+                "If public tests pass, run isolated hidden evaluation",
+            ),
+        ),
+        (
+            "Bounded Retry",
+            "Repair loop within shared logical caps",
+            (
+                "Build prompt from the current worktree",
+                "Model returns replacement-edit JSON",
+                "Validate, apply, and run public tests",
+                "On rejection or failure, add sanitized feedback",
+                "Repeat until pass or call/token/test budget ends",
+                "If public tests pass, run isolated hidden evaluation",
+            ),
+        ),
+        (
+            "Maker–Verifier",
+            "Tested implementation is review-and-revise",
+            (
+                "Maker returns replacement-edit JSON",
+                "Validate, apply, and run public tests",
+                "Request a second model call as verifier",
+                "Review and revise: verifier may replace source files",
+                "Apply revision and run public tests again",
+                "If public tests pass, run isolated hidden evaluation",
+            ),
+        ),
+    )
+    rendered = []
+    for title, subtitle, nodes in lanes:
+        rendered.append(
+            f'<article class="flow-lane"><div class="flow-head"><h3>{_e(title)}</h3><span>{_e(subtitle)}</span></div>'
+            f'<ol>{"".join(f"<li>{_e(node)}</li>" for node in nodes)}</ol></article>'
+        )
+    return (
+        '<section class="flow-section"><div class="section-head"><div><div class="eyebrow">LOOP DESIGN</div>'
+        '<h2>Controller flow</h2></div><div class="direction">The nodes below match the tested controller</div></div>'
+        f'<div class="flow-grid">{"".join(rendered)}</div>'
+        '<div class="boundary-note"><strong>Evaluation boundary</strong><span>Hidden evaluator feedback is never returned to any model. '
+        'Maker–Verifier here is not an independent read-only APPROVE/REJECT judge; it is a second review-and-revise edit call.</span></div></section>'
+    )
+
+
+_TASK_SUMMARIES = {
+    "python-localized-001": ("Localized", "Boundary-condition repair with a deterministic failing public test."),
+    "python-localized-002": ("Localized", "Parsing or error-handling repair in one focused source area."),
+    "python-cross-file-001": ("Cross-file", "Repair a contract mismatch spanning two Python modules."),
+    "python-cross-file-002": ("Cross-file", "Coordinate a state update across collaborating modules."),
+    "python-diagnosis-001": ("Diagnosis", "Find the useful failure signal inside noisy public-test output."),
+    "python-adversarial-001": ("Adversarial", "Avoid a superficial public-test fix that misses a protected edge case."),
+}
+
+
+def _task_suite(plan: ExperimentPlan) -> str:
+    cards = []
+    for task_id in plan.tasks:
+        category, challenge = _TASK_SUMMARIES.get(
+            task_id, ("Benchmark task", "Configured deterministic repair task."),
+        )
+        cards.append(
+            f'<article class="task-card"><span>{_e(category)}</span><h3>{_e(task_id)}</h3><p>{_e(challenge)}</p></article>'
+        )
+    observations = len(plan.tasks) * len(plan.seeds)
+    return (
+        '<section class="task-section"><div class="section-head"><div><div class="eyebrow">BENCH DATA</div>'
+        '<h2>What was tested</h2></div>'
+        f'<div class="direction">{len(plan.tasks)} offline Python repairs × {len(plan.seeds)} seeds = {observations} paired observations per arm</div></div>'
+        f'<div class="task-grid">{"".join(cards)}</div>'
+        '<p class="task-boundary">This is a harness shakeout suite, not a broad coding benchmark. Agents see the task source and public tests. Hidden tests and gold patches stay outside the worktree; only the final objective pass/fail is recorded.</p></section>'
+    )
 
 
 def _comparison_metric_cards(
@@ -483,6 +617,12 @@ def _number(value: float | None, suffix: str, precision: int = 0) -> str:
 
 def _e(value: object) -> str:
     return html.escape(str(value), quote=True)
+
+
+_COMPARISON_CSS = """
+.uplift-title{margin-top:38px}.uplift-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.uplift-card{border:1px solid var(--line);border-radius:8px;background:var(--panel);overflow:hidden}.uplift-model{display:grid;grid-template-columns:1fr auto;gap:1px 12px;padding:15px 16px;border-bottom:1px solid var(--line)}.uplift-model h4{grid-row:1/3;margin:0;align-self:center;font:500 18px/1.2 ui-serif,Georgia,serif}.uplift-model span{color:var(--muted);font-size:11px}.uplift-model>strong{font-size:20px;text-align:right}.uplift-row{display:grid;grid-template-columns:1.2fr repeat(3,1fr);align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line)}.uplift-row:last-child{border-bottom:0}.uplift-row>strong{font-size:12px}.uplift-row span{display:grid;text-align:right}.uplift-row small{font-size:10px}.uplift-row b{font-weight:500;font-variant-numeric:tabular-nums}.neutral{color:var(--muted)}.flow-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:28px}.flow-lane{min-width:0}.flow-head{min-height:72px;padding:15px 16px;background:var(--bar-direct);color:var(--panel);border-radius:8px 8px 0 0}.flow-lane:nth-child(2) .flow-head{background:var(--bar-retry)}.flow-lane:nth-child(3) .flow-head{background:var(--bar-maker)}.flow-head h3{font:500 20px/1.2 ui-serif,Georgia,serif}.flow-head span{display:block;margin-top:5px;font-size:11px}.flow-lane ol{list-style:none;margin:0;padding:14px;border:1px solid var(--line);border-top:0;border-radius:0 0 8px 8px;background:var(--panel)}.flow-lane li{position:relative;padding:10px 11px;border:1px solid var(--line);background:var(--bg);font-size:12px}.flow-lane li:not(:last-child){margin-bottom:20px}.flow-lane li:not(:last-child)::after{content:"↓";position:absolute;left:50%;bottom:-20px;transform:translateX(-50%);color:var(--muted)}.boundary-note{display:grid;grid-template-columns:auto 1fr;gap:16px;margin-top:18px;padding:15px 16px;border-left:4px solid var(--metric-success);background:var(--panel)}.boundary-note span,.task-boundary{color:var(--muted)}.task-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;margin-top:28px;background:var(--line);border:1px solid var(--line)}.task-card{min-width:0;padding:16px;background:var(--panel)}.task-card>span{color:var(--green-dark);font-size:10px;font-weight:500;letter-spacing:.08em;text-transform:uppercase}.task-card h3{margin-top:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;overflow-wrap:anywhere}.task-card p{margin:8px 0 0;color:var(--muted);font-size:12px}.task-boundary{margin:14px 0 0;font-size:12px}.flow-head,.flow-lane:nth-child(2) .flow-head,.flow-lane:nth-child(3) .flow-head{background:var(--panel);color:var(--text);border:1px solid var(--line);border-top:5px solid var(--bar-direct);padding-top:11px}.flow-lane:nth-child(2) .flow-head{border-top-color:var(--bar-retry)}.flow-lane:nth-child(3) .flow-head{border-top-color:var(--bar-maker)}.flow-head span{color:var(--muted)}@media(max-width:980px){.uplift-grid,.flow-grid{grid-template-columns:1fr}.flow-head{min-height:0}.task-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:560px){.uplift-row{grid-template-columns:1fr repeat(3,minmax(0,1fr));padding:11px 10px}.uplift-row>strong{font-size:11px}.uplift-row small{font-size:9px}.boundary-note{grid-template-columns:1fr;gap:4px}.task-grid{grid-template-columns:1fr}}
+.uplift-row small{font-size:10px}
+"""
 
 
 _CSS = """

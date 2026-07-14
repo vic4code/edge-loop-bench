@@ -49,6 +49,38 @@ arm failed every observation. Qwen3.5 9B Bounded Retry stopped after its
 successful first attempts, while Maker–Verifier regressed 2 observations per
 budget tier.
 
+### Medium-budget baseline uplift
+
+`Direct` is the within-model baseline. Success uplift is the paired
+percentage-point difference from Direct; token and wall figures are mean-cost
+multipliers. A positive success delta with a cost multiplier above 1 is a
+quality/cost trade-off, not a free performance gain.
+
+| Model | Loop | Success vs Direct | Token cost vs Direct | Wall time vs Direct |
+| --- | --- | ---: | ---: | ---: |
+| Qwen3.5 4B | Bounded Retry | +16.7 pp | 2.55x | 2.24x |
+| Qwen3.5 4B | Maker–Verifier | -16.7 pp | 2.14x | 2.10x |
+| Phi-4-mini | Bounded Retry | +0.0 pp | 7.43x | 5.64x |
+| Phi-4-mini | Maker–Verifier | +0.0 pp | 2.33x | 2.19x |
+| Qwen3.5 9B | Bounded Retry | +0.0 pp | 1.00x | 0.95x |
+| Qwen3.5 9B | Maker–Verifier | -16.7 pp | 2.14x | 1.98x |
+
+### Controller semantics tested in this run
+
+- **Direct:** one model call, replacement-edit validation and application, one
+  public-test run, then isolated evaluation only when public tests pass.
+- **Bounded Retry:** rebuild the prompt from the evolving worktree after a
+  rejected edit or failed public test, include only sanitized feedback, and
+  repeat within the shared logical call, token, tool, and test caps.
+- **Maker–Verifier:** the first call makes an edit; the second call is instructed
+  to review the requirements and current implementation and may return another
+  replacement edit. This is a tested review-and-revise loop, not the independent
+  read-only `APPROVE`/`REJECT` verifier described as the target design in the
+  experiment protocol.
+
+Hidden evaluator output is never returned to any strategy. Therefore, no loop
+can repair a patch from hidden-test feedback.
+
 ## Interpretation boundary
 
 This is a qualification over six deterministic repair tasks, not a broad claim
