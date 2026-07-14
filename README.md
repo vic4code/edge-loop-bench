@@ -130,6 +130,20 @@ PYTHONPATH=src python3 -m edgeloopbench report \
   --output results/qwen35-4b-report
 ```
 
+Compare two or more complete experiments while allowing only the pinned model
+artifact to vary:
+
+```bash
+PYTHONPATH=src python3 -m edgeloopbench compare \
+  --experiment configs/experiments/smoke.toml results/qwen35-4b-full-runs.jsonl \
+  --experiment configs/experiments/phi4-mini-smoke.toml results/phi4-mini-full-runs.jsonl \
+  --experiment configs/experiments/qwen35-9b-smoke.toml results/qwen35-9b-full-runs.jsonl \
+  --output results/three-model-loop-comparison
+```
+
+The completed three-model qualification and its interpretation boundary are
+recorded in [the run note](docs/runs/three-model-loop-comparison.md).
+
 Summaries reject undeclared, over-budget, manifest-mismatched, or silently missing runs by default. Manifest-bound agent results must report the largest context observed in any model call; deployment runs must also satisfy their declared wall-time and energy budgets. Use `--allow-incomplete` only when the resulting coverage counts are intentionally part of an exploratory partial analysis.
 
 Inspect the protocol before interpreting any numbers:
