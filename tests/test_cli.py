@@ -139,6 +139,27 @@ class CliTests(unittest.TestCase):
         self.assertFalse(tested["passed"])
         self.assertNotIn(str(worktree), tested["output"])
 
+    def test_report_command_writes_html_and_json(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main([
+                    "report", str(root / "examples/results/sample-runs.jsonl"),
+                    "--manifest", str(root / "examples/results/sample-plan.toml"),
+                    "--output", directory,
+                    "--json",
+                ])
+
+            payload = json.loads(stdout.getvalue())
+            index = Path(directory) / "index.html"
+            data = Path(directory) / "report.json"
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(index.is_file())
+            self.assertTrue(data.is_file())
+            self.assertEqual(payload["index"], "index.html")
+
 
 if __name__ == "__main__":
     unittest.main()

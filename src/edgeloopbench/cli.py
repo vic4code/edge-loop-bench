@@ -18,6 +18,7 @@ from .results import (
     summarize,
     validate_results_for_plan,
 )
+from .report import render_report
 from .runner import run_public_tests
 from .tasks import TaskManifestError, load_task_manifest, prepare_task
 
@@ -59,6 +60,18 @@ def build_parser() -> EdgeLoopArgumentParser:
         help="report partial coverage instead of rejecting missing declared runs",
     )
     summary.add_argument("--json", action="store_true", dest="as_json")
+
+    report = subparsers.add_parser(
+        "report", help="render a self-contained effectiveness report"
+    )
+    report.add_argument("results")
+    report.add_argument("--manifest", required=True)
+    report.add_argument("--output", required=True)
+    report.add_argument(
+        "--allow-incomplete", action="store_true",
+        help="render partial coverage instead of rejecting missing declared runs",
+    )
+    report.add_argument("--json", action="store_true", dest="as_json")
 
     doctor = subparsers.add_parser(
         "doctor", help="inspect the local host without changing it"
@@ -121,6 +134,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_json(report.to_dict())
             else:
                 print(render_text(report))
+            return 0
+        if arguments.command == "report":
+            plan = load_experiment(arguments.manifest)
+            records = load_results(arguments.results)
+            coverage = validate_results_for_plan(
+                records, plan, require_complete=not arguments.allow_incomplete
+            )
+            summary_report = summarize(records, plan, coverage)
+            render_report(summary_report, plan, records, arguments.output)
+            payload = {"index": "index.html", "data": "report.json"}
+            if arguments.as_json:
+                _print_json(payload)
+            else:
+                print(f"Rendered report to {Path(arguments.output) / 'index.html'}")
             return 0
         if arguments.command == "doctor":
             payload = collect_host_info()
