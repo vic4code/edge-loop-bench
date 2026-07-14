@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from edgeloopbench.config import load_experiment
-from edgeloopbench.report import render_report
+from edgeloopbench.report import ComparisonError, render_model_comparison, render_report
 from edgeloopbench.results import load_results, summarize, validate_results_for_plan
 
 
@@ -32,6 +33,64 @@ class StaticReportTests(unittest.TestCase):
         self.assertNotIn("<script src=", html)
         self.assertEqual(data["summary"]["coverage"]["observed_runs"], 6)
         self.assertEqual(len(data["records"]), 6)
+
+    def test_renders_paired_cross_model_loop_comparison(self) -> None:
+        plan = load_experiment(self.project_root / "examples/results/sample-plan.toml")
+        records = load_results(self.project_root / "examples/results/sample-runs.jsonl")
+        coverage = validate_results_for_plan(records, plan)
+        report = summarize(records, plan, coverage)
+        second_sha = "b" * 64
+        second_plan = replace(
+            plan,
+            id="demo-second-model",
+            model=replace(
+                plan.model,
+                id="second-model",
+                revision="sha256:" + "a" * 64,
+                artifact_sha256="sha256:" + "a" * 64,
+            ),
+            manifest_sha256=second_sha,
+        )
+        second_records = tuple(
+            replace(
+                record,
+                experiment_id=second_plan.id,
+                manifest_sha256="sha256:" + second_sha,
+            )
+            for record in records
+        )
+        second_coverage = validate_results_for_plan(second_records, second_plan)
+        second_report = summarize(second_records, second_plan, second_coverage)
+
+        with tempfile.TemporaryDirectory() as directory:
+            index_path = render_model_comparison(
+                (
+                    (plan, report, records),
+                    (second_plan, second_report, second_records),
+                ),
+                directory,
+            )
+            html = index_path.read_text(encoding="utf-8")
+            data = json.loads((Path(directory) / "comparison.json").read_text())
+
+        self.assertIn("Loop effect by model", html)
+        self.assertIn("Rescued", html)
+        self.assertIn("Regressed", html)
+        self.assertIn("Serving efficiency is reported separately", html)
+        self.assertEqual(len(data["experiments"]), 2)
+
+        incompatible_plan = replace(
+            second_plan,
+            model=replace(second_plan.model, weight_quantization="Q8_0"),
+        )
+        with self.assertRaisesRegex(ComparisonError, "differs outside"):
+            render_model_comparison(
+                (
+                    (plan, report, records),
+                    (incompatible_plan, second_report, second_records),
+                ),
+                tempfile.gettempdir(),
+            )
 
 
 if __name__ == "__main__":

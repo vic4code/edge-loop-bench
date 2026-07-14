@@ -12,6 +12,7 @@ from unittest.mock import patch
 from edgeloopbench.controller import ModelOutput
 
 from edgeloopbench.cli import main
+from edgeloopbench.config import load_experiment
 
 
 class CliTests(unittest.TestCase):
@@ -162,6 +163,44 @@ class CliTests(unittest.TestCase):
             self.assertTrue(index.is_file())
             self.assertTrue(data.is_file())
             self.assertEqual(payload["index"], "index.html")
+
+    def test_compare_command_writes_cross_model_report(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source_manifest = root / "examples/results/sample-plan.toml"
+        source_results = root / "examples/results/sample-runs.jsonl"
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            second_manifest = temporary / "second.toml"
+            manifest_text = source_manifest.read_text(encoding="utf-8")
+            manifest_text = manifest_text.replace('id = "demo"', 'id = "demo-second"')
+            manifest_text = manifest_text.replace(
+                'id = "synthetic-model"\nrevision = "UNPINNED"\n'
+                'artifact_sha256 = "UNPINNED"',
+                'id = "second-model"\nrevision = "second-revision"\n'
+                'artifact_sha256 = "second-artifact"',
+            )
+            second_manifest.write_text(manifest_text, encoding="utf-8")
+            second_plan = load_experiment(second_manifest)
+            second_results = temporary / "second.jsonl"
+            rows = []
+            for line in source_results.read_text(encoding="utf-8").splitlines():
+                row = json.loads(line)
+                row["experiment_id"] = second_plan.id
+                row["manifest_sha256"] = "sha256:" + second_plan.manifest_sha256
+                rows.append(json.dumps(row, sort_keys=True))
+            second_results.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            output = temporary / "comparison"
+
+            exit_code = main([
+                "compare",
+                "--experiment", str(source_manifest), str(source_results),
+                "--experiment", str(second_manifest), str(second_results),
+                "--output", str(output),
+            ])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((output / "index.html").is_file())
+            self.assertTrue((output / "comparison.json").is_file())
 
     def test_run_command_can_execute_a_bounded_manifest_slice(self) -> None:
         root = Path(__file__).resolve().parents[1]

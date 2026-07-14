@@ -12,6 +12,10 @@ from .config import ExperimentPlan
 from .results import RunRecord, SummaryReport
 
 
+class ComparisonError(ValueError):
+    """Raised when experiments cannot support a causal model comparison."""
+
+
 def render_report(
     report: SummaryReport,
     plan: ExperimentPlan,
@@ -36,6 +40,176 @@ def render_report(
     index = output / "index.html"
     index.write_text(document, encoding="utf-8")
     return index
+
+
+def render_model_comparison(
+    experiments: Iterable[
+        tuple[ExperimentPlan, SummaryReport, Iterable[RunRecord]]
+    ],
+    output_directory: str | Path,
+) -> Path:
+    """Render compatible complete experiments as one paired loop comparison."""
+
+    items = tuple(
+        (plan, report, tuple(records))
+        for plan, report, records in experiments
+    )
+    _validate_comparison(items)
+    output = Path(output_directory)
+    output.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "experiments": [
+            {
+                "plan": plan.summary(),
+                "summary": report.to_dict(),
+                "records": [asdict(record) for record in records],
+                "transitions": _transition_rows(plan, records),
+            }
+            for plan, report, records in items
+        ],
+    }
+    (output / "comparison.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    index = output / "index.html"
+    index.write_text(_comparison_document(items), encoding="utf-8")
+    return index
+
+
+def _validate_comparison(
+    items: tuple[
+        tuple[ExperimentPlan, SummaryReport, tuple[RunRecord, ...]], ...
+    ],
+) -> None:
+    if len(items) < 2:
+        raise ComparisonError("cross-model comparison requires at least two experiments")
+    baseline = items[0][0]
+    if baseline.track != "effectiveness":
+        raise ComparisonError("cross-model comparison requires effectiveness plans")
+    if "direct" not in baseline.strategies:
+        raise ComparisonError("cross-model comparison requires a direct baseline")
+    experiment_ids: set[str] = set()
+    model_artifacts: set[str] = set()
+    for plan, report, records in items:
+        if plan.id in experiment_ids:
+            raise ComparisonError(f"duplicate experiment id {plan.id!r}")
+        if plan.model.artifact_sha256 in model_artifacts:
+            raise ComparisonError(
+                f"duplicate model artifact {plan.model.artifact_sha256!r}"
+            )
+        experiment_ids.add(plan.id)
+        model_artifacts.add(plan.model.artifact_sha256)
+        if report.coverage is None or report.coverage.missing_runs:
+            raise ComparisonError(f"experiment {plan.id!r} is incomplete")
+        if report.coverage.invalid_runs:
+            raise ComparisonError(f"experiment {plan.id!r} contains invalid runs")
+        if len(records) != report.coverage.observed_runs:
+            raise ComparisonError(f"experiment {plan.id!r} record count is inconsistent")
+        if _comparison_signature(plan) != _comparison_signature(baseline):
+            raise ComparisonError(
+                f"experiment {plan.id!r} differs outside the pinned model artifact"
+            )
+
+
+def _comparison_signature(plan: ExperimentPlan) -> tuple[object, ...]:
+    return (
+        plan.track,
+        plan.tasks,
+        plan.strategies,
+        plan.seeds,
+        tuple((name, budget) for name, budget in (plan.budgets or {}).items()),
+        plan.generation,
+        plan.backend,
+        plan.model.weight_quantization,
+        plan.model.context_limit_tokens,
+    )
+
+
+def _transition_rows(
+    plan: ExperimentPlan, records: tuple[RunRecord, ...]
+) -> list[dict[str, object]]:
+    by_key = {
+        (record.task_id, record.budget_tier, record.seed, record.strategy): record
+        for record in records
+        if record.is_valid
+    }
+    rows: list[dict[str, object]] = []
+    for budget in (plan.budgets or {}):
+        for strategy in plan.strategies:
+            if strategy == "direct":
+                continue
+            rescued = regressed = unchanged = 0
+            for task in plan.tasks:
+                for seed in plan.seeds:
+                    direct = by_key[(task, budget, seed, "direct")]
+                    candidate = by_key[(task, budget, seed, strategy)]
+                    if not direct.objective_success and candidate.objective_success:
+                        rescued += 1
+                    elif direct.objective_success and not candidate.objective_success:
+                        regressed += 1
+                    else:
+                        unchanged += 1
+            rows.append(
+                {
+                    "budget_tier": budget,
+                    "strategy": strategy,
+                    "rescued": rescued,
+                    "regressed": regressed,
+                    "unchanged": unchanged,
+                }
+            )
+    return rows
+
+
+def _comparison_document(
+    items: tuple[
+        tuple[ExperimentPlan, SummaryReport, tuple[RunRecord, ...]], ...
+    ],
+) -> str:
+    total_runs = sum(len(records) for _, _, records in items)
+    models = " · ".join(_e(plan.model.id) for plan, _, _ in items)
+    leaderboard_rows: list[str] = []
+    transition_rows: list[str] = []
+    for plan, report, records in items:
+        direct_by_budget = {
+            arm.budget_tier: arm
+            for arm in report.arms
+            if arm.strategy == "direct"
+        }
+        for arm in report.arms:
+            rate = 100 * (arm.success_rate or 0)
+            direct = direct_by_budget[arm.budget_tier]
+            direct_rate = 100 * (direct.success_rate or 0)
+            leaderboard_rows.append(
+                f"<tr><td><strong>{_e(plan.model.id)}</strong></td>"
+                f"<td>{_e(arm.budget_tier)}</td><td>{_e(arm.strategy)}</td>"
+                f'<td class="score"><span>{rate:.1f}%</span><i style="width:{rate:.2f}%"></i></td>'
+                f"<td>{rate-direct_rate:+.1f} pp</td>"
+                f"<td>{_number(arm.mean_total_tokens, ' tok')}</td>"
+                f"<td>{_number(arm.mean_wall_seconds, ' s', 1)}</td></tr>"
+            )
+        for row in _transition_rows(plan, records):
+            transition_rows.append(
+                f"<tr><td><strong>{_e(plan.model.id)}</strong></td>"
+                f"<td>{_e(row['budget_tier'])}</td><td>{_e(row['strategy'])}</td>"
+                f"<td class=\"positive\">{row['rescued']}</td>"
+                f"<td class=\"negative\">{row['regressed']}</td>"
+                f"<td>{row['unchanged']}</td></tr>"
+            )
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,">
+<title>EdgeLoopBench model comparison</title><style>{_CSS}</style></head>
+<body><header><a class="brand" href="#top">EDGE<span>LOOP</span>BENCH</a><div class="meta">{models} · {total_runs} runs</div></header>
+<main id="top"><div class="eyebrow">PAIRED MODEL ANALYSIS</div><h1>Loop effect by model</h1>
+<p class="lede">Objective repair success under identical tasks, seeds, logical budgets, controller, and Ollama runtime.</p>
+<section><div class="section-head"><div><div class="eyebrow">AGENT TRACK</div><h2>Success and cost</h2></div><div class="direction">Loop delta is relative to Direct within model</div></div>
+<div class="table-wrap"><table class="leaderboard comparison-leaderboard"><thead><tr><th>Model</th><th>Budget</th><th>Strategy</th><th>Success</th><th>vs Direct</th><th>Mean logical tokens</th><th>Mean wall</th></tr></thead><tbody>{''.join(leaderboard_rows)}</tbody></table></div>
+<div class="chart-title heat-title"><h3>Paired outcome transitions</h3><span>Same task, budget, and seed</span></div>
+<div class="table-wrap"><table class="transitions"><thead><tr><th>Model</th><th>Budget</th><th>Loop</th><th>Rescued</th><th>Regressed</th><th>Unchanged</th></tr></thead><tbody>{''.join(transition_rows)}</tbody></table></div>
+</section><section class="serving"><div class="section-head"><div><div class="eyebrow">SERVING TRACK</div><h2>Serving efficiency is reported separately</h2></div></div>
+<div class="empty"><strong>No composite score</strong><span>GPU throughput, memory, and energy ablations must not be presented as agent-effectiveness gains.</span></div></section>
+<footer>Complete manifest-bound experiments · model artifact is the only varying factor</footer></main></body></html>"""
 
 
 def _document(
@@ -148,5 +322,5 @@ def _e(value: object) -> str:
 
 
 _CSS = """
-:root{color-scheme:light dark;--bg:#f6f7f4;--panel:#fff;--text:#172019;--muted:#657068;--line:#dfe4df;--green:#62d84e;--green-dark:#268b35;--amber:#e0b23f;--red:#d95d55}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}header{height:58px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 max(24px,calc((100% - 1180px)/2));background:color-mix(in srgb,var(--bg) 92%,transparent)}.brand{color:var(--text);text-decoration:none;font-weight:500;letter-spacing:-.04em}.brand span{color:var(--green-dark)}.meta,.direction,.chart-title span,footer,.empty span{color:var(--muted)}main{max-width:1180px;margin:auto;padding:58px 24px 80px}.eyebrow{font-size:11px;font-weight:500;letter-spacing:.14em;color:var(--green-dark)}h1,h2,h3,strong{font-weight:500}h1{font-size:46px;letter-spacing:-.045em;line-height:1.05;max-width:750px;margin:10px 0 16px}h2{font-size:28px;letter-spacing:-.03em;margin:5px 0}h3{font-size:16px;margin:0}.lede{font-size:17px;color:var(--muted);max-width:720px;margin:0 0 70px}section{border-top:1px solid var(--line);padding:34px 0 48px}.section-head,.chart-title{display:flex;align-items:flex-end;justify-content:space-between;gap:18px}.chart-title{margin:30px 0 13px;align-items:baseline}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;background:var(--panel)}th,td{padding:12px 14px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:500}th:first-child,td:first-child{text-align:left}td strong{display:block}small{display:block;color:var(--muted)}.score{min-width:240px;position:relative}.score span{position:relative;z-index:1;font-variant-numeric:tabular-nums}.score i{position:absolute;left:12px;bottom:7px;height:3px;background:var(--green);display:block}.split{display:grid;grid-template-columns:1.08fr .92fr;gap:36px}.scatter{width:100%;background:var(--panel);display:block}.scatter line{stroke:var(--line);stroke-width:1}.scatter .grid{stroke-dasharray:3 5}.scatter text{fill:var(--text);font-size:11px}.scatter .axis{fill:var(--muted)}.point{fill:var(--green-dark);stroke:var(--panel);stroke-width:2}.point.bounded_retry{fill:var(--green)}.point.maker_verifier{fill:var(--amber)}.positive{color:var(--green-dark)}.negative{color:var(--red)}.heat-title{margin-top:42px}.heatmap .heat{text-align:center;font-weight:500;min-width:110px}.heat.pass{background:color-mix(in srgb,var(--green) 26%,var(--panel))}.heat.mixed{background:color-mix(in srgb,var(--amber) 24%,var(--panel))}.heat.fail{background:color-mix(in srgb,var(--red) 15%,var(--panel))}.empty-cell{color:var(--muted)}.serving{margin-top:12px}.empty{border:1px dashed var(--line);padding:22px;margin-top:25px;display:grid;gap:5px}.empty strong{font-size:16px}footer{border-top:1px solid var(--line);padding-top:20px;font-size:12px;overflow-wrap:anywhere}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}@media(max-width:760px){header{padding:0 16px}.meta{display:none}main{padding:38px 16px 60px}h1{font-size:35px}.lede{margin-bottom:48px}.split{grid-template-columns:1fr}.section-head,.chart-title{align-items:flex-start;flex-direction:column;gap:4px}.table-wrap{overflow:visible}th,td{padding:10px 8px;white-space:normal}.leaderboard th:nth-child(3),.leaderboard td:nth-child(3),.leaderboard th:nth-child(5),.leaderboard td:nth-child(5),.leaderboard th:nth-child(6),.leaderboard td:nth-child(6){display:none}.leaderboard .score{min-width:120px}.paired th:nth-child(4),.paired td:nth-child(4),.paired th:nth-child(5),.paired td:nth-child(5){display:none}.heatmap{table-layout:fixed}.heatmap th,.heatmap td{font-size:10px;overflow-wrap:anywhere;padding:8px 4px}.heatmap th:first-child{width:38%}.heatmap .heat{min-width:0}}@media(prefers-color-scheme:dark){:root{--bg:#101310;--panel:#171b18;--text:#eef4ef;--muted:#a4aea6;--line:#303731;--green:#74e45f;--green-dark:#64cf55;--amber:#e5bd55;--red:#eb7770}}
+:root{color-scheme:light dark;--bg:#f6f7f4;--panel:#fff;--text:#172019;--muted:#657068;--line:#dfe4df;--green:#62d84e;--green-dark:#268b35;--amber:#e0b23f;--red:#d95d55}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}header{height:58px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 max(24px,calc((100% - 1180px)/2));background:color-mix(in srgb,var(--bg) 92%,transparent)}.brand{color:var(--text);text-decoration:none;font-weight:500;letter-spacing:-.04em}.brand span{color:var(--green-dark)}.meta,.direction,.chart-title span,footer,.empty span{color:var(--muted)}main{max-width:1180px;margin:auto;padding:58px 24px 80px}.eyebrow{font-size:11px;font-weight:500;letter-spacing:.14em;color:var(--green-dark)}h1,h2,h3,strong{font-weight:500}h1{font-size:46px;letter-spacing:-.045em;line-height:1.05;max-width:750px;margin:10px 0 16px}h2{font-size:28px;letter-spacing:-.03em;margin:5px 0}h3{font-size:16px;margin:0}.lede{font-size:17px;color:var(--muted);max-width:720px;margin:0 0 70px}section{border-top:1px solid var(--line);padding:34px 0 48px}.section-head,.chart-title{display:flex;align-items:flex-end;justify-content:space-between;gap:18px}.chart-title{margin:30px 0 13px;align-items:baseline}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;background:var(--panel)}th,td{padding:12px 14px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:500}th:first-child,td:first-child{text-align:left}td strong{display:block}small{display:block;color:var(--muted)}.score{min-width:240px;position:relative}.score span{position:relative;z-index:1;font-variant-numeric:tabular-nums}.score i{position:absolute;left:12px;bottom:7px;height:3px;background:var(--green);display:block}.split{display:grid;grid-template-columns:1.08fr .92fr;gap:36px}.scatter{width:100%;background:var(--panel);display:block}.scatter line{stroke:var(--line);stroke-width:1}.scatter .grid{stroke-dasharray:3 5}.scatter text{fill:var(--text);font-size:11px}.scatter .axis{fill:var(--muted)}.point{fill:var(--green-dark);stroke:var(--panel);stroke-width:2}.point.bounded_retry{fill:var(--green)}.point.maker_verifier{fill:var(--amber)}.positive{color:var(--green-dark)}.negative{color:var(--red)}.heat-title{margin-top:42px}.heatmap .heat{text-align:center;font-weight:500;min-width:110px}.heat.pass{background:color-mix(in srgb,var(--green) 26%,var(--panel))}.heat.mixed{background:color-mix(in srgb,var(--amber) 24%,var(--panel))}.heat.fail{background:color-mix(in srgb,var(--red) 15%,var(--panel))}.empty-cell{color:var(--muted)}.serving{margin-top:12px}.empty{border:1px dashed var(--line);padding:22px;margin-top:25px;display:grid;gap:5px}.empty strong{font-size:16px}footer{border-top:1px solid var(--line);padding-top:20px;font-size:12px;overflow-wrap:anywhere}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}@media(max-width:760px){header{padding:0 16px}.meta{display:none}main{padding:38px 16px 60px}h1{font-size:35px}.lede{margin-bottom:48px}.split{grid-template-columns:1fr}.section-head,.chart-title{align-items:flex-start;flex-direction:column;gap:4px}.table-wrap{overflow:visible}th,td{padding:10px 8px;white-space:normal}.leaderboard th:nth-child(3),.leaderboard td:nth-child(3),.leaderboard th:nth-child(5),.leaderboard td:nth-child(5),.leaderboard th:nth-child(6),.leaderboard td:nth-child(6){display:none}.leaderboard .score{min-width:120px}.comparison-leaderboard th:nth-child(3),.comparison-leaderboard td:nth-child(3){display:table-cell}.comparison-leaderboard th:nth-child(5),.comparison-leaderboard td:nth-child(5),.comparison-leaderboard th:nth-child(6),.comparison-leaderboard td:nth-child(6),.comparison-leaderboard th:nth-child(7),.comparison-leaderboard td:nth-child(7){display:none}.comparison-leaderboard .score{min-width:80px}.transitions th:nth-child(2),.transitions td:nth-child(2),.transitions th:nth-child(6),.transitions td:nth-child(6){display:none}.paired th:nth-child(4),.paired td:nth-child(4),.paired th:nth-child(5),.paired td:nth-child(5){display:none}.heatmap{table-layout:fixed}.heatmap th,.heatmap td{font-size:10px;overflow-wrap:anywhere;padding:8px 4px}.heatmap th:first-child{width:38%}.heatmap .heat{min-width:0}}@media(prefers-color-scheme:dark){:root{--bg:#101310;--panel:#171b18;--text:#eef4ef;--muted:#a4aea6;--line:#303731;--green:#74e45f;--green-dark:#64cf55;--amber:#e5bd55;--red:#eb7770}}
 """

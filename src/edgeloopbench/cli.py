@@ -26,7 +26,7 @@ from .results import (
     summarize,
     validate_results_for_plan,
 )
-from .report import render_report
+from .report import ComparisonError, render_model_comparison, render_report
 from .runner import run_public_tests
 from .tasks import TaskManifestError, load_task_manifest, prepare_task
 
@@ -80,6 +80,19 @@ def build_parser() -> EdgeLoopArgumentParser:
         help="render partial coverage instead of rejecting missing declared runs",
     )
     report.add_argument("--json", action="store_true", dest="as_json")
+
+    compare = subparsers.add_parser(
+        "compare", help="render a paired cross-model loop comparison"
+    )
+    compare.add_argument(
+        "--experiment",
+        action="append",
+        nargs=2,
+        required=True,
+        metavar=("MANIFEST", "RESULTS"),
+    )
+    compare.add_argument("--output", required=True)
+    compare.add_argument("--json", action="store_true", dest="as_json")
 
     run = subparsers.add_parser("run", help="execute missing agent runs from a manifest")
     run.add_argument("manifest")
@@ -167,6 +180,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 print(f"Rendered report to {Path(arguments.output) / 'index.html'}")
             return 0
+        if arguments.command == "compare":
+            experiments = []
+            for manifest_path, results_path in arguments.experiment:
+                plan = load_experiment(manifest_path)
+                records = load_results(results_path)
+                coverage = validate_results_for_plan(records, plan)
+                summary_report = summarize(records, plan, coverage)
+                experiments.append((plan, summary_report, records))
+            render_model_comparison(experiments, arguments.output)
+            payload = {"index": "index.html", "data": "comparison.json"}
+            if arguments.as_json:
+                _print_json(payload)
+            else:
+                print(
+                    f"Rendered model comparison to "
+                    f"{Path(arguments.output) / 'index.html'}"
+                )
+            return 0
         if arguments.command == "run":
             plan = load_experiment(arguments.manifest)
             model = build_ollama_model(plan)
@@ -233,6 +264,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         TaskManifestError,
         OllamaError,
         ExperimentError,
+        ComparisonError,
     ) as error:
         if getattr(arguments, "as_json", False):
             print(

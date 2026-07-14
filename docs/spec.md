@@ -55,8 +55,16 @@ The two preregistered medium-budget contrasts are bounded retry minus direct and
 ```text
 edgeloop validate <experiment.toml> [--json]
 edgeloop summarize <runs.jsonl> --manifest <experiment.toml> [--allow-incomplete] [--json]
+edgeloop compare --experiment <experiment.toml> <runs.jsonl> [--experiment ...] --output <directory> [--json]
 edgeloop doctor [--json]
 ```
+
+`compare` requires at least two complete, manifest-bound effectiveness
+experiments. It varies only the pinned model artifact and rejects differences in
+tasks, strategies, seeds, budgets, generation, controller, edit schema, or
+backend configuration. Weight quantization and effective context must also
+match. Loop deltas are paired against `direct` within each model; agent
+effectiveness and serving efficiency remain separate.
 
 `doctor` collects non-privileged host facts and reports runtime executables. It must not install software, download weights, change memory limits, or start servers.
 
