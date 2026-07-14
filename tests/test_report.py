@@ -134,6 +134,8 @@ class StaticReportTests(unittest.TestCase):
         self.assertIn("Rescued", html)
         self.assertIn("Regressed", html)
         self.assertIn("Serving efficiency is reported separately", html)
+        self.assertIn(".comparison-leaderboard th:nth-child(2)", html)
+        self.assertIn(".transitions{table-layout:fixed}", html)
         self.assertEqual(len(data["experiments"]), 2)
 
         incompatible_plan = replace(
