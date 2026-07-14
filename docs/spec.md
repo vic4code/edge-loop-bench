@@ -77,7 +77,10 @@ edge-loop-bench/
   tests/
 ```
 
-The later controller will add adapters, strategies, tool implementations, schemas, task worktrees, and analysis modules without changing the v0.1 causal boundary.
+The runnable controller adds adapters, strategies, tool implementations,
+schemas, isolated task worktrees, and report modules without changing the v0.1
+causal boundary. Its accepted requirements are defined in
+[`runnable-experiment-spec.md`](runnable-experiment-spec.md).
 
 ## 6. Data contracts
 
@@ -169,10 +172,10 @@ The scaffold is complete when:
 
 ## 11. Open questions for the first real run
 
-- Which MacBook Air chip and unified-memory tier will host the study?
+- The first host is the inventoried M4 MacBook Air with 16 GB unified memory.
 - Is Gemma 4 E2B or E4B the best first quality target after the Qwen3 4B shakeout?
 - Which exact GGUF or MLX revisions are available and license-compatible when the protocol freezes?
-- Should the first paired experiment use Ollama for practicality or vLLM-Metal for tighter scheduler telemetry?
+- The first paired experiment uses Ollama; vLLM-Metal remains a later serving ablation.
 - Can energy be measured reproducibly without changing the workload enough to bias it?
 
 These choices change manifests, not the benchmark's core semantics.

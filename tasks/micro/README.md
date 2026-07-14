@@ -1,6 +1,10 @@
-# Micro task suite plan
+# MicroRepair-6 task suite
 
-The v0.1 scaffold names six task slots but does not yet include executable agent worktrees. This prevents placeholder tasks from being mistaken for a benchmark.
+The v0.1 scaffold names six task slots. Executable task bundles are now being
+implemented under the accepted
+[`runnable experiment specification`](../../docs/runnable-experiment-spec.md).
+Until every qualification gate passes, this remains a harness shakeout suite,
+not a published benchmark.
 
 ## MVP composition
 
@@ -15,7 +19,11 @@ The v0.1 scaffold names six task slots but does not yet include executable agent
 
 ## Acceptance contract
 
-Each future task directory must include a machine-readable manifest, initial repository archive or generator, public tests, dependency lockfile, license/provenance file, and a gold patch. Hidden tests live in an evaluator-owned directory outside the agent-visible worktree.
+Each public task directory includes a machine-readable manifest, initial
+repository archive or deterministic generator, public tests, dependency
+lockfile, and license/provenance file. Gold patches and hidden tests live under
+an evaluator-owned root outside the agent-visible worktree and must not leak
+through prompts, path names, or logs.
 
 The task must be:
 
