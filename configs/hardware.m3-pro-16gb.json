@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-07-14T08:44:26Z",
+  "host_id": "local-m3-pro-16gb",
+  "machine_name": "MacBook Pro",
+  "machine_identifier": "Mac15,3",
+  "architecture": "arm64",
+  "chip": "Apple M3",
+  "cpu_core_count": 8,
+  "gpu_core_count": 10,
+  "unified_memory_bytes": 17179869184,
+  "macos_version": "26.4",
+  "macos_build": "25E246",
+  "power_source": "ac",
+  "low_power_mode": false,
+  "ambient_temperature_c": null,
+  "qualification_status": "inventory_only",
+  "notes": "Serial number, hardware UUID, and display identifiers are intentionally omitted."
+}

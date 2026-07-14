@@ -45,7 +45,7 @@ class StaticReportTests(unittest.TestCase):
             id="demo-second-model",
             model=replace(
                 plan.model,
-                id="second-model",
+                id="gemma4:12b-it-q4_K_M",
                 revision="sha256:" + "a" * 64,
                 artifact_sha256="sha256:" + "a" * 64,
             ),
@@ -94,6 +94,7 @@ class StaticReportTests(unittest.TestCase):
         self.assertIn("0% verified success", html)
         self.assertIn("Baseline → loop uplift", html)
         self.assertIn("Direct baseline", html)
+        self.assertIn("Gemma 4 12B", html)
         self.assertIn("Success Δ", html)
         self.assertIn("Token cost", html)
         self.assertIn("Controller flow", html)

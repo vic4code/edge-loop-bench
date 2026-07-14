@@ -1,4 +1,4 @@
-# Three-model loop comparison on M4 MacBook Air
+# Three-model loop comparison on M3 MacBook Pro
 
 Run date: **2026-07-14**
 
@@ -8,7 +8,7 @@ All 216 declared runs completed with zero missing or invalid records.
 
 ## Frozen environment
 
-- Host: M4 MacBook Air, 16 GB unified memory, 8-core GPU.
+- Host: M3 MacBook Pro (Mac15,3), 16 GB unified memory, 10-core GPU.
 - Runtime: Ollama 0.31.1, loopback only, one loaded model and one parallel
   request.
 - Serving controls: 4,096-token context, Flash Attention enabled, Q8 KV cache.

@@ -506,6 +506,7 @@ def _short_model_label(model: str) -> str:
         "qwen3.5:4b": "Qwen 4B",
         "qwen3.5:9b": "Qwen 9B",
         "phi4-mini": "Phi-4 mini",
+        "gemma4:12b-it-q4_K_M": "Gemma 4 12B",
     }
     return replacements.get(normalized, normalized)
 
