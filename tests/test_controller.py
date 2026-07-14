@@ -13,6 +13,7 @@ from edgeloopbench.tasks import prepare_task
 class StrategyControllerTests(unittest.TestCase):
     project_root = Path(__file__).parents[1]
     task_root = project_root / "tasks/micro/python-localized-001"
+    adversarial_task_root = project_root / "tasks/micro/python-adversarial-001"
     fixed_source = '''"""One-based pagination helpers."""
 
 
@@ -106,6 +107,46 @@ def clamp_page(page: int, total_pages: int) -> int:
 
             self.assertEqual(result.run_status, "budget_exhausted")
             self.assertEqual(result.prompt_tokens, 600)
+
+    def test_maker_verifier_reviews_publicly_passing_superficial_fix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "worktree"
+            task = prepare_task(self.adversarial_task_root, worktree)
+            prompts: list[str] = []
+            superficial = '''"""Canonical keys for human-readable labels."""
+
+
+def canonical_key(label: str) -> str:
+    """Normalize *label* for use as a stable key."""
+
+    normalized = label.strip().lower()
+    if not normalized:
+        raise ValueError("label must contain text")
+    return normalized.replace(" ", "-").replace("--", "-")
+'''
+            robust = superficial.replace(
+                'normalized.replace(" ", "-").replace("--", "-")',
+                '"-".join(normalized.split())',
+            )
+            outputs = [superficial, robust]
+
+            def model(prompt: str, seed: int, max_output_tokens: int) -> ModelOutput:
+                prompts.append(prompt)
+                content = outputs.pop(0)
+                return ModelOutput(
+                    json.dumps({"edits": [{"path": "src/keys.py", "content": content}]}),
+                    "", 500, 100, 1_000_000_000,
+                )
+
+            result = run_strategy(
+                "maker_verifier", worktree, task, model, self.budget(2), seed=11,
+                event_log=Path(directory) / "events.jsonl",
+                evaluate=lambda root, _task: ".split()" in (root / "src/keys.py").read_text(),
+            )
+
+            self.assertTrue(result.objective_success)
+            self.assertEqual((result.model_calls, result.public_test_runs), (2, 2))
+            self.assertIn("Act as verifier", prompts[1])
 
 
 if __name__ == "__main__":

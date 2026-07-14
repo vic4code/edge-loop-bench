@@ -58,7 +58,7 @@ def run_strategy(
 ) -> StrategyResult:
     """Run direct or bounded-retry using only sanitized public feedback."""
 
-    if strategy not in {"direct", "bounded_retry"}:
+    if strategy not in {"direct", "bounded_retry", "maker_verifier"}:
         raise ValueError(f"unsupported runnable strategy: {strategy}")
     root = Path(worktree).resolve()
     started_ns = time.monotonic_ns()
@@ -90,7 +90,12 @@ def run_strategy(
     failure_reason: str | None = None
     objective_success = False
 
-    call_limit = 1 if strategy == "direct" else budget.model_calls
+    if strategy == "direct":
+        call_limit = 1
+    elif strategy == "maker_verifier":
+        call_limit = min(2, budget.model_calls)
+    else:
+        call_limit = budget.model_calls
     for _attempt in range(call_limit):
         remaining_completion = budget.completion_tokens - completion_tokens
         if remaining_completion <= 0:
@@ -149,6 +154,14 @@ def run_strategy(
             output=public.output,
         )
         if public.passed:
+            if strategy == "maker_verifier" and model_calls == 1:
+                record("verification_requested")
+                prompt = build_agent_prompt(root, task) + (
+                    "\n\nAct as verifier. Re-read the stated requirements and the current "
+                    "implementation even though public tests passed. Return complete, robust "
+                    "replacement edits as JSON only."
+                )
+                continue
             try:
                 objective_success = bool(evaluate(root, task))
             except Exception:
@@ -161,15 +174,20 @@ def run_strategy(
             failure_reason = None if objective_success else "isolated_evaluation_failed"
             break
         failure_reason = "public_tests_failed"
+        role = "Act as verifier. " if strategy == "maker_verifier" else ""
         prompt = build_agent_prompt(root, task) + (
-            "\n\nThe previous edit failed public tests. Sanitized output:\n" + public.output +
-            "\nReturn corrected JSON only."
+            "\n\n" + role + "The previous edit failed public tests. Sanitized output:\n" +
+            public.output + "\nReturn corrected JSON only."
         )
 
     status = "completed"
     if failure_reason is not None and failure_reason.endswith("budget_exhausted"):
         status = "budget_exhausted"
-    elif not objective_success and model_calls >= call_limit and strategy == "bounded_retry":
+    elif (
+        not objective_success
+        and model_calls >= call_limit
+        and strategy in {"bounded_retry", "maker_verifier"}
+    ):
         status = "budget_exhausted"
     return _finish(
         record, started_ns, status, objective_success, failure_reason,
