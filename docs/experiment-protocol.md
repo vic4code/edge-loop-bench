@@ -1,5 +1,12 @@
 # Experiment protocol
 
+This file records the accepted v0.1 protocol. The proposed v0.2 confirmatory
+design resolves the qualification controller's edit-capable verifier, repeated
+temperature-zero seeds, candidate preservation, and candidate-level verifier
+diagnostics. See [`experiment-design-v0.2.md`](experiment-design-v0.2.md). Until
+ADR 009 is accepted and implemented, v0.1 results must retain their exact tested
+controller label.
+
 ## 1. Experimental tracks
 
 ### Effectiveness track

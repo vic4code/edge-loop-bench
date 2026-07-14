@@ -144,6 +144,13 @@ PYTHONPATH=src python3 -m edgeloopbench compare \
 The completed three-model qualification and its interpretation boundary are
 recorded in [the run note](docs/runs/three-model-loop-comparison.md).
 
+The proposed confirmatory protocol—including deterministic Retry packets, a
+read-only Maker–Verifier state machine, candidate preservation, task-level
+statistics, and Mac run controls—is defined in the
+[v0.2 experiment design](docs/experiment-design-v0.2.md). Existing qualification
+results remain bound to their old controller revision and are not pooled with
+v0.2.
+
 Summaries reject undeclared, over-budget, manifest-mismatched, or silently missing runs by default. Manifest-bound agent results must report the largest context observed in any model call; deployment runs must also satisfy their declared wall-time and energy budgets. Use `--allow-incomplete` only when the resulting coverage counts are intentionally part of an exploratory partial analysis.
 
 Inspect the protocol before interpreting any numbers:

@@ -180,7 +180,8 @@ The scaffold is complete when:
 
 ## 11. Open questions for the first real run
 
-- The first host is the inventoried M4 MacBook Air with 16 GB unified memory.
+- The first host is the inventoried M3 MacBook Pro (Mac15,3) with 16 GB unified
+  memory and a 10-core GPU.
 - Is Gemma 4 E2B or E4B the best first quality target after the Qwen3 4B shakeout?
 - Which exact GGUF or MLX revisions are available and license-compatible when the protocol freezes?
 - The first paired experiment uses Ollama; vLLM-Metal remains a later serving ablation.

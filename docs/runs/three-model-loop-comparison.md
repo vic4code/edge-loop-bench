@@ -96,3 +96,13 @@ primary comparison because Direct, Bounded Retry, and Maker–Verifier all score
 Serving efficiency is not inferred from this table. GPU throughput, memory,
 thermal behavior, and energy require fixed-request serving ablations with one
 factor changed at a time.
+
+## Next experiment
+
+These results remain bound to the qualification controller revision above. The
+proposed [v0.2 experiment design](../experiment-design-v0.2.md) replaces the
+edit-capable review-and-revise call with a read-only structured verifier,
+preserves public-passing candidates, treats tasks rather than repeated
+temperature-zero seeds as the inferential unit, and adds candidate-level rescue
+and regression diagnostics. New results require a new controller revision and
+manifest and must not be pooled with this table.

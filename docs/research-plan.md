@@ -104,7 +104,9 @@ The small control proves the harness. It does not need to be the final research 
 
 ### Optimization gate
 
-An optimization advances only if it improves a preregistered target without unacceptable success-rate or stability regression. Upstream performance claims are hypotheses until reproduced on the target MacBook Air.
+An optimization advances only if it improves a preregistered target without
+unacceptable success-rate or stability regression. Upstream performance claims
+are hypotheses until reproduced on the declared target Apple Silicon host.
 
 ## Publishable outputs
 
