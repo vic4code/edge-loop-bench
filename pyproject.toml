@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "edgeloopbench"
+version = "0.1.0"
+description = "A reproducible benchmark for budget-aware agent loops on Apple Silicon."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "EdgeLoopBench contributors" }]
+keywords = ["agents", "apple-silicon", "benchmark", "llm", "mlx", "ollama", "vllm"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.scripts]
+edgeloop = "edgeloopbench.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/edgeloopbench"]

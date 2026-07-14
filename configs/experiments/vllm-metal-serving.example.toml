@@ -1,0 +1,51 @@
+schema_version = 1
+id = "vllm-metal-serving-example"
+track = "serving"
+draft = true
+
+[model]
+id = "mlx-community/gemma-4-E2B-it"
+revision = "UNPINNED"
+artifact_sha256 = "UNPINNED"
+weight_quantization = "REPLACE_ME"
+context_limit_tokens = 16384
+
+[backend]
+name = "vllm-metal"
+version = "UNPINNED"
+artifact_sha256 = "UNPINNED"
+command = [
+  "vllm",
+  "serve",
+  "REPLACE_WITH_PINNED_MODEL_PATH",
+  "--host",
+  "127.0.0.1",
+  "--port",
+  "8000",
+  "--max-model-len",
+  "16384",
+]
+
+[backend.environment]
+VLLM_METAL_USE_PAGED_ATTENTION = "1"
+VLLM_METAL_MEMORY_FRACTION = "0.7"
+
+[[request_shapes]]
+name = "short-128"
+prompt_tokens = 512
+completion_tokens = 128
+
+[[request_shapes]]
+name = "medium-512"
+prompt_tokens = 4096
+completion_tokens = 512
+
+[[request_shapes]]
+name = "long-512"
+prompt_tokens = 15872
+completion_tokens = 512
+
+[measurement]
+warmups = 3
+repetitions = 10
+concurrency = 1

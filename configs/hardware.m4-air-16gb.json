@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-07-13T16:38:11Z",
+  "host_id": "local-m4-air-16gb",
+  "machine_name": "MacBook Air",
+  "machine_identifier": "Mac16,12",
+  "architecture": "arm64",
+  "chip": "Apple M4",
+  "cpu_core_count": 10,
+  "gpu_core_count": 8,
+  "unified_memory_bytes": 17179869184,
+  "macos_version": "26.3",
+  "macos_build": "25D125",
+  "power_source": "unknown",
+  "low_power_mode": null,
+  "ambient_temperature_c": null,
+  "qualification_status": "inventory_only",
+  "notes": "Serial number, platform UUID, and display identifiers are intentionally omitted. Complete power and thermal fields before a measured run."
+}

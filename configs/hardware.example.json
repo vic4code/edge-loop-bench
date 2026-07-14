@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "REPLACE_ME",
+  "host_id": "anonymous-macbook-air",
+  "chip": "REPLACE_ME",
+  "cpu_core_count": null,
+  "gpu_core_count": null,
+  "unified_memory_bytes": null,
+  "macos_version": "REPLACE_ME",
+  "macos_build": "REPLACE_ME",
+  "power_source": "ac",
+  "low_power_mode": false,
+  "ambient_temperature_c": null,
+  "notes": "Replace placeholders and document any manual system setting changes."
+}

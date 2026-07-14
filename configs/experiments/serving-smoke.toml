@@ -1,0 +1,47 @@
+schema_version = 1
+id = "apple-silicon-serving-smoke"
+track = "serving"
+draft = true
+
+[model]
+id = "gemma-4-e2b-or-e4b"
+revision = "UNPINNED"
+artifact_sha256 = "UNPINNED"
+weight_quantization = "q4-candidate"
+context_limit_tokens = 16384
+
+[backend]
+name = "ollama"
+version = "UNPINNED"
+artifact_sha256 = "UNPINNED"
+command = ["ollama", "serve"]
+
+[backend.environment]
+OLLAMA_HOST = "127.0.0.1:11434"
+OLLAMA_NO_CLOUD = "1"
+OLLAMA_NUM_PARALLEL = "1"
+OLLAMA_MAX_LOADED_MODELS = "1"
+OLLAMA_KEEP_ALIVE = "-1"
+OLLAMA_CONTEXT_LENGTH = "16384"
+OLLAMA_FLASH_ATTENTION = "1"
+OLLAMA_KV_CACHE_TYPE = "q8_0"
+
+[[request_shapes]]
+name = "short-128"
+prompt_tokens = 512
+completion_tokens = 128
+
+[[request_shapes]]
+name = "medium-512"
+prompt_tokens = 4096
+completion_tokens = 512
+
+[[request_shapes]]
+name = "long-512"
+prompt_tokens = 15872
+completion_tokens = 512
+
+[measurement]
+warmups = 3
+repetitions = 10
+concurrency = 1
