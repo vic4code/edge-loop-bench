@@ -1,0 +1,8 @@
+diff --git a/src/keys.py b/src/keys.py
+--- a/src/keys.py
++++ b/src/keys.py
+@@ -8,3 +8,3 @@ def canonical_key(label: str) -> str:
+     if not normalized:
+         raise ValueError("label must contain text")
+-    return normalized.replace(" ", "-")
++    return "-".join(normalized.split())
