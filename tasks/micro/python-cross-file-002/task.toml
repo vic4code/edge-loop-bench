@@ -4,7 +4,7 @@ language = "python"
 category = "cross-file"
 source_type = "generated_mutation"
 license = "MIT"
-initial_commit = "75b8309b8aacb8e5fbc23808fb4ef899bb95eb7f"
+initial_commit = "b71a7cadd0ce2e6d12bcda24ec56085a11cf1879"
 gold_patch_sha256 = "sha256:216e06dc50009765ddd9d97112a5c8ff87d88626d04fec3198908f66cce4fd1f"
 
 allowed_paths = ["src/**"]

@@ -2,7 +2,8 @@
 
 `Inventory.reserve(quantity)` moves units from `available` to `reserved`.
 Both fields and the total reported by `audit.total_units` must remain
-consistent. Invalid quantities must not mutate state.
+consistent. A non-positive quantity or a quantity above `available` raises
+`ValueError` without mutating state.
 
 Fix the implementation under `src/`. Do not modify tests.
 
