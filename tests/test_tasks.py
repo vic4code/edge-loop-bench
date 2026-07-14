@@ -182,5 +182,50 @@ class TaskPreparationTests(unittest.TestCase):
             self.assertEqual(hidden.returncode, 0, hidden.stderr)
 
 
+class MicroRepairSuiteTests(unittest.TestCase):
+    project_root = Path(__file__).parents[1]
+    task_ids = (
+        "python-localized-001",
+        "python-localized-002",
+    )
+
+    def test_every_task_fails_initially_and_gold_passes_isolated_evaluation(self) -> None:
+        for task_id in self.task_ids:
+            with self.subTest(task_id=task_id), tempfile.TemporaryDirectory() as directory:
+                task_root = self.project_root / "tasks/micro" / task_id
+                evaluator_root = self.project_root / "evaluators" / task_id
+                worktree = Path(directory) / "worktree"
+                task = prepare_task(task_root, worktree)
+
+                initial = subprocess.run(
+                    task.public_test.command, cwd=worktree, check=False,
+                    capture_output=True, text=True,
+                    timeout=task.public_test.timeout_seconds,
+                )
+                self.assertNotEqual(initial.returncode, 0)
+
+                gold_patch = evaluator_root / "gold.patch"
+                self.assertEqual(
+                    f"sha256:{sha256(gold_patch.read_bytes()).hexdigest()}",
+                    task.gold_patch_sha256,
+                )
+                subprocess.run(
+                    ["git", "apply", str(gold_patch)], cwd=worktree, check=True,
+                    capture_output=True, text=True,
+                )
+                public = subprocess.run(
+                    task.public_test.command, cwd=worktree, check=False,
+                    capture_output=True, text=True,
+                    timeout=task.public_test.timeout_seconds,
+                )
+                hidden = subprocess.run(
+                    ["python3", "-m", "unittest", "discover", "-s", str(evaluator_root / "tests"), "-v"],
+                    cwd=worktree, check=False, capture_output=True, text=True,
+                    timeout=task.hidden_evaluation.timeout_seconds,
+                )
+                self.assertEqual(public.returncode, 0, public.stderr)
+                self.assertEqual(hidden.returncode, 0, hidden.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,9 @@
+diff --git a/src/tags.py b/src/tags.py
+--- a/src/tags.py
++++ b/src/tags.py
+@@ -7 +7,4 @@ def parse_tags(text: str) -> tuple[str, ...]:
+-    return tuple(part.strip() for part in text.split(","))
++    tags = tuple(part.strip() for part in text.split(",") if part.strip())
++    if not tags:
++        raise ValueError("at least one tag is required")
++    return tags
