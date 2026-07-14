@@ -22,7 +22,7 @@ Pinned weight blobs:
 | Model | Weight blob SHA-256 |
 | --- | --- |
 | Qwen3.5 4B | `81fb60c7daa80fc1123380b98970b320ae233409f0f71a72ed7b9b0d62f40490` |
-| Phi-4-mini 3.8B | `3c168af1dea0a414299c7d9077e100ac763370e5a98b3c53801a958a47f0a5db` |
+| Gemma 4 12B | `1278394b693672ac2799eadc9a83fd98259a6a88a40acfb1dcaa6c6fc895a606` |
 | Qwen3.5 9B | `dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c` |
 
 ## Agent-effectiveness result
@@ -35,19 +35,19 @@ the same success rates; costs differ when a controller uses additional calls.
 | Qwen3.5 4B | Direct | 66.7% | 779 | 779 | 8.8 s | 8.5 s |
 | Qwen3.5 4B | Bounded Retry | 83.3% | 1,466 | 1,988 | 14.9 s | 19.0 s |
 | Qwen3.5 4B | Maker–Verifier | 50.0% | 1,667 | 1,667 | 17.9 s | 17.9 s |
-| Phi-4-mini | Direct | 0.0% | 747 | 747 | 6.8 s | 5.9 s |
-| Phi-4-mini | Bounded Retry | 0.0% | 2,656 | 5,549 | 17.9 s | 33.0 s |
-| Phi-4-mini | Maker–Verifier | 0.0% | 1,741 | 1,741 | 12.7 s | 12.8 s |
+| Gemma 4 12B | Direct | 83.3% | 827 | 827 | 27.8 s | 29.8 s |
+| Gemma 4 12B | Bounded Retry | 83.3% | 1,182 | 1,716 | 33.9 s | 51.2 s |
+| Gemma 4 12B | Maker–Verifier | 66.7% | 1,743 | 1,743 | 52.7 s | 54.8 s |
 | Qwen3.5 9B | Direct | 100.0% | 826 | 826 | 18.3 s | 18.1 s |
 | Qwen3.5 9B | Bounded Retry | 100.0% | 826 | 826 | 17.7 s | 17.2 s |
 | Qwen3.5 9B | Maker–Verifier | 83.3% | 1,766 | 1,766 | 37.7 s | 35.8 s |
 
 Relative to Direct, Qwen3.5 4B Bounded Retry rescued 2 of 12 paired
 observations and regressed none in each budget tier. Its Maker–Verifier arm
-rescued none and regressed 2. Phi-4-mini produced no transitions because every
-arm failed every observation. Qwen3.5 9B Bounded Retry stopped after its
-successful first attempts, while Maker–Verifier regressed 2 observations per
-budget tier.
+rescued none and regressed 2. Gemma 4 12B Bounded Retry produced no outcome
+transitions, while Maker–Verifier regressed 2 observations in each budget tier.
+Qwen3.5 9B Bounded Retry stopped after its successful first attempts, while
+Maker–Verifier regressed 2 observations per budget tier.
 
 ### Medium-budget baseline uplift
 
@@ -60,8 +60,8 @@ quality/cost trade-off, not a free performance gain.
 | --- | --- | ---: | ---: | ---: |
 | Qwen3.5 4B | Bounded Retry | +16.7 pp | 2.55x | 2.24x |
 | Qwen3.5 4B | Maker–Verifier | -16.7 pp | 2.14x | 2.10x |
-| Phi-4-mini | Bounded Retry | +0.0 pp | 7.43x | 5.64x |
-| Phi-4-mini | Maker–Verifier | +0.0 pp | 2.33x | 2.19x |
+| Gemma 4 12B | Bounded Retry | +0.0 pp | 2.08x | 1.72x |
+| Gemma 4 12B | Maker–Verifier | -16.7 pp | 2.11x | 1.84x |
 | Qwen3.5 9B | Bounded Retry | +0.0 pp | 1.00x | 0.95x |
 | Qwen3.5 9B | Maker–Verifier | -16.7 pp | 2.14x | 1.98x |
 
@@ -85,9 +85,13 @@ can repair a patch from hidden-test feedback.
 
 This is a qualification over six deterministic repair tasks, not a broad claim
 about general coding ability. It supports a narrower conclusion: bounded retry
-helped the 4B model when failures were recoverable, could not rescue the weaker
-Phi model, and added no success when the 9B model already solved every Direct
-episode. The tested Maker–Verifier controller was harmful for both Qwen models.
+helped the 4B model when failures were recoverable, but added no success for
+Gemma 4 12B or when the 9B model already solved every Direct episode. The tested
+Maker–Verifier controller was harmful for all three primary models.
+
+Phi-4-mini remains archived as qualification evidence but is excluded from the
+primary comparison because Direct, Bounded Retry, and Maker–Verifier all scored
+0%, leaving no outcome variation for estimating a loop effect.
 
 Serving efficiency is not inferred from this table. GPU throughput, memory,
 thermal behavior, and energy require fixed-request serving ablations with one

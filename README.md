@@ -136,7 +136,7 @@ artifact to vary:
 ```bash
 PYTHONPATH=src python3 -m edgeloopbench compare \
   --experiment configs/experiments/smoke.toml results/qwen35-4b-full-runs.jsonl \
-  --experiment configs/experiments/phi4-mini-smoke.toml results/phi4-mini-full-runs.jsonl \
+  --experiment configs/experiments/gemma4-12b-smoke.toml results/gemma4-12b-full-runs.jsonl \
   --experiment configs/experiments/qwen35-9b-smoke.toml results/qwen35-9b-full-runs.jsonl \
   --output results/three-model-loop-comparison
 ```
