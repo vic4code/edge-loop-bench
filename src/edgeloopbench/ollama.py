@@ -27,6 +27,7 @@ class OllamaGenerateRequest:
     prompt: str
     context_window: int
     max_output_tokens: int
+    thinking: bool
     seed: int = 0
     temperature: float = 0.0
 
@@ -39,6 +40,8 @@ class OllamaGenerateRequest:
             raise ValueError("context_window must be positive")
         if self.max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive")
+        if not isinstance(self.thinking, bool):
+            raise ValueError("thinking must be a boolean")
         if not math.isfinite(self.temperature) or self.temperature < 0:
             raise ValueError("temperature must be finite and nonnegative")
 
@@ -47,6 +50,7 @@ class OllamaGenerateRequest:
 class OllamaGenerateResponse:
     model: str
     text: str
+    thinking: str
     done_reason: str | None
     prompt_tokens: int
     completion_tokens: int
@@ -83,6 +87,7 @@ class OllamaClient:
             "model": request.model,
             "prompt": request.prompt,
             "stream": False,
+            "think": request.thinking,
             "options": {
                 "num_ctx": request.context_window,
                 "num_predict": request.max_output_tokens,
@@ -133,6 +138,9 @@ def _parse_generate_response(
     text = raw.get("response")
     if not isinstance(text, str):
         raise OllamaError("Ollama response.response must be a string")
+    thinking = raw.get("thinking", "")
+    if not isinstance(thinking, str):
+        raise OllamaError("Ollama response.thinking must be a string")
     model = raw.get("model", expected_model)
     if not isinstance(model, str) or model != expected_model:
         raise OllamaError("Ollama response model does not match the request")
@@ -142,6 +150,7 @@ def _parse_generate_response(
     return OllamaGenerateResponse(
         model=model,
         text=text,
+        thinking=thinking,
         done_reason=done_reason,
         prompt_tokens=_nonnegative_integer(raw, "prompt_eval_count"),
         completion_tokens=_nonnegative_integer(raw, "eval_count"),

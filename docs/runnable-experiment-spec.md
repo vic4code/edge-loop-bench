@@ -21,6 +21,9 @@ loop gains separately from serving efficiency.
 - Concurrency: one model request and one loaded model.
 - Weight quantization and KV-cache quantization remain distinct manifest
   fields. The initial KV-cache setting is `q8_0`.
+- Ollama's thinking mode is an explicit, pinned request field. The control
+  shakeout starts with thinking disabled; a thinking-enabled comparison is a
+  separate controller ablation, not an unrecorded backend default.
 
 `qwen3.5:9b` is a later primary-model candidate, not part of the control-model
 shakeout. Kimi may be evaluated only through a separately labeled
@@ -117,6 +120,9 @@ must not be collapsed into one score.
 
 - Always append raw events and derive summaries and charts from them.
 - Always count logical prompt tokens even when Ollama reuses a prefix cache.
+- Preserve Ollama `thinking` and final-response text as separate raw fields;
+  its completion-token count covers the complete generated stream and is not
+  reconstructed from either visible string.
 - Always keep the model-facing worktree free of evaluator assets and paths.
 - Ask before downloading another multi-gigabyte model or changing privileged
   macOS memory settings.
