@@ -90,6 +90,14 @@ CALIBRATION_POPULATION_SHA256 = (
 SOURCE_CORPUS_SHA256 = (
     "sha256:b71d029f20453f96a2872b9c1a79d716f48443009acbbf916d63d0d09efc5391"
 )
+STATIC_EXCLUSION_AUDIT_RELATIVE_PATH = (
+    "docs/audits/intercode-bash-static-exclusions-v1.json"
+)
+STATIC_EXCLUSION_AUDIT_SHA256 = (
+    "sha256:ab8e1121971ff22426afa3394bb5469bae2ec7d3c6c45e323ecfe55237feb35e"
+)
+_LOADER_CONSTRUCTION_SEAL = object()
+_PRIVATE_REFERENCE_SEAL = object()
 
 
 class InterCodeSourceError(ValueError):
@@ -117,6 +125,13 @@ class PrivateTaskReference:
 
     __slots__ = ()
 
+    def __new__(cls, *, _source_seal: object | None = None) -> PrivateTaskReference:
+        if _source_seal is not _PRIVATE_REFERENCE_SEAL:
+            raise InterCodeSourceError(
+                "private task references are source-owned capabilities"
+            )
+        return super().__new__(cls)
+
     def __repr__(self) -> str:
         return "<PrivateTaskReference opaque>"
 
@@ -137,10 +152,12 @@ class InterCodeSource:
         "_calibration_tasks",
         "_gold_by_reference",
         "_reference_by_task_id",
+        "_task_by_reference",
         "_tasks",
         "calibration_population_sha256",
         "population_sha256",
         "source_sha256",
+        "static_exclusion_audit_sha256",
     )
 
     def __init__(
@@ -152,21 +169,35 @@ class InterCodeSource:
         population_sha256: str,
         calibration_population_sha256: str,
         source_sha256: str,
+        static_exclusion_audit_sha256: str = STATIC_EXCLUSION_AUDIT_SHA256,
+        _loader_seal: object | None = None,
     ) -> None:
+        if _loader_seal is not _LOADER_CONSTRUCTION_SEAL:
+            raise InterCodeSourceError(
+                "InterCodeSource construction is loader-sealed; "
+                "use load_intercode_source()"
+            )
         self._tasks = tuple(tasks)
         self._calibration_tasks = tuple(calibration_tasks)
         self.population_sha256 = population_sha256
         self.calibration_population_sha256 = calibration_population_sha256
         self.source_sha256 = source_sha256
+        self.static_exclusion_audit_sha256 = static_exclusion_audit_sha256
 
         references: dict[str, PrivateTaskReference] = {}
         private: dict[PrivateTaskReference, str] = {}
+        task_by_reference: dict[PrivateTaskReference, PublicBashTask] = {}
+        task_by_id = {
+            task.task_id: task for task in (*self._tasks, *self._calibration_tasks)
+        }
         for task_id, gold in gold_by_task_id.items():
-            reference = PrivateTaskReference()
+            reference = PrivateTaskReference(_source_seal=_PRIVATE_REFERENCE_SEAL)
             references[task_id] = reference
             private[reference] = gold
-        self._reference_by_task_id = references
-        self._gold_by_reference = private
+            task_by_reference[reference] = task_by_id[task_id]
+        self._reference_by_task_id = MappingProxyType(references)
+        self._gold_by_reference = MappingProxyType(private)
+        self._task_by_reference = MappingProxyType(task_by_reference)
 
     @property
     def tasks(self) -> tuple[PublicBashTask, ...]:
@@ -194,6 +225,23 @@ class InterCodeSource:
                 "private task reference does not belong to this source"
             ) from error
 
+    def qualification_identity(
+        self, reference: PrivateTaskReference
+    ) -> tuple[PublicBashTask, str]:
+        """Bind qualification to a source-owned capability without returning gold."""
+
+        try:
+            task = self._task_by_reference[reference]
+        except (KeyError, TypeError) as error:
+            raise InterCodeSourceError(
+                "private task reference does not belong to this source"
+            ) from error
+        payload = (
+            "edgeloopbench:qualification-capability:v1\n"
+            f"{self.source_sha256}\n{task.task_id}"
+        ).encode("utf-8")
+        return task, "sha256:" + hashlib.sha256(payload).hexdigest()
+
 
 def load_intercode_source(project_root: str | Path | None = None) -> InterCodeSource:
     """Load the exact pinned task corpus without performing network access."""
@@ -204,6 +252,7 @@ def load_intercode_source(project_root: str | Path | None = None) -> InterCodeSo
         else Path(__file__).resolve().parents[2]
     )
     payloads = _verify_vendor_inventory(root)
+    static_exclusion_audit_sha256 = _verify_static_exclusion_audit(root)
 
     source_rows: list[tuple[str, int, _SourceRow]] = []
     for number in range(1, 5):
@@ -275,7 +324,40 @@ def load_intercode_source(project_root: str | Path | None = None) -> InterCodeSo
         population_sha256=population_sha256,
         calibration_population_sha256=calibration_sha256,
         source_sha256=source_sha256,
+        static_exclusion_audit_sha256=static_exclusion_audit_sha256,
+        _loader_seal=_LOADER_CONSTRUCTION_SEAL,
     )
+
+
+def _verify_static_exclusion_audit(root: Path) -> str:
+    """Verify the exact committed, gold-free static exclusion audit artifact."""
+
+    try:
+        resolved_root = root.resolve(strict=True)
+        path = resolved_root / STATIC_EXCLUSION_AUDIT_RELATIVE_PATH
+        if path.is_symlink():
+            raise InterCodeSourceError("static exclusion audit must not be a symlink")
+        resolved_path = path.resolve(strict=True)
+        resolved_path.relative_to(resolved_root)
+        if not resolved_path.is_file():
+            raise InterCodeSourceError("static exclusion audit is not a regular file")
+        with resolved_path.open("rb") as handle:
+            payload = handle.read(MAX_VENDOR_FILE_BYTES + 1)
+    except FileNotFoundError as error:
+        raise InterCodeSourceError("missing static exclusion audit artifact") from error
+    except InterCodeSourceError:
+        raise
+    except (OSError, ValueError) as error:
+        raise InterCodeSourceError("static exclusion audit is unavailable") from error
+    if len(payload) > MAX_VENDOR_FILE_BYTES:
+        raise InterCodeSourceError("static exclusion audit exceeds the safety limit")
+    actual = "sha256:" + hashlib.sha256(payload).hexdigest()
+    if actual != STATIC_EXCLUSION_AUDIT_SHA256:
+        raise InterCodeSourceError(
+            "static exclusion audit SHA-256 mismatch: "
+            f"expected {STATIC_EXCLUSION_AUDIT_SHA256}, got {actual}"
+        )
+    return actual
 
 
 def _verify_vendor_inventory(root: Path) -> dict[str, bytes]:

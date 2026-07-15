@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import importlib
 import json
 import shutil
@@ -19,7 +20,10 @@ from edgeloopbench.intercode_source import (
     NL2BASH_REVISION,
     PUBLIC_POPULATION_SHA256,
     SOURCE_CORPUS_SHA256,
+    STATIC_EXCLUSION_AUDIT_RELATIVE_PATH,
+    STATIC_EXCLUSION_AUDIT_SHA256,
     VENDORED_FILE_SHA256,
+    InterCodeSource,
     InterCodeSourceError,
     _decode_task_rows,
     load_intercode_source,
@@ -84,6 +88,10 @@ class InterCodeSourceTests(unittest.TestCase):
             self.source.calibration_population_sha256,
         )
         self.assertEqual(SOURCE_CORPUS_SHA256, self.source.source_sha256)
+        self.assertEqual(
+            STATIC_EXCLUSION_AUDIT_SHA256,
+            self.source.static_exclusion_audit_sha256,
+        )
         self.assertEqual(self.source.population_sha256, second.population_sha256)
         self.assertEqual(self.source.source_sha256, second.source_sha256)
 
@@ -117,12 +125,44 @@ class InterCodeSourceTests(unittest.TestCase):
         gold = self.source.gold_for_evaluator(reference)
         self.assertTrue(gold)
         self.assertEqual("<PrivateTaskReference opaque>", repr(reference))
+        bound_task, capability_sha256 = self.source.qualification_identity(reference)
+        self.assertEqual(task_id, bound_task.task_id)
+        self.assertRegex(capability_sha256, r"^sha256:[0-9a-f]{64}$")
 
         other_source = load_intercode_source(PROJECT_ROOT)
         with self.assertRaisesRegex(InterCodeSourceError, "does not belong"):
             other_source.gold_for_evaluator(reference)
         with self.assertRaisesRegex(InterCodeSourceError, "unknown task"):
             self.source.private_reference("bash-fs9-999")
+
+    def test_static_exclusion_audit_artifact_is_exactly_pinned(self) -> None:
+        path = PROJECT_ROOT / STATIC_EXCLUSION_AUDIT_RELATIVE_PATH
+        self.assertEqual(
+            STATIC_EXCLUSION_AUDIT_SHA256,
+            "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copytree(PROJECT_ROOT / "vendor", root / "vendor")
+            target = root / STATIC_EXCLUSION_AUDIT_RELATIVE_PATH
+            target.parent.mkdir(parents=True)
+            target.write_bytes(path.read_bytes() + b" ")
+            with self.assertRaisesRegex(
+                InterCodeSourceError, "static exclusion audit SHA-256 mismatch"
+            ):
+                load_intercode_source(root)
+
+    def test_source_constructor_is_loader_sealed(self) -> None:
+        with self.assertRaisesRegex(InterCodeSourceError, "loader-sealed"):
+            InterCodeSource(
+                tasks=(),
+                calibration_tasks=(),
+                gold_by_task_id={},
+                population_sha256=PUBLIC_POPULATION_SHA256,
+                calibration_population_sha256=CALIBRATION_POPULATION_SHA256,
+                source_sha256=SOURCE_CORPUS_SHA256,
+            )
 
     def test_calibration_and_source_have_no_exact_overlap(self) -> None:
         source_queries = {task.query for task in self.source.tasks}
