@@ -58,6 +58,61 @@ tasks. The result is not evidence that all loop engineering fails. It is
 evidence that additional test-time compute has value only when the model can
 reliably convert visible failure evidence into a better candidate.
 
+## Why the official-style loop did not improve the total
+
+The controller worked as specified; the task distribution did not consistently
+need the capability that a loop adds. These repairs were static and fully
+agent-visible: the instruction, source, and public tests were already present
+before the first model call. A loop is most defensible when execution reveals
+new information that was unavailable at the start—runtime errors, changing
+external state, measurements, user corrections, or verifier scores.
+
+The raw event chains separate three effects that an aggregate score can hide:
+
+1. **Actual feedback recovery.** On Qwen `v04-cross-file-001`, Goal Skill Loop
+   first returned `99.9` instead of `90.0`, observed the public-test failure,
+   corrected the formula on call two, and passed isolated evaluation. This
+   proves that the feedback loop can recover without human intervention.
+2. **Prompt/skill effect, not iteration.** On `v04-cross-file-002`, the Goal
+   arm passed on its first call while Direct failed. The paired outcome is a
+   rescue, but no retry occurred; the frozen verification skill changed the
+   initial answer.
+3. **Verifier blind spot.** On `v04-localized-001`, the Goal arm passed the
+   public stop condition but failed isolated evaluation, while Direct passed.
+   Because hidden feedback is correctly unavailable, another loop iteration
+   could not repair it.
+
+Thus, “official loop topology” is not a treatment that guarantees uplift. It
+provides a control surface—goal, observations, retries, verification, and stop
+rules. It helps only when the observations carry actionable new information,
+the verifier aligns with the real objective, and the model can use the signal.
+On this pilot, one genuine self-correction prevented a failure inside the Goal
+arm, but it did not create a net advantage over an already-correct Direct arm.
+
+For a hands-free automation claim, the better primary endpoint is not only
+clean-condition pass rate. It is **intervention-free completion**: how often an
+agent recovers from execution feedback without asking a human to diagnose and
+restart the task. That requires a benchmark with information-revealing,
+multi-step environments rather than only static repair prompts.
+
+## External benchmarks that exercise loops
+
+| Benchmark | What it measures | Fit for this project | Local-pilot constraint |
+| --- | --- | --- | --- |
+| [LongCLI-Bench](https://github.com/finyorko/longcli-bench) | 20 long-horizon CLI tasks; F2P/P2P tests, step score, and explicit `--give-test-output` self-correction turns | Best coding benchmark for comparing no feedback with one or more correction turns | Requires Docker, Python 3.12, and a compatible agent adapter |
+| [Frontier-Eng](https://lab.einsia.ai/frontier-eng/) | Iterative propose–execute–evaluate optimization with frozen executable verifiers and continuous reward | Best direct test of whether deeper loop iterations improve an objective | Engineering simulators are heavy; even the 10-task lite set is difficult for small models |
+| [General AgentBench](https://github.com/cxcscmu/General-AgentBench) | Sequential and parallel agent test-time scaling across coding, search, reasoning, and tools | Strong external comparison for context ceilings and verification gaps | Several tracks use external APIs and large hosted models |
+| [SWE-Together](https://togetherbench.com/) | Final correctness plus the number of corrective user-feedback turns | Closest match to “how much can I take my hands off the keyboard?” | Repository containers and an LLM user simulator make it expensive locally |
+| [RigorBench](https://github.com/MeherBhaskar/RigorBench) | Planning, verification, recovery, abstention, testing, and trajectory discipline | Useful process audit for whether an agent loops responsibly | Composite scoring and judge-based components are less objective than frozen executable verifiers |
+| [Test-Time Interaction](https://test-time-interaction.github.io/) | Whether longer environment interaction enables exploration, backtracking, and new-information gathering | Strong evidence for the task class in which loops should matter | Web environments are network-dependent and therefore are not imported into this offline suite |
+
+The recommended next external validation is a small preregistered
+LongCLI-Bench subset comparing zero versus one versus three test-feedback turns,
+with the same local model and token ceiling. Frontier-Eng v1-lite is the next
+choice when continuous improvement—not binary repair—is the research question.
+Neither suite should be copied into EdgeLoopBench as a network-dependent task;
+an adapter should preserve its upstream environment, license, and evaluator.
+
 ## Research question
 
 > Under a fixed episode-level logical budget, does a verifiable goal, a frozen
@@ -159,6 +214,95 @@ Qwen3.5 9B failed its load smoke at 13% free memory pressure and produced no
 valid endpoint result. Gemma 4 12B was not loaded because it exceeded the size
 of the failed safety candidate. They are resource exclusions, not negative
 model-quality results.
+
+## Complete v0.4 experimental data
+
+The tables below reproduce every committed episode record, not only successful
+examples. `Obj` is isolated objective success; a public-test pass can still
+produce `isolated_evaluation_failed`. Logical total is prompt plus completion
+tokens. Wall time is observed end-to-end episode time. `Max ctx` is the largest
+logical context seen by any call in that episode.
+
+Fields invariant across all 48 records: seed `20260715`, budget tier `medium`,
+run status `completed`, no energy observation, no verifier protocol error, no
+fallback, and no Maker–Verifier candidate-A/candidate-B fields. Those invariant
+values remain present in the machine-readable
+[`comparison.json`](results/OPEN-ME/current/comparison.json).
+
+### Exact arm-level accounting
+
+| Model | Strategy | Success | Mean prompt | Mean completion | Mean total | Mean wall s | Mean calls | Mean tools | Mean public tests | Max call context |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phi-4 Mini 3.8B | Direct | 1/8 | 455.375 | 151.250 | 606.625 | 6.417 | 1.000 | 1.625 | 0.625 | 736 |
+| Phi-4 Mini 3.8B | Bounded Retry | 1/8 | 1,461.125 | 332.625 | 1,793.750 | 14.135 | 2.500 | 4.250 | 1.750 | 1,065 |
+| Phi-4 Mini 3.8B | Goal Skill Loop | 1/8 | 3,070.500 | 623.000 | 3,693.500 | 26.692 | 4.500 | 7.375 | 2.875 | 1,261 |
+| Qwen3.5 4B | Direct | 3/8 | 491.250 | 90.875 | 582.125 | 6.454 | 1.000 | 2.000 | 1.000 | 622 |
+| Qwen3.5 4B | Bounded Retry | 3/8 | 922.750 | 164.750 | 1,087.500 | 10.834 | 1.625 | 3.250 | 1.625 | 844 |
+| Qwen3.5 4B | Goal Skill Loop | 3/8 | 1,578.250 | 258.875 | 1,837.125 | 18.058 | 2.250 | 4.500 | 2.250 | 1,032 |
+
+<details>
+<summary><strong>Phi-4 Mini 3.8B — all 24 episode records</strong></summary>
+
+| Task | Strategy | Obj | Prompt | Completion | Total | Wall s | Calls | Tools | Tests | Max ctx | Final reason |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `v04-adversarial-001` | `direct` | FAIL | 442 | 177 | 619 | 7.294 | 1 | 1 | 0 | 619 | `candidate_edit_rejected` |
+| `v04-adversarial-001` | `bounded_retry` | FAIL | 1,506 | 299 | 1,805 | 12.763 | 3 | 5 | 2 | 641 | `public_tests_failed` |
+| `v04-adversarial-001` | `goal_skill_loop` | FAIL | 3,148 | 335 | 3,483 | 16.835 | 5 | 10 | 5 | 724 | `public_tests_failed` |
+| `v04-cross-file-001` | `direct` | FAIL | 481 | 255 | 736 | 13.226 | 1 | 2 | 1 | 736 | `public_tests_failed` |
+| `v04-cross-file-001` | `bounded_retry` | FAIL | 1,752 | 456 | 2,208 | 18.561 | 3 | 5 | 2 | 868 | `candidate_edit_rejected` |
+| `v04-cross-file-001` | `goal_skill_loop` | FAIL | 4,610 | 1,219 | 5,829 | 52.333 | 5 | 10 | 5 | 1,261 | `public_tests_failed` |
+| `v04-cross-file-002` | `direct` | FAIL | 471 | 82 | 553 | 3.551 | 1 | 1 | 0 | 553 | `candidate_edit_rejected` |
+| `v04-cross-file-002` | `bounded_retry` | FAIL | 1,934 | 406 | 2,340 | 17.770 | 3 | 5 | 2 | 1,016 | `public_tests_failed` |
+| `v04-cross-file-002` | `goal_skill_loop` | FAIL | 3,187 | 491 | 3,678 | 22.015 | 5 | 7 | 2 | 872 | `candidate_edit_rejected` |
+| `v04-diagnosis-001` | `direct` | FAIL | 450 | 91 | 541 | 3.848 | 1 | 2 | 1 | 541 | `public_tests_failed` |
+| `v04-diagnosis-001` | `bounded_retry` | FAIL | 1,987 | 271 | 2,258 | 13.596 | 3 | 6 | 3 | 867 | `public_tests_failed` |
+| `v04-diagnosis-001` | `goal_skill_loop` | FAIL | 3,809 | 668 | 4,477 | 30.026 | 5 | 10 | 5 | 963 | `public_tests_failed` |
+| `v04-diagnosis-002` | `direct` | FAIL | 470 | 256 | 726 | 9.810 | 1 | 2 | 1 | 726 | `public_tests_failed` |
+| `v04-diagnosis-002` | `bounded_retry` | FAIL | 2,199 | 583 | 2,782 | 25.225 | 3 | 6 | 3 | 1,065 | `public_tests_failed` |
+| `v04-diagnosis-002` | `goal_skill_loop` | FAIL | 3,719 | 567 | 4,286 | 25.596 | 5 | 10 | 5 | 908 | `public_tests_failed` |
+| `v04-localized-001` | `direct` | PASS | 445 | 95 | 540 | 3.772 | 1 | 2 | 1 | 540 | `success` |
+| `v04-localized-001` | `bounded_retry` | PASS | 445 | 95 | 540 | 3.836 | 1 | 2 | 1 | 540 | `success` |
+| `v04-localized-001` | `goal_skill_loop` | PASS | 523 | 96 | 619 | 4.509 | 1 | 2 | 1 | 619 | `success` |
+| `v04-localized-002` | `direct` | FAIL | 449 | 164 | 613 | 6.109 | 1 | 1 | 0 | 613 | `candidate_edit_rejected` |
+| `v04-localized-002` | `bounded_retry` | FAIL | 1,431 | 496 | 1,927 | 18.433 | 3 | 3 | 0 | 657 | `candidate_edit_rejected` |
+| `v04-localized-002` | `goal_skill_loop` | FAIL | 2,819 | 852 | 3,671 | 32.882 | 5 | 5 | 0 | 739 | `candidate_edit_rejected` |
+| `v04-localized-003` | `direct` | FAIL | 435 | 90 | 525 | 3.729 | 1 | 2 | 1 | 525 | `isolated_evaluation_failed` |
+| `v04-localized-003` | `bounded_retry` | FAIL | 435 | 55 | 490 | 2.898 | 1 | 2 | 1 | 490 | `isolated_evaluation_failed` |
+| `v04-localized-003` | `goal_skill_loop` | FAIL | 2,749 | 756 | 3,505 | 29.338 | 5 | 5 | 0 | 718 | `candidate_edit_rejected` |
+
+</details>
+
+<details>
+<summary><strong>Qwen3.5 4B — all 24 episode records</strong></summary>
+
+| Task | Strategy | Obj | Prompt | Completion | Total | Wall s | Calls | Tools | Tests | Max ctx | Final reason |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `v04-adversarial-001` | `direct` | FAIL | 476 | 146 | 622 | 8.075 | 1 | 2 | 1 | 622 | `public_tests_failed` |
+| `v04-adversarial-001` | `bounded_retry` | FAIL | 1,848 | 438 | 2,286 | 25.556 | 3 | 6 | 3 | 832 | `public_tests_failed` |
+| `v04-adversarial-001` | `goal_skill_loop` | FAIL | 3,456 | 500 | 3,956 | 33.901 | 5 | 10 | 5 | 825 | `public_tests_failed` |
+| `v04-cross-file-001` | `direct` | PASS | 521 | 89 | 610 | 5.970 | 1 | 2 | 1 | 610 | `success` |
+| `v04-cross-file-001` | `bounded_retry` | PASS | 521 | 89 | 610 | 5.916 | 1 | 2 | 1 | 610 | `success` |
+| `v04-cross-file-001` | `goal_skill_loop` | PASS | 1,370 | 176 | 1,546 | 12.684 | 2 | 4 | 2 | 859 | `success` |
+| `v04-cross-file-002` | `direct` | FAIL | 508 | 84 | 592 | 5.539 | 1 | 2 | 1 | 592 | `public_tests_failed` |
+| `v04-cross-file-002` | `bounded_retry` | FAIL | 1,211 | 199 | 1,410 | 13.078 | 2 | 4 | 2 | 818 | `isolated_evaluation_failed` |
+| `v04-cross-file-002` | `goal_skill_loop` | PASS | 588 | 228 | 816 | 12.395 | 1 | 2 | 1 | 816 | `success` |
+| `v04-diagnosis-001` | `direct` | PASS | 482 | 79 | 561 | 10.453 | 1 | 2 | 1 | 561 | `success` |
+| `v04-diagnosis-001` | `bounded_retry` | PASS | 482 | 79 | 561 | 8.887 | 1 | 2 | 1 | 561 | `success` |
+| `v04-diagnosis-001` | `goal_skill_loop` | PASS | 562 | 161 | 723 | 14.959 | 1 | 2 | 1 | 723 | `success` |
+| `v04-diagnosis-002` | `direct` | FAIL | 506 | 89 | 595 | 6.152 | 1 | 2 | 1 | 595 | `public_tests_failed` |
+| `v04-diagnosis-002` | `bounded_retry` | FAIL | 1,241 | 198 | 1,439 | 12.565 | 2 | 4 | 2 | 844 | `isolated_evaluation_failed` |
+| `v04-diagnosis-002` | `goal_skill_loop` | FAIL | 4,246 | 585 | 4,831 | 44.395 | 5 | 10 | 5 | 1,032 | `public_tests_failed` |
+| `v04-localized-001` | `direct` | PASS | 481 | 94 | 575 | 5.639 | 1 | 2 | 1 | 575 | `success` |
+| `v04-localized-001` | `bounded_retry` | PASS | 481 | 94 | 575 | 5.659 | 1 | 2 | 1 | 575 | `success` |
+| `v04-localized-001` | `goal_skill_loop` | FAIL | 561 | 95 | 656 | 5.958 | 1 | 2 | 1 | 656 | `isolated_evaluation_failed` |
+| `v04-localized-002` | `direct` | FAIL | 486 | 85 | 571 | 5.451 | 1 | 2 | 1 | 571 | `public_tests_failed` |
+| `v04-localized-002` | `bounded_retry` | FAIL | 1,128 | 160 | 1,288 | 10.616 | 2 | 4 | 2 | 717 | `isolated_evaluation_failed` |
+| `v04-localized-002` | `goal_skill_loop` | FAIL | 1,293 | 230 | 1,523 | 14.241 | 2 | 4 | 2 | 872 | `isolated_evaluation_failed` |
+| `v04-localized-003` | `direct` | FAIL | 470 | 61 | 531 | 4.353 | 1 | 2 | 1 | 531 | `isolated_evaluation_failed` |
+| `v04-localized-003` | `bounded_retry` | FAIL | 470 | 61 | 531 | 4.393 | 1 | 2 | 1 | 531 | `isolated_evaluation_failed` |
+| `v04-localized-003` | `goal_skill_loop` | FAIL | 550 | 96 | 646 | 5.933 | 1 | 2 | 1 | 646 | `isolated_evaluation_failed` |
+
+</details>
 
 ## Statistical analysis
 

@@ -74,6 +74,35 @@ class StaticReportTests(unittest.TestCase):
         self.assertIn("OfficialLoopPilot-8", snapshot)
         self.assertIn("1 seed × 1 budget tier", snapshot)
 
+    def test_readme_contains_every_v04_episode_record(self) -> None:
+        readme = (self.project_root / "README.md").read_text(encoding="utf-8")
+        comparison = json.loads(
+            (
+                self.project_root
+                / "results/OPEN-ME/current/comparison.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        expected_rows: list[str] = []
+        for experiment in comparison["experiments"]:
+            for record in experiment["records"]:
+                objective = "PASS" if record["objective_success"] else "FAIL"
+                total_tokens = record["prompt_tokens"] + record["completion_tokens"]
+                reason = record["failure_reason"] or "success"
+                expected_rows.append(
+                    f"| `{record['task_id']}` | `{record['strategy']}` | "
+                    f"{objective} | {record['prompt_tokens']:,} | "
+                    f"{record['completion_tokens']:,} | {total_tokens:,} | "
+                    f"{record['wall_seconds']:.3f} | {record['model_calls']} | "
+                    f"{record['tool_calls']} | {record['public_test_runs']} | "
+                    f"{record['max_call_context_tokens']:,} | `{reason}` |"
+                )
+
+        self.assertEqual(len(expected_rows), 48)
+        self.assertEqual(readme.count("| `v04-"), 48)
+        for row in expected_rows:
+            self.assertIn(row, readme)
+
     def test_renders_agent_visible_microrepair_task_catalog(self) -> None:
         plan = load_experiment(
             self.project_root / "configs/experiments/smoke.toml"
