@@ -79,6 +79,15 @@ Retrieved on **2026-07-15**.
 - [Claude: Getting started with loops](https://claude.com/blog/getting-started-with-loops) — official definition of a loop as repeated work until a stop condition, the turn/goal/time/proactive taxonomy, quantitative verification guidance, independent review, bounded usage, and pilot-first advice. It motivates controls; it does not report a benchmark uplift or prescribe the EdgeLoop rollback policy.
 - [Loop Engineering reference repository at `6a67035`](https://github.com/cobusgreyling/loop-engineering/tree/6a670357ab748e20d14752bda82999a97f8afc6f) — community patterns for schedules, isolated worktrees, skills, sub-agents, durable state, budgets, and human gates. EdgeLoop cites this as a systems reference, not an official Claude implementation or a source of measured performance claims.
 
+## Docker isolation
+
+Retrieved on **2026-07-15**.
+
+- [Resource constraints](https://docs.docker.com/engine/containers/resource_constraints/) — explicit CPU, memory, and related runtime limits.
+- [Bind mounts](https://docs.docker.com/engine/storage/bind-mounts/) and [Docker Engine security](https://docs.docker.com/engine/security/) — host-write and daemon-authority boundaries.
+- [`none` network driver](https://docs.docker.com/engine/network/drivers/none/) — isolated network namespace behavior.
+- [`docker container commit`](https://docs.docker.com/reference/cli/docker/container/commit/) — pause behavior and mounted-volume exclusion relevant to checkpoint design.
+
 ## Claim labels
 
 Repository prose uses these interpretations:
