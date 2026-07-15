@@ -1,185 +1,267 @@
 # EdgeLoopBench
 
-**Budget-aware agent loops on Apple Silicon.**
+**A reproducible local study of when agent loops help—and when they only spend
+more inference.**
 
-EdgeLoopBench asks a deliberately narrow question:
+[Open the current interactive result](results/OPEN-ME/index.html) ·
+[Read the v0.4 run record](docs/runs/v04-goal-skill-loop-pilot.md) ·
+[Inspect the experiment design](docs/experiment-design-v0.4.md)
 
-> Under a fixed compute budget, when does loop engineering improve task success enough to justify its extra inference cost?
+## Abstract
 
-The project is designed for a MacBook Air and open-weight models. It compares direct agent episodes, bounded retry loops, and maker-verifier loops without confusing reasoning quality with server speed. Ollama is the practical baseline; vLLM-Metal and MLX-LM are optimization and systems-research backends.
+Loop engineering is often presented as a way to improve agent quality by
+letting a model retry, inspect evidence, and decide when to stop. The important
+question is not whether a loop can make more model calls. It is whether those
+calls produce enough additional verified successes to justify their logical
+token and wall-time cost.
 
-This repository is a research harness, not another agent CLI and not a model runtime. Existing CLIs may be integrated later, but the first controller stays small so token accounting, stopping rules, and tool access remain auditable.
+EdgeLoopBench tests that question with pinned open-weight models on Apple
+Silicon. The current v0.4 pilot compares one-call Direct, three-attempt Bounded
+Retry, and a five-attempt Goal Skill Loop adapted from Anthropic's official
+loop guidance. It uses eight fresh offline Python repair tasks, isolated hidden
+evaluation, identical episode-level budgets, append-only raw events, and
+within-model paired statistics.
 
-## Why this topic matters
+The motivation for local inference is practical: exploratory controller work
+can consume many repeated prompts before a topology is worth scaling. Running
+small models locally avoids spending cloud API tokens during qualification and
+makes memory, latency, and token overhead directly observable. Local inference
+is not treated as free; hardware time and resource pressure are part of the
+experimental record.
 
-Agent loops can improve a weak first answer, but every retry, verifier pass, and repeated context costs tokens, time, memory, and energy. Cloud APIs make those costs monetary; a local model makes them visible systems constraints. Apple Silicon is especially interesting because CPU and GPU share memory, so model weights, KV cache, the operating system, and the benchmark all compete for the same resource.
+## Main result
 
-The project therefore produces two separate result tables:
+On this eight-task qualification suite, neither loop improved aggregate
+verified success over Direct.
 
-1. **Agent effectiveness** — objective task success under identical logical token and tool budgets.
-2. **Serving efficiency** — latency, throughput, memory, thermal behavior, and optional energy for identical request shapes.
+| Model | Strategy | Verified success | Mean logical tokens | Mean wall time |
+| --- | --- | ---: | ---: | ---: |
+| Phi-4 Mini 3.8B | Direct | 1/8 (12.5%) | 607 | 6.4 s |
+| Phi-4 Mini 3.8B | Bounded Retry | 1/8 (12.5%) | 1,794 | 14.1 s |
+| Phi-4 Mini 3.8B | Goal Skill Loop | 1/8 (12.5%) | 3,694 | 26.7 s |
+| Qwen3.5 4B | Direct | 3/8 (37.5%) | 582 | 6.5 s |
+| Qwen3.5 4B | Bounded Retry | 3/8 (37.5%) | 1,088 | 10.8 s |
+| Qwen3.5 4B | Goal Skill Loop | 3/8 (37.5%) | 1,837 | 18.1 s |
 
-A later deployment experiment may combine them under a wall-time or energy budget. It must never be presented as proof that one loop strategy reasons better.
+The paired outcomes are more informative than the aggregate tie:
 
-## Initial experiment
+- Phi-4 Mini had zero rescues and zero regressions under either loop.
+- Qwen3.5 4B Goal Skill Loop rescued one cross-file task but regressed one
+  localized task: net rescue `0`, exact paired `p = 1.0`, task-bootstrap 95%
+  interval `[-37.5, +37.5]` percentage points.
+- Qwen Goal Skill Loop used `3.16×` Direct's logical tokens and `2.80×` its
+  wall time. Phi used `6.09×` the tokens and `4.16×` the wall time.
 
-The minimum useful study uses:
+The supported conclusion is deliberately narrow: this goal-and-skill topology
+did not qualify for a larger performance-uplift claim on these models and
+tasks. The result is not evidence that all loop engineering fails. It is
+evidence that additional test-time compute has value only when the model can
+reliably convert visible failure evidence into a better candidate.
 
-- one Apple Silicon MacBook Air;
-- one pinned open-weight model and one pinned OpenAI-compatible server;
-- six offline Python repair tasks;
-- direct, bounded-retry, and maker-verifier strategies;
-- two calibrated budget tiers and two seeds;
-- 72 total agent runs;
-- fixed-prompt serving microbenchmarks before the agent runs.
+## Research question
 
-The primary endpoint is objective verified success: the final patch passes hidden tests, leaves public tests passing, changes no prohibited files, and applies cleanly.
+> Under a fixed episode-level logical budget, does a verifiable goal, a frozen
+> verification skill, and a larger attempt cap produce positive net paired
+> rescue over simpler controllers at an acceptable inference cost?
 
-## Runtime direction
+The primary endpoint is objective verified repair success. Token use, model
+calls, public-test runs, and wall time are costs. Serving efficiency remains a
+separate track and is never folded into an agent-quality score.
 
-| Backend | Role | Apple GPU path |
+## Controllers
+
+| Arm | Stop rule | Maximum Maker attempts | Feedback |
+| --- | --- | ---: | --- |
+| Direct | First outcome | 1 | None |
+| Bounded Retry | Public pass or cap | 3 | Sanitized edit/public-test failure |
+| Goal Skill Loop | Public goal achieved or cap | 5 | Same failure evidence plus frozen verification skill |
+
+The Goal Skill Loop maps the official goal-based pattern into a benchmark
+controller:
+
+```text
+visible task + fixed verification skill
+                  │
+                  ▼
+          Maker emits full-file edits
+                  │
+          validate → public tests
+             │              │
+          failure          pass
+             │              │
+ sanitized evidence         └── stop
+             │
+       repeat, at most five attempts
+
+hidden evaluation runs only after the episode
+```
+
+The skill instructs the model to inspect requirement coverage, boundary
+conditions, state and side effects, cross-file contracts, and regression risk.
+Public tests are the only agent-visible deterministic stop condition. Hidden
+tests, gold edits, evaluator paths, and hidden outcomes never return to the
+model.
+
+This is an adaptation of Anthropic's published control principles, not a claim
+to reproduce Claude Code's internal `/goal` evaluator. See
+[Getting started with loops](https://x.com/i/article/2074204645845839872) and
+the official [`/goal` documentation](https://code.claude.com/docs/en/goal).
+
+## Experimental configuration
+
+### Workload
+
+- `OfficialLoopPilot-8`: eight original, deterministic, offline Python repairs
+- category mix: three localized, two cross-file, two diagnosis, one adversarial
+- every initial task fails its public tests
+- an evaluator-owned gold edit passes both public and hidden layers
+- one frozen seed; the same task is paired across all three strategies
+- 24 episodes per model; 48 valid episodes in the published comparison
+
+### Shared episode ceiling
+
+| Resource | Maximum |
+| --- | ---: |
+| Logical prompt tokens | 30,000 |
+| Completion tokens | 5,000 |
+| Model calls | 5 |
+| Tool calls | 12 |
+| Public-test runs | 5 |
+| Per-call context | 4,096 tokens |
+
+Unused budget remains unused. This is important: Direct is not forced to make
+five calls merely to equalize consumption. The comparison measures tested
+controller behavior and reports the resulting cost.
+
+### Models and runtime
+
+| Variable | Phi experiment | Qwen experiment |
 | --- | --- | --- |
-| Ollama | Lowest-friction baseline | Native Metal |
-| vLLM-Metal | Paged KV, scheduling, speculative decoding, profiling | MLX compute plus native Metal kernels |
-| MLX-LM | Apple-native reference and cache/quantization experiments | MLX and Metal |
+| Model | Phi-4 Mini 3.8B | Qwen3.5 4B |
+| Weight quantization | Q4_K_M | Q4_K_M |
+| KV-cache quantization | q8_0 | q8_0 |
+| Context | 4,096 | 4,096 |
+| Runtime | Ollama 0.31.1 | Ollama 0.31.1 |
+| Decoding | temperature 0.0, thinking off | temperature 0.0, thinking off |
 
-Core vLLM does not provide a direct PyTorch MPS backend. On Apple Silicon, this project uses the separate community-maintained `vllm-metal` plugin documented by vLLM.
+Model revisions, artifact digests, controller digest, backend digest, prompts,
+budgets, tasks, and seed are pinned in
+[`configs/experiments/v0.4/`](configs/experiments/v0.4/).
 
-## Candidate model ladder
+### Host and safety boundary
 
-Start small enough to run a full experiment matrix before trying a headline model:
+The endpoint runs were executed on an Apple M3 host with 16 GB unified memory,
+one loaded model and one request at a time. A resource guard paused execution
+when system-wide free memory pressure fell below 18% or swap grew by more than
+1 GB within a guarded batch.
 
-1. **Qwen3.5 4B Q4** — small control and harness shakeout.
-2. **Phi-4-mini Q4** — alternate small-model candidate after a separate calibration.
-3. **Gemma 4 E2B or E4B** — only with an explicitly compact artifact and measured headroom.
+Qwen3.5 9B failed its load smoke at 13% free memory pressure and produced no
+valid endpoint result. Gemma 4 12B was not loaded because it exceeded the size
+of the failed safety candidate. They are resource exclusions, not negative
+model-quality results.
 
-Artifact size is not total runtime memory. Context length and KV cache can dominate the remaining headroom. See [the model matrix](docs/model-matrix.md) before downloading a model.
+## Statistical analysis
 
-### Detected development machine
+All effectiveness comparisons are paired within model by task, budget tier,
+and seed. Reports include:
 
-The checked-in, privacy-scrubbed inventory is an **M4 MacBook Air with 16 GB unified memory and an 8-core GPU**. The active 16 GB profile is small-model-only: Qwen3.5 4B first, then another 2–4 GB artifact only after calibration. Observed 9B memory pressure on a 16 GB M3 host is recorded in [ADR 010](docs/decisions/010-small-model-confirmatory-profile.md); 9B/12B artifacts are not default work for this profile. See [`configs/hardware.m4-air-16gb.json`](configs/hardware.m4-air-16gb.json).
+- percentage-point success difference;
+- rescued, regressed, and unchanged task outcomes;
+- exact paired test;
+- task-clustered bootstrap interval;
+- incremental logical tokens and wall time;
+- verified successes per 1,000 logical tokens.
 
-## Repository status
+With eight tasks, v0.4 is a qualification pilot, not a confirmatory coding
+leaderboard. A zero-width bootstrap interval for Phi reflects identical paired
+outcomes in this observed pilot; it should not be interpreted as universal
+certainty.
 
-Version `0.1.0` is a runnable Mac-native qualification harness. It provides:
+## Reproduce
 
-- a frozen experimental vocabulary and causal boundary;
-- machine-readable experiment manifests;
-- validation for unfair or malformed experiment plans;
-- manifest-bound JSONL result summaries that expose their bindings, reject mixed revisions, enforce logical and deployment budgets, and compute paired strategy deltas;
-- runtime setup profiles and an evidence-backed model shortlist;
-- six deterministic offline repair tasks with isolated evaluation;
-- direct, bounded-retry, and maker-verifier controllers with logical-token accounting;
-- append-only, resumable manifest execution through loopback Ollama; and
-- self-contained HTML plus JSON reports that keep effectiveness separate from serving.
-
-It deliberately does **not** edit arbitrary repositories or expose evaluator
-assets to the model. Energy collection, a measured serving report, and the
-confirmatory multi-seed study remain later milestones.
-
-## Current local result
-
-Open [`results/OPEN-ME/index.html`](results/OPEN-ME/index.html). It is the single
-results hub: the complete Qwen3.5 4B v0.2 confirmatory block plus clearly
-labeled historical reports for Phi-4-mini, Qwen3.5 4B/9B, and Gemma 4 12B.
-Generated reports and raw JSONL remain intentionally ignored by Git; the local
-[`results/README.md`](results/README.md) explains the archive, evidence, and
-scratch directories.
-
-## Quick start
-
-The scaffold has no runtime Python dependencies.
+The harness uses the Python standard library. Ollama is the only runtime needed
+for the current local experiment.
 
 ```bash
 make check
-```
 
-Validate a plan:
+PYTHONPATH=src python3 -m edgeloopbench validate \
+  configs/experiments/v0.4/pilot-qwen35-4b.toml
 
-```bash
-PYTHONPATH=src python3 -m edgeloopbench validate configs/experiments/smoke.toml
-```
-
-Summarize append-only JSONL results:
-
-```bash
-PYTHONPATH=src python3 -m edgeloopbench summarize \
-  examples/results/sample-runs.jsonl \
-  --manifest examples/results/sample-plan.toml
-```
-
-Prepare and inspect one public task:
-
-```bash
-PYTHONPATH=src python3 -m edgeloopbench task prepare python-localized-001 \
-  --work-root /tmp/edgeloop-localized-001
-PYTHONPATH=src python3 -m edgeloopbench task public-test \
-  /tmp/edgeloop-localized-001
-```
-
-Run or resume the pinned 72-run Ollama shakeout. Raw model events and derived
-run records are appended separately under the ignored `results/` directory:
-
-```bash
 PYTHONPATH=src python3 -m edgeloopbench run \
-  configs/experiments/smoke.toml \
-  --results results/qwen35-4b-smoke-runs.jsonl \
-  --events results/qwen35-4b-smoke-events.jsonl
+  configs/experiments/v0.4/pilot-qwen35-4b.toml \
+  --results results/v0.4/pilot-qwen35-4b/raw/runs.jsonl \
+  --events results/v0.4/pilot-qwen35-4b/raw/events.jsonl \
+  --task-catalog tasks/official-loop-pilot \
+  --evaluator-catalog evaluators/official-loop-pilot
 ```
 
-Use `--max-runs 1` for a short qualification slice. Repeating the command
-skips run identities already present in the result log.
+The run command is resumable: completed manifest-bound run identities are
+skipped, and new raw events are appended rather than rewriting evidence.
 
-Render the offline analysis page:
-
-```bash
-PYTHONPATH=src python3 -m edgeloopbench report \
-  results/qwen35-4b-smoke-runs.jsonl \
-  --manifest configs/experiments/smoke.toml \
-  --output results/qwen35-4b-report
-```
-
-Compare two or more complete experiments while allowing only the pinned model
-artifact to vary:
+Generate a report:
 
 ```bash
 PYTHONPATH=src python3 -m edgeloopbench compare \
-  --experiment configs/experiments/smoke.toml results/archive/v0.1/raw/qwen35-4b-full-runs.jsonl \
-  --experiment configs/experiments/gemma4-12b-smoke.toml results/archive/v0.1/raw/gemma4-12b-full-runs.jsonl \
-  --experiment configs/experiments/qwen35-9b-smoke.toml results/archive/v0.1/raw/qwen35-9b-full-runs.jsonl \
-  --output results/archive/v0.1/reports/three-model-loop-comparison
+  --experiment configs/experiments/v0.4/pilot-phi4-mini.toml \
+    results/v0.4/pilot-phi4-mini/raw/runs.jsonl \
+  --experiment configs/experiments/v0.4/pilot-qwen35-4b.toml \
+    results/v0.4/pilot-qwen35-4b/raw/runs.jsonl \
+  --output results/v0.4/comparison
 ```
 
-The completed three-model qualification and its interpretation boundary are
-recorded in [the run note](docs/runs/three-model-loop-comparison.md).
+## Evidence layout
 
-The proposed confirmatory protocol—including deterministic Retry packets, a
-read-only Maker–Verifier state machine, candidate preservation, task-level
-statistics, and Mac run controls—is defined in the
-[v0.2 experiment design](docs/experiment-design-v0.2.md). Existing qualification
-results remain bound to their old controller revision and are not pooled with
-v0.2. Current execution status, exclusions, and power/memory gates are recorded
-in the [v0.2 run note](docs/runs/v02-confirmatory-execution.md).
+```text
+configs/experiments/v0.4/       pinned experimental identities
+tasks/official-loop-pilot/      agent-visible offline tasks
+evaluators/official-loop-pilot/ isolated hidden tests and gold edits
+results/v0.4/*/raw/             local append-only events and run records
+results/OPEN-ME/                committed self-contained HTML and JSON
+docs/runs/                      immutable run interpretation and evidence hashes
+docs/decisions/                 experimental and architectural decisions
+```
 
-Summaries reject undeclared, over-budget, manifest-mismatched, or silently missing runs by default. Manifest-bound agent results must report the largest context observed in any model call; deployment runs must also satisfy their declared wall-time and energy budgets. Use `--allow-incomplete` only when the resulting coverage counts are intentionally part of an exploratory partial analysis.
+Raw events contain full model output and remain local. The committed comparison
+payload contains manifest metadata, metric records, coverage, summaries, and
+paired transitions without publishing model prose.
 
-Inspect the protocol before interpreting any numbers:
+## Threats to validity
 
-- [Project specification](docs/spec.md)
-- [Experiment protocol](docs/experiment-protocol.md)
-- [Metrics contract](docs/metrics.md)
-- [Research roadmap](docs/research-plan.md)
-- [Official sources](docs/sources.md)
+- The suite contains eight generated Python repairs, not a broad software
+  engineering benchmark.
+- One seed cannot estimate decoding variance, although temperature is fixed at
+  zero and task/controller pairing is exact.
+- Public tests are an imperfect stopping proxy; a public pass can still fail
+  hidden evaluation, and the controller is correctly forbidden to see why.
+- Local wall time depends on host state. It is reported as observed cost, not a
+  cross-runtime serving claim.
+- Small models can exhibit capability floors that no controller topology can
+  repair economically.
 
-## Non-goals
+## Repository principles
 
-- Claiming that local inference is free. Hardware time and energy still matter.
-- Comparing different models and calling the result a loop-strategy effect.
-- Comparing GGUF and MLX checkpoints and calling the result a pure server effect.
-- Treating advertised context length as a feasible laptop operating point.
-- Automatically changing privileged macOS memory settings.
-- Exposing local development servers to untrusted networks.
+- Separate agent effectiveness from serving efficiency.
+- Count logical prompt tokens even when a backend reuses a prefix cache.
+- Never expose hidden tests, gold edits, or evaluator paths to an agent.
+- Pin revisions, prompts, runtime, controller, quantization, and manifests.
+- Record weight and KV-cache quantization as different variables.
+- Append raw events and derive summaries instead of editing results in place.
+- Add no network-dependent benchmark tasks.
+
+## Prior experiments and scope
+
+Earlier v0.1–v0.3 reports remain historical evidence. They use different task
+suites or controller revisions and are not pooled with v0.4. The current report
+is the supported entry point; historical details remain under `docs/runs/` and
+the published results archive.
+
+EdgeLoopBench is a research instrument, not an autonomous coding CLI and not a
+claim of peer review. The design borrows the discipline of an empirical ML
+paper—explicit hypotheses, controlled variables, paired endpoints, immutable
+evidence, and stated limitations—so negative results remain useful.
 
 ## License
 
-EdgeLoopBench is available under the [MIT License](LICENSE). Model weights, task sources, and runtimes retain their own licenses.
+EdgeLoopBench is available under the [MIT License](LICENSE). Model weights,
+task sources, and runtimes retain their own licenses.

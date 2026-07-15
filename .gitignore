@@ -14,3 +14,7 @@ dist/
 # Raw runs can be large and may contain model output. Keep only examples in Git.
 results/*
 !results/.gitkeep
+!results/OPEN-ME/
+!results/OPEN-ME/**
+!results/published/
+!results/published/**
