@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 OUTPUT = ROOT / "configs" / "experiments" / "v0.2"
 CALIBRATION_REVISION = "11d5ce8b9118920baccedeac0f17347f883cdfb6"
-CONFIRMATORY_REVISION = "3e7dd740ca501c72c4398d209843c99cac18e07b"
+CONFIRMATORY_REVISION = "5060ee0970993ca76fa2ede2f71fcf7a9d3ed681"
 CALIBRATION_TASKS = (
     "python-localized-001",
     "python-localized-002",

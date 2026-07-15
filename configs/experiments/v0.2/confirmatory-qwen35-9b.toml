@@ -42,7 +42,7 @@ seeds = [20260715]
 thinking = false
 temperature = 0.0
 edit_schema_revision = "full-file-edits-v1"
-controller_revision = "3e7dd740ca501c72c4398d209843c99cac18e07b"
+controller_revision = "5060ee0970993ca76fa2ede2f71fcf7a9d3ed681"
 
 [model]
 id = "qwen3.5:9b"
