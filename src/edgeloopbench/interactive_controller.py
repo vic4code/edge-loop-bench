@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
@@ -160,7 +161,7 @@ def parse_action(model_text: str) -> str:
     """Parse the frozen one-command JSON action without invoking a shell."""
 
     try:
-        raw = json.loads(model_text)
+        raw = json.loads(model_text, object_pairs_hook=_unique_json_object)
     except (json.JSONDecodeError, RecursionError) as error:
         raise ActionParseError("model response is not valid action JSON") from error
     if not isinstance(raw, dict) or set(raw) != {"command"}:
@@ -170,11 +171,28 @@ def parse_action(model_text: str) -> str:
         raise ActionParseError("command must be a non-empty string")
     if command != command.strip():
         raise ActionParseError("command must not have leading or trailing whitespace")
-    if len(command.encode("utf-8")) > MAX_ACTION_BYTES:
+    try:
+        encoded = command.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ActionParseError("command contains invalid Unicode") from error
+    if len(encoded) > MAX_ACTION_BYTES:
         raise ActionParseError("command exceeds action byte limit")
-    if any(ord(character) < 32 or ord(character) == 127 for character in command):
+    if any(
+        unicodedata.category(character).startswith("C")
+        or unicodedata.category(character) in {"Zl", "Zp"}
+        for character in command
+    ):
         raise ActionParseError("command must be one line without control characters")
     return command
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ActionParseError(f"action JSON repeats field {key!r}")
+        result[key] = value
+    return result
 
 
 def candidate_seed(replicate_seed: int, attempt: int) -> int:
