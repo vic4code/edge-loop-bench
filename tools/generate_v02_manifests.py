@@ -8,7 +8,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 OUTPUT = ROOT / "configs" / "experiments" / "v0.2"
-CONTROLLER = "11d5ce8b9118920baccedeac0f17347f883cdfb6"
+CALIBRATION_REVISION = "11d5ce8b9118920baccedeac0f17347f883cdfb6"
+CONFIRMATORY_REVISION = "3e7dd740ca501c72c4398d209843c99cac18e07b"
 CALIBRATION_TASKS = (
     "python-localized-001",
     "python-localized-002",
@@ -38,6 +39,9 @@ MODELS = {
 
 def render(label: str, phase: str, tasks: tuple[str, ...]) -> str:
     model_id, digest, quantization = MODELS[label]
+    controller_revision = (
+        CALIBRATION_REVISION if phase == "calibration" else CONFIRMATORY_REVISION
+    )
     task_lines = "\n".join(f'  "{task}",' for task in tasks)
     return f'''schema_version = 1
 id = "v02-{phase}-{label}"
@@ -54,7 +58,7 @@ seeds = [20260715]
 thinking = false
 temperature = 0.0
 edit_schema_revision = "full-file-edits-v1"
-controller_revision = "{CONTROLLER}"
+controller_revision = "{controller_revision}"
 
 [model]
 id = "{model_id}"
