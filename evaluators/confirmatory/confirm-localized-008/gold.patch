@@ -1,0 +1,7 @@
+diff --git a/src/solution.py b/src/solution.py
+index 3483bcd..9775159 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -2 +2 @@ def slugify(text):
+-    return '-'.join(text.strip().lower().split(' '))
++    return '-'.join(text.strip().lower().split())

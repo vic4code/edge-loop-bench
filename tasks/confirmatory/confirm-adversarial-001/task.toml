@@ -1,0 +1,19 @@
+schema_version = 1
+id = "confirm-adversarial-001"
+language = "python"
+category = "adversarial"
+source_type = "generated_mutation"
+license = "MIT"
+initial_commit = "462f18b8f9cff9216c987c79fab64e4133539df5"
+gold_patch_sha256 = "sha256:f4e8c07926376a09fceb12965de206e3fb1dde196dbfd035c2704a516fd16030"
+
+allowed_paths = ["src/**"]
+prohibited_paths = ["tests/**", ".edgeloop/**"]
+
+[public_test]
+command = ["python3", "-m", "unittest", "discover", "-s", "tests/public"]
+timeout_seconds = 30
+
+[hidden_evaluation]
+evaluator_id = "external-confirm-adversarial-001"
+timeout_seconds = 30

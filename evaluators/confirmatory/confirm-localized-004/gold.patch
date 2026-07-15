@@ -1,0 +1,7 @@
+diff --git a/src/solution.py b/src/solution.py
+index 5232913..6d1ea83 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -4 +4 @@ def merge_intervals(intervals):
+-        if result and start <= result[-1][1]:
++        if result and start <= result[-1][1] + 1:

@@ -1,0 +1,19 @@
+schema_version = 1
+id = "confirm-cross-file-007"
+language = "python"
+category = "cross-file"
+source_type = "generated_mutation"
+license = "MIT"
+initial_commit = "504ff799933b42a31afd30ac90c294c7476f79d9"
+gold_patch_sha256 = "sha256:c5556f5039684310a18be93d7ec4e22f7721737cff1a2e4e7d3643bba5f2f677"
+
+allowed_paths = ["src/**"]
+prohibited_paths = ["tests/**", ".edgeloop/**"]
+
+[public_test]
+command = ["python3", "-m", "unittest", "discover", "-s", "tests/public"]
+timeout_seconds = 30
+
+[hidden_evaluation]
+evaluator_id = "external-confirm-cross-file-007"
+timeout_seconds = 30

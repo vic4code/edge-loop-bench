@@ -1,0 +1,13 @@
+diff --git a/src/solution.py b/src/solution.py
+index 270d8ff..0c07143 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -2,3 +2,5 @@ def root_cause(lines):
+-    for line in lines:
+-        if line.strip():
+-            return line.strip()
++    for index, line in enumerate(lines):
++        if line.strip() == 'Caused by:':
++            for cause in lines[index + 1:]:
++                if cause.strip():
++                    return cause.strip()

@@ -1,0 +1,14 @@
+diff --git a/src/solution.py b/src/solution.py
+index c29be51..64d2bb1 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -2 +2,8 @@ def typed_unique(values):
+-    return list(dict.fromkeys(values))
++    seen = set()
++    result = []
++    for value in values:
++        key = (type(value), value)
++        if key not in seen:
++            seen.add(key)
++            result.append(value)
++    return result

@@ -1,0 +1,14 @@
+diff --git a/src/solution.py b/src/solution.py
+index 50b2871..c781ee7 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -3,5 +3,4 @@ def duration_ms(text):
+-    if value.endswith('ms'):
+-        return int(value[:-2]) * 1000
+-    if value.endswith('s'):
+-        return int(value[:-1]) * 1000
+-    raise ValueError('duration')
++    factor, number = (1, value[:-2]) if value.endswith('ms') else ((1000, value[:-1]) if value.endswith('s') else (None, None))
++    if factor is None or not number.isdigit():
++        raise ValueError('duration')
++    return int(number) * factor

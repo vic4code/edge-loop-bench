@@ -1,0 +1,12 @@
+diff --git a/src/solution.py b/src/solution.py
+index a5f2d8a..d1ee935 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -2,4 +2,3 @@ def safe_relative(parts):
+-    value = '/'.join(parts).replace('../', '')
+-    if value.startswith('/'):
+-        raise ValueError('absolute')
+-    return value
++    if not parts or any(part == '..' for part in parts) or any(part.startswith('/') for part in parts):
++        raise ValueError('unsafe path')
++    return '/'.join(part for part in parts if part not in {'', '.'})

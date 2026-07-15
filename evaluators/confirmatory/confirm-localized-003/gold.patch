@@ -1,0 +1,10 @@
+diff --git a/src/solution.py b/src/solution.py
+index cba1ff6..34c339e 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -3 +3 @@ def parse_bool(text):
+-    if value in {'true', 'yes'}:
++    if value in {'true', 'yes', '1'}:
+@@ -5 +5 @@ def parse_bool(text):
+-    if value in {'false', 'no'}:
++    if value in {'false', 'no', '0'}:

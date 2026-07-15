@@ -1,0 +1,7 @@
+diff --git a/src/solution.py b/src/solution.py
+index 0904a03..273fb3e 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -4 +4 @@ def redact_tokens(text):
+-    return re.sub(r'token=\S+', 'token=[REDACTED]', text, count=1, flags=re.I)
++    return re.sub(r'token=\S+', 'token=[REDACTED]', text, flags=re.I)

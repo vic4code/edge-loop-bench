@@ -1,0 +1,7 @@
+diff --git a/src/solution.py b/src/solution.py
+index 3af8676..6c7a2b3 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -3 +3 @@ def csv_field(value):
+-        return '"' + value.replace('"', '""', 1) + '"'
++        return '"' + value.replace('"', '""') + '"'

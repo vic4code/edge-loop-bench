@@ -1,0 +1,7 @@
+diff --git a/src/solution.py b/src/solution.py
+index 885cdf0..fdb7ab0 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -4 +4 @@ def window_sums(values, size):
+-    return [sum(values[i:i + size]) for i in range(len(values) - size)]
++    return [sum(values[i:i + size]) for i in range(len(values) - size + 1)]

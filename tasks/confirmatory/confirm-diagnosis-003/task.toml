@@ -1,0 +1,19 @@
+schema_version = 1
+id = "confirm-diagnosis-003"
+language = "python"
+category = "diagnosis"
+source_type = "generated_mutation"
+license = "MIT"
+initial_commit = "07cc9e670228e99eb66d9c9e2005c348c0f7bf76"
+gold_patch_sha256 = "sha256:8dc470569090bedfcebb36afc625597fb6441144c440e4d8ba8669e9f52a4db0"
+
+allowed_paths = ["src/**"]
+prohibited_paths = ["tests/**", ".edgeloop/**"]
+
+[public_test]
+command = ["python3", "-m", "unittest", "discover", "-s", "tests/public"]
+timeout_seconds = 30
+
+[hidden_evaluation]
+evaluator_id = "external-confirm-diagnosis-003"
+timeout_seconds = 30

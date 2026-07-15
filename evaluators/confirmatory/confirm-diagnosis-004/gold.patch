@@ -1,0 +1,8 @@
+diff --git a/src/solution.py b/src/solution.py
+index 4f61e1a..d617b4e 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -2 +2,2 @@ def classify_timeout(message):
+-    return 'timeout' if 'timeout' in message else 'other'
++    text = message.casefold()
++    return 'timeout' if 'timeout' in text or 'timed out' in text else 'other'

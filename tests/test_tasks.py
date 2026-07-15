@@ -231,5 +231,63 @@ class MicroRepairSuiteTests(unittest.TestCase):
                 self.assertEqual(hidden.returncode, 0, hidden.stderr)
 
 
+class ConfirmatorySuiteTests(unittest.TestCase):
+    project_root = Path(__file__).parents[1]
+
+    def test_suite_has_preregistered_category_counts(self) -> None:
+        manifests = [
+            load_task_manifest(path)
+            for path in sorted((self.project_root / "tasks/confirmatory").glob("*/task.toml"))
+        ]
+        counts = {
+            category: sum(task.category == category for task in manifests)
+            for category in ("localized", "cross-file", "diagnosis", "adversarial")
+        }
+
+        self.assertEqual(len(manifests), 30)
+        self.assertEqual(
+            counts,
+            {"localized": 12, "cross-file": 8, "diagnosis": 6, "adversarial": 4},
+        )
+
+    def test_every_task_initially_fails_and_gold_passes_both_test_layers(self) -> None:
+        for manifest_path in sorted(
+            (self.project_root / "tasks/confirmatory").glob("*/task.toml")
+        ):
+            task_id = manifest_path.parent.name
+            with self.subTest(task_id=task_id), tempfile.TemporaryDirectory() as directory:
+                task_root = manifest_path.parent
+                evaluator_root = self.project_root / "evaluators/confirmatory" / task_id
+                worktree = Path(directory) / "worktree"
+                task = prepare_task(task_root, worktree)
+                initial = subprocess.run(
+                    task.public_test.command, cwd=worktree, check=False,
+                    capture_output=True, text=True,
+                    timeout=task.public_test.timeout_seconds,
+                )
+                self.assertNotEqual(initial.returncode, 0)
+                gold_patch = evaluator_root / "gold.patch"
+                self.assertEqual(
+                    f"sha256:{sha256(gold_patch.read_bytes()).hexdigest()}",
+                    task.gold_patch_sha256,
+                )
+                subprocess.run(
+                    ["git", "apply", str(gold_patch)], cwd=worktree, check=True,
+                    capture_output=True, text=True,
+                )
+                public = subprocess.run(
+                    task.public_test.command, cwd=worktree, check=False,
+                    capture_output=True, text=True,
+                    timeout=task.public_test.timeout_seconds,
+                )
+                hidden = subprocess.run(
+                    ["python3", "-m", "unittest", "discover", "-s", str(evaluator_root / "tests"), "-v"],
+                    cwd=worktree, check=False, capture_output=True, text=True,
+                    timeout=task.hidden_evaluation.timeout_seconds,
+                )
+                self.assertEqual(public.returncode, 0, public.stderr)
+                self.assertEqual(hidden.returncode, 0, hidden.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,11 @@
+diff --git a/src/solution.py b/src/solution.py
+index f59d1b7..a6a44d9 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -0,0 +1,2 @@
++import re
++
+@@ -2 +4,2 @@ def extract_timestamp(line):
+-    return line.split('at=', 1)[1] if 'at=' in line else None
++    match = re.search(r'(?:^|\s)at=([0-9T:+-]+)', line)
++    return match.group(1) if match else None

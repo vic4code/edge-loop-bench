@@ -1,0 +1,19 @@
+schema_version = 1
+id = "confirm-localized-010"
+language = "python"
+category = "localized"
+source_type = "generated_mutation"
+license = "MIT"
+initial_commit = "39b2e3c663f92571075f4b93e57e854f94ec6255"
+gold_patch_sha256 = "sha256:9a524862af2394f549655ab3aa36afcf852ea0b9f2b44e2d166173e00753989f"
+
+allowed_paths = ["src/**"]
+prohibited_paths = ["tests/**", ".edgeloop/**"]
+
+[public_test]
+command = ["python3", "-m", "unittest", "discover", "-s", "tests/public"]
+timeout_seconds = 30
+
+[hidden_evaluation]
+evaluator_id = "external-confirm-localized-010"
+timeout_seconds = 30

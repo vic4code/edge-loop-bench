@@ -1,0 +1,14 @@
+diff --git a/src/policy.py b/src/policy.py
+index 2969d76..4f81b42 100644
+--- a/src/policy.py
++++ b/src/policy.py
+@@ -2 +2 @@ def discount_rate(subtotal, member):
+-    return 0.1 if member and subtotal > 100 else 0.0
++    return 0.1 if member and subtotal >= 100 else 0.0
+diff --git a/src/service.py b/src/service.py
+index 84617d3..9a25ab1 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -4 +4 @@ def quote_total(subtotal, member):
+-    return subtotal * (1 - discount_rate(subtotal, member))
++    return round(subtotal * (1 - discount_rate(subtotal, member)), 2)

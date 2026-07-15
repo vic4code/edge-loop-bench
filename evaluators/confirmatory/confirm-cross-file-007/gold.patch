@@ -1,0 +1,23 @@
+diff --git a/src/event_codec.py b/src/event_codec.py
+index 61b45d4..478594e 100644
+--- a/src/event_codec.py
++++ b/src/event_codec.py
+@@ -2,2 +2,4 @@ def decode(value):
+-    version, kind, payload = value.split('|', 2)
+-    return {'version': version, 'kind': kind, 'payload': payload}
++    parts = value.split('|', 2)
++    if len(parts) != 3 or parts[0] != 'v1' or parts[1] != 'DATA':
++        return None
++    return {'version': parts[0], 'kind': parts[1], 'payload': parts[2]}
+diff --git a/src/service.py b/src/service.py
+index 2a26677..c0818f0 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -4 +4,6 @@ def accepted_payloads(events):
+-    return [decode(event)['payload'] for event in events]
++    result = []
++    for event in events:
++        decoded = decode(event)
++        if decoded is not None:
++            result.append(decoded['payload'])
++    return result

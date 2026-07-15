@@ -1,0 +1,11 @@
+diff --git a/src/solution.py b/src/solution.py
+index 38ad338..e042f5f 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -3,0 +4 @@ def last_retryable_status(lines):
++    result = None
+@@ -7,2 +8,2 @@ def last_retryable_status(lines):
+-                return int(value)
+-    return None
++                result = int(value)
++    return result

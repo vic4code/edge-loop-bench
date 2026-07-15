@@ -1,0 +1,20 @@
+diff --git a/src/config_parse.py b/src/config_parse.py
+index addfc22..d28c882 100644
+--- a/src/config_parse.py
++++ b/src/config_parse.py
+@@ -2 +2,7 @@ def parse_lines(lines):
+-    return dict(line.split('=', 1) for line in lines if '=' in line)
++    result = {}
++    for line in lines:
++        line = line.strip()
++        if line and not line.startswith('#') and '=' in line:
++            key, value = line.split('=', 1)
++            result[key.strip()] = value.strip()
++    return result
+diff --git a/src/service.py b/src/service.py
+index 1065b75..367b260 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -4 +4 @@ def get_setting(lines, key, default=None):
+-    return parse_lines(lines).get(key)
++    return parse_lines(lines).get(key, default)

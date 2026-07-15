@@ -1,0 +1,7 @@
+diff --git a/src/solution.py b/src/solution.py
+index f23ff24..93bfca3 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -4 +4 @@ def clamp(value, low, high):
+-    return max(low, min(value, high - 1))
++    return max(low, min(value, high))

@@ -1,0 +1,14 @@
+diff --git a/src/intervals.py b/src/intervals.py
+index fdfd7c3..88b4c47 100644
+--- a/src/intervals.py
++++ b/src/intervals.py
+@@ -2 +2 @@ def overlaps(left, right):
+-    return left[0] <= right[1] and right[0] <= left[1]
++    return left[0] < right[1] and right[0] < left[1]
+diff --git a/src/service.py b/src/service.py
+index f72bab9..aebf81a 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -4 +4 @@ def available_slots(existing, candidates):
+-    return [slot for slot in candidates if not any(overlaps(slot, busy) for busy in existing)]
++    return sorted(slot for slot in candidates if not any(overlaps(slot, busy) for busy in existing))

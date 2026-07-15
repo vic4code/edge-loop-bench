@@ -1,0 +1,7 @@
+diff --git a/src/solution.py b/src/solution.py
+index 7a5f12e..1c6eb91 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -2 +2 @@ def canonical_words(text):
+-    return '-'.join(text.strip().casefold().split(' '))
++    return '-'.join(text.strip().casefold().split())

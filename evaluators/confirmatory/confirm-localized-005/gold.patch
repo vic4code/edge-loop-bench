@@ -1,0 +1,7 @@
+diff --git a/src/solution.py b/src/solution.py
+index b2f8956..446882e 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -7 +7 @@ def nearest_rank(values, percentile):
+-    return ordered[max(0, math.floor(percentile / 100 * len(ordered)) - 1)]
++    return ordered[math.ceil(percentile / 100 * len(ordered)) - 1]
