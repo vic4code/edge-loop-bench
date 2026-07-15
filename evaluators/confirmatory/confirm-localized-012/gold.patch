@@ -2,6 +2,7 @@ diff --git a/src/solution.py b/src/solution.py
 index a6b277b..98cca3a 100644
 --- a/src/solution.py
 +++ b/src/solution.py
-@@ -2 +2 @@ def valid_port(value):
+@@ -1,2 +1,2 @@
+ def valid_port(value):
 -    return isinstance(value, int) and 0 <= value <= 65536
 +    return type(value) is int and 1 <= value <= 65535

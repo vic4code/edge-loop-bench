@@ -2,6 +2,7 @@ diff --git a/src/solution.py b/src/solution.py
 index 52035d0..f6b3118 100644
 --- a/src/solution.py
 +++ b/src/solution.py
-@@ -2 +2 @@ def stable_unique(values):
+@@ -1,2 +1,2 @@
+ def stable_unique(values):
 -    return list(dict.fromkeys(reversed(values)))[::-1]
 +    return list(dict.fromkeys(values))

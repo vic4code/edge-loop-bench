@@ -5,7 +5,7 @@ category = "diagnosis"
 source_type = "generated_mutation"
 license = "MIT"
 initial_commit = "970de4ea172c66cbc482dc5d04e4fdf517c2699d"
-gold_patch_sha256 = "sha256:dce008fcd62d7fb629edc78c99eef0848497c5d3a51c3166443c40ecb50450cc"
+gold_patch_sha256 = "sha256:bda40a85b39a1e3091f58dbb406c0650be5b425689f0b2c2b2ec5b4bcbb6b5c2"
 
 allowed_paths = ["src/**"]
 prohibited_paths = ["tests/**", ".edgeloop/**"]

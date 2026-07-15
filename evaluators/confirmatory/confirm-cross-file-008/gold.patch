@@ -2,16 +2,23 @@ diff --git a/src/ledger.py b/src/ledger.py
 index 79b9917..14fcc62 100644
 --- a/src/ledger.py
 +++ b/src/ledger.py
-@@ -2 +2 @@ def valid_debit(balance, amount):
+@@ -1,2 +1,2 @@
+ def valid_debit(balance, amount):
 -    return amount >= 0 and balance >= amount
 +    return amount > 0 and balance >= amount
 diff --git a/src/service.py b/src/service.py
 index 921c329..1cd1429 100644
 --- a/src/service.py
 +++ b/src/service.py
-@@ -4 +4 @@ def transfer(balances, source, target, amount):
+@@ -1,9 +1,9 @@
+ from ledger import valid_debit
+ 
+ def transfer(balances, source, target, amount):
 -    if not valid_debit(balances.get(source, 0), amount):
 +    if source == target or not valid_debit(balances.get(source, 0), amount):
-@@ -8 +8 @@ def transfer(balances, source, target, amount):
+         raise ValueError('debit')
+     result = dict(balances)
+     result[source] -= amount
 -    result[target] = result.get(target, 0) + amount + 1
 +    result[target] = result.get(target, 0) + amount
+     return result

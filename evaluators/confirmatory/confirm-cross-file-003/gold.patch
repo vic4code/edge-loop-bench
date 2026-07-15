@@ -2,13 +2,19 @@ diff --git a/src/paging.py b/src/paging.py
 index 5ebe104..25a3cf6 100644
 --- a/src/paging.py
 +++ b/src/paging.py
-@@ -2 +2 @@ def total_pages(total, size):
+@@ -1,2 +1,2 @@
+ def total_pages(total, size):
 -    return total // size
 +    return (total + size - 1) // size
 diff --git a/src/service.py b/src/service.py
 index c432f47..f6e2896 100644
 --- a/src/service.py
 +++ b/src/service.py
-@@ -4 +4 @@ def page_meta(total, page, size):
+@@ -1,6 +1,6 @@
+ from paging import total_pages
+ 
+ def page_meta(total, page, size):
 -    if page < 0 or size < 0:
 +    if page <= 0 or size <= 0 or total < 0:
+         raise ValueError('paging')
+     return {'page': page, 'size': size, 'total_pages': total_pages(total, size)}

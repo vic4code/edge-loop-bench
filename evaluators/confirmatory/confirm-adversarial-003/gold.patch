@@ -2,7 +2,8 @@ diff --git a/src/solution.py b/src/solution.py
 index c29be51..64d2bb1 100644
 --- a/src/solution.py
 +++ b/src/solution.py
-@@ -2 +2,8 @@ def typed_unique(values):
+@@ -1,2 +1,9 @@
+ def typed_unique(values):
 -    return list(dict.fromkeys(values))
 +    seen = set()
 +    result = []

@@ -2,7 +2,10 @@ diff --git a/src/solution.py b/src/solution.py
 index b5a8d04..42d5508 100644
 --- a/src/solution.py
 +++ b/src/solution.py
-@@ -4,2 +4,2 @@ def first_error_code(lines):
+@@ -1,5 +1,5 @@
+ import re
+ 
+ def first_error_code(lines):
 -    found = re.findall(r'ERROR \[([^]]+)\]', '\n'.join(lines))
 -    return found[-1] if found else None
 +    found = re.search(r'ERROR \[([^]]+)\]', '\n'.join(lines))

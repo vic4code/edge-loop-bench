@@ -2,6 +2,9 @@ diff --git a/src/solution.py b/src/solution.py
 index 963d2f9..2d8e5b1 100644
 --- a/src/solution.py
 +++ b/src/solution.py
-@@ -4 +4 @@ def retry_delay(attempt, base, cap):
+@@ -1,4 +1,4 @@
+ def retry_delay(attempt, base, cap):
+     if min(attempt, base, cap) < 0:
+         raise ValueError('negative')
 -    return max(cap, base * (2 ** attempt))
 +    return min(cap, base * (2 ** attempt))

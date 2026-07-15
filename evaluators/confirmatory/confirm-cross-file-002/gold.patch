@@ -2,13 +2,18 @@ diff --git a/src/inventory.py b/src/inventory.py
 index 072be76..b9364eb 100644
 --- a/src/inventory.py
 +++ b/src/inventory.py
-@@ -2 +2 @@ def can_reserve(state, sku, quantity):
+@@ -1,2 +1,2 @@
+ def can_reserve(state, sku, quantity):
 -    return quantity >= 0 and state.get(sku, 0) >= quantity
 +    return quantity > 0 and state.get(sku, 0) >= quantity
 diff --git a/src/service.py b/src/service.py
 index 65871e4..708afd0 100644
 --- a/src/service.py
 +++ b/src/service.py
-@@ -7 +7 @@ def reserve(state, sku, quantity):
+@@ -4,5 +4,5 @@ def reserve(state, sku, quantity):
+     if not can_reserve(state, sku, quantity):
+         raise ValueError('stock')
+     result = dict(state)
 -    result[sku] -= quantity + 1
 +    result[sku] -= quantity
+     return result

@@ -5,7 +5,7 @@ category = "localized"
 source_type = "generated_mutation"
 license = "MIT"
 initial_commit = "921b5acc3cb4c571bf9f1bf73ed6cbf302d08ed0"
-gold_patch_sha256 = "sha256:67a7a1f71f2a49f850cad00ad2280eae7254bffc59f343ed4ddb0242458b8f05"
+gold_patch_sha256 = "sha256:628295cc28cc8c068ac5759f41154cfea5683308e4a7df4efb787ad6f34f5385"
 
 allowed_paths = ["src/**"]
 prohibited_paths = ["tests/**", ".edgeloop/**"]

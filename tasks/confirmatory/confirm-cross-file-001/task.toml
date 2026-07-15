@@ -5,7 +5,7 @@ category = "cross-file"
 source_type = "generated_mutation"
 license = "MIT"
 initial_commit = "f56cebabc82a5de24ff4ea21b4f8003b276c94be"
-gold_patch_sha256 = "sha256:fe500f8c4c4904d79368208aef97292246e41ca1c47b8ead328f2ef7d860d5e3"
+gold_patch_sha256 = "sha256:4c88026e73cca897edd58e37e7c73e2299664ee8c9e759550b311e89b8e0dd4d"
 
 allowed_paths = ["src/**"]
 prohibited_paths = ["tests/**", ".edgeloop/**"]

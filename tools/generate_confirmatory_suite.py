@@ -258,7 +258,7 @@ def build(case: Case) -> None:
             helper = case.gold.split("from ", 1)[1].split(" import", 1)[0].strip().replace(".", "/") + ".py"
             _write(worktree / "src" / helper, case.extra_gold)
         patch = subprocess.run(
-            ["git", "diff", "--binary", "--unified=0", "--", "src"], cwd=worktree,
+            ["git", "diff", "--binary", "--", "src"], cwd=worktree,
             check=True, capture_output=True, text=True,
         ).stdout
     _write(evaluator_dir / "gold.patch", patch)

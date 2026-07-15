@@ -2,13 +2,17 @@ diff --git a/src/roles.py b/src/roles.py
 index 85a6abb..dfdd1a1 100644
 --- a/src/roles.py
 +++ b/src/roles.py
-@@ -2 +2 @@ def normalized_roles(value):
+@@ -1,2 +1,2 @@
+ def normalized_roles(value):
 -    return value.lower().split(',')
 +    return {part.strip().casefold() for part in value.split(',') if part.strip()}
 diff --git a/src/service.py b/src/service.py
 index 6fc86cd..d13cd93 100644
 --- a/src/service.py
 +++ b/src/service.py
-@@ -4 +4 @@ def is_admin(headers):
+@@ -1,4 +1,4 @@
+ from roles import normalized_roles
+ 
+ def is_admin(headers):
 -    return any('admin' in role for role in normalized_roles(headers.get('roles', '')))
 +    return 'admin' in normalized_roles(headers.get('roles', ''))

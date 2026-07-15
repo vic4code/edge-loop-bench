@@ -5,7 +5,7 @@ category = "adversarial"
 source_type = "generated_mutation"
 license = "MIT"
 initial_commit = "4f047281e343aa239c7f84a0bdc32295c6dcf7aa"
-gold_patch_sha256 = "sha256:a1b2866f48d8684842eccc7be0835394c1d1a31d5cfc44e46d4e2eefdc79c269"
+gold_patch_sha256 = "sha256:e8671499a63f2772fa69e7d8d23da205fb14281e2143b7e1e2e0fb19d592b949"
 
 allowed_paths = ["src/**"]
 prohibited_paths = ["tests/**", ".edgeloop/**"]

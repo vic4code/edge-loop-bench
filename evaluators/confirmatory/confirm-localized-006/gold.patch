@@ -2,7 +2,9 @@ diff --git a/src/solution.py b/src/solution.py
 index 50b2871..c781ee7 100644
 --- a/src/solution.py
 +++ b/src/solution.py
-@@ -3,5 +3,4 @@ def duration_ms(text):
+@@ -1,7 +1,6 @@
+ def duration_ms(text):
+     value = text.strip().lower()
 -    if value.endswith('ms'):
 -        return int(value[:-2]) * 1000
 -    if value.endswith('s'):

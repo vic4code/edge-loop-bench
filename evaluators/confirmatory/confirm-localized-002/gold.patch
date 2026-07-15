@@ -2,6 +2,9 @@ diff --git a/src/solution.py b/src/solution.py
 index 735a6a1..736aede 100644
 --- a/src/solution.py
 +++ b/src/solution.py
-@@ -4 +4 @@ def chunks(items, size):
+@@ -1,4 +1,4 @@
+ def chunks(items, size):
+     if size <= 0:
+         raise ValueError('size')
 -    return [items[i:i + size] for i in range(0, len(items) - size + 1, size)]
 +    return [items[i:i + size] for i in range(0, len(items), size)]
