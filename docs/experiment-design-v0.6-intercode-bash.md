@@ -283,11 +283,13 @@ timeout, reserved-action, output-truncation, and admissibility rules are frozen
 before calibration.
 
 Checkpoint creation and restore are deterministic controller-maintenance
-operations, not model-issued environment actions or evaluator calls. They have
-separate counters and manifest ceilings, and their wall/disk cost is recorded.
-They do not reduce the shared candidate-attempt ceiling. Other arms leave the
-same maintenance ceiling unused. No inference or model-generated summary is
-hidden inside a maintenance operation.
+operations, not model-issued environment actions or evaluator calls. Every
+executed candidate is checkpointed so selected-policy and sealed post-hoc
+audits remain possible; Engineered additionally uses restore online. Creates
+and restores have separate counters and manifest ceilings, and their wall/disk
+cost is recorded. They do not reduce the shared candidate-attempt ceiling.
+Direct simply underuses the shared create ceiling. No inference or model-
+generated summary is hidden inside a maintenance operation.
 
 ## 8. Calibration and model gates
 
