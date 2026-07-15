@@ -157,7 +157,7 @@ class InteractiveControllerTests(unittest.TestCase):
             total_duration_ns=1_000_000,
         )
 
-    def run(
+    def execute_strategy(
         self,
         directory: str,
         *,
@@ -197,7 +197,7 @@ class InteractiveControllerTests(unittest.TestCase):
             first_requests: list[InteractiveModelRequest] = []
             for strategy in STRATEGIES:
                 factory = FakeEnvironmentFactory(rewards={"finish": 1.0})
-                _result, requests = self.run(
+                _result, requests = self.execute_strategy(
                     directory,
                     strategy=strategy,
                     outputs=[self.output("finish")],
@@ -214,7 +214,7 @@ class InteractiveControllerTests(unittest.TestCase):
     def test_direct_makes_exactly_one_call_even_after_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             factory = FakeEnvironmentFactory(rewards={"wrong": 0.0})
-            result, requests = self.run(
+            result, requests = self.execute_strategy(
                 directory,
                 strategy="direct",
                 outputs=[self.output("wrong"), self.output("unused")],
@@ -236,7 +236,7 @@ class InteractiveControllerTests(unittest.TestCase):
                 },
                 rewards={"wrong": 0.25, "finish": 1.0},
             )
-            result, requests = self.run(
+            result, requests = self.execute_strategy(
                 directory,
                 strategy="independent_verified_sampling",
                 outputs=[self.output("wrong"), self.output("finish")],
@@ -263,7 +263,7 @@ class InteractiveControllerTests(unittest.TestCase):
                 },
                 rewards={"inspect": 0.25, "finish": 1.0},
             )
-            result, requests = self.run(
+            result, requests = self.execute_strategy(
                 directory,
                 strategy="raw_feedback_loop",
                 outputs=[self.output("inspect"), self.output("finish")],
@@ -293,7 +293,7 @@ class InteractiveControllerTests(unittest.TestCase):
                 selected.append(checkpoint)
                 return StrictEvaluation(False, digest("strict-false"))
 
-            result, requests = self.run(
+            result, requests = self.execute_strategy(
                 directory,
                 strategy="engineered_loop",
                 outputs=[
@@ -322,7 +322,7 @@ class InteractiveControllerTests(unittest.TestCase):
     def test_parser_failure_counts_attempt_and_tokens_but_not_actions_or_evaluators(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             factory = FakeEnvironmentFactory()
-            result, requests = self.run(
+            result, requests = self.execute_strategy(
                 directory,
                 strategy="direct",
                 outputs=[self.output(text="not-json", prompt_tokens=123, completion_tokens=7)],
@@ -366,7 +366,7 @@ class InteractiveControllerTests(unittest.TestCase):
                 self.assertEqual(_private_output, strict_secret)
                 return StrictEvaluation(True, digest("strict-true"))
 
-            result, requests = self.run(
+            result, requests = self.execute_strategy(
                 directory,
                 strategy="raw_feedback_loop",
                 outputs=[self.output("inspect"), self.output("finish")],
@@ -385,7 +385,7 @@ class InteractiveControllerTests(unittest.TestCase):
             factory = FakeEnvironmentFactory(
                 rewards={"inspect": 0.0, "finish": 1.0},
             )
-            result, _requests = self.run(
+            result, _requests = self.execute_strategy(
                 directory,
                 strategy="raw_feedback_loop",
                 outputs=[

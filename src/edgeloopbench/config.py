@@ -17,7 +17,7 @@ SCHEMA_VERSION = 1
 MAX_MANIFEST_FILE_BYTES = 4 * 1024 * 1024
 MAX_PLANNED_RUNS = 250_000
 TRACKS = frozenset({"effectiveness", "serving", "deployment"})
-STRATEGIES = frozenset(
+LEGACY_STRATEGIES = frozenset(
     {
         "direct",
         "bounded_retry",
@@ -26,6 +26,13 @@ STRATEGIES = frozenset(
         "goal_skill_loop",
     }
 )
+INTERACTIVE_STRATEGIES = (
+    "direct",
+    "independent_verified_sampling",
+    "raw_feedback_loop",
+    "engineered_loop",
+)
+STRATEGIES = LEGACY_STRATEGIES | frozenset(INTERACTIVE_STRATEGIES)
 BACKENDS = frozenset({"ollama", "vllm-metal", "mlx-lm"})
 UNPINNED_VALUES = frozenset(
     {
@@ -52,6 +59,7 @@ SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$", re.IGNORECASE)
 VERSION_PATTERN = re.compile(
     r"^v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?$"
 )
+NAMED_REVISION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._/-]*-v[1-9][0-9]*$")
 SECRET_NAME_PATTERN = re.compile(
     r"(?:^|_)(?:TOKEN|PASSWORD|PASSWD|SECRET|CREDENTIALS?|PAT|AUTHORIZATION|BEARER)"
     r"(?:_|$)|(?:^|_)(?:API|PRIVATE|ACCESS)_KEY(?:_|$)"
@@ -69,6 +77,7 @@ class ModelConfig:
     artifact_sha256: str
     weight_quantization: str
     context_limit_tokens: int
+    kv_cache_quantization: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,8 +93,9 @@ class BackendConfig:
 class GenerationConfig:
     thinking: bool
     temperature: float
-    edit_schema_revision: str
+    edit_schema_revision: str | None
     controller_revision: str
+    action_schema_revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +106,27 @@ class LogicalBudget:
     tool_calls: int
     public_test_runs: int
     per_call_context_tokens: int
+    environment_actions: int = 0
+    evaluator_calls: int = 0
+    checkpoint_creates: int = 0
+    checkpoint_restores: int = 0
+
+
+@dataclass(frozen=True)
+class EnvironmentConfig:
+    adapter: str
+    phase: str
+    adapter_revision: str
+    source_revision: str
+    source_sha256: str
+    suite_sha256: str
+    evaluator_revision: str
+    prompt_revision: str
+    observation_policy_revision: str
+    stop_signal_policy_revision: str
+    checkpoint_policy_revision: str
+    max_attempts: int
+    calibration_manifest_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +160,7 @@ class ExperimentPlan:
     measurement: MeasurementConfig | None = None
     physical_budget: Mapping[str, float] | None = None
     manifest_sha256: str | None = None
+    environment: EnvironmentConfig | None = None
 
     def __post_init__(self) -> None:
         if self.budgets is None:
@@ -172,7 +204,15 @@ class ExperimentPlan:
             assert self.generation is not None
             result["thinking"] = self.generation.thinking
             result["temperature"] = self.generation.temperature
-            result["edit_schema_revision"] = self.generation.edit_schema_revision
+            if self.environment is None:
+                result["edit_schema_revision"] = self.generation.edit_schema_revision
+            else:
+                result["action_schema_revision"] = (
+                    self.generation.action_schema_revision
+                )
+                result["kv_cache_quantization"] = self.model.kv_cache_quantization
+                result["environment_adapter"] = self.environment.adapter
+                result["environment_phase"] = self.environment.phase
             result["controller_revision"] = self.generation.controller_revision
         return result
 
@@ -246,6 +286,7 @@ def validate_experiment(
         "request_shapes",
         "measurement",
         "physical_budget",
+        "environment",
         "notes",
     }
     _reject_unknown(raw, allowed, source)
@@ -264,6 +305,13 @@ def validate_experiment(
     draft = _boolean(raw, "draft", source)
     model = _parse_model(_table(raw, "model", source), source)
     backend = _parse_backend(_table(raw, "backend", source), source)
+    environment: EnvironmentConfig | None = None
+    if "environment" in raw:
+        if track == "serving":
+            raise ValidationError(
+                f"{source}: serving track cannot define an interactive environment"
+            )
+        environment = _parse_environment(_table(raw, "environment", source), source)
 
     if not draft:
         if not _is_immutable_pin(model.revision):
@@ -297,7 +345,11 @@ def validate_experiment(
             manifest_sha256=manifest_sha256,
         )
     else:
-        generation = _parse_generation(_table(raw, "generation", source), source)
+        generation = _parse_generation(
+            _table(raw, "generation", source),
+            source,
+            interactive=environment is not None,
+        )
         plan = _parse_agent_track(
             raw,
             source=source,
@@ -308,6 +360,7 @@ def validate_experiment(
             model=model,
             backend=backend,
             generation=generation,
+            environment=environment,
             manifest_sha256=manifest_sha256,
         )
     if plan.run_count > MAX_PLANNED_RUNS:
@@ -327,6 +380,7 @@ def _parse_model(raw: Mapping[str, Any], source: str) -> ModelConfig:
             "revision",
             "artifact_sha256",
             "weight_quantization",
+            "kv_cache_quantization",
             "context_limit_tokens",
         },
         field,
@@ -337,6 +391,11 @@ def _parse_model(raw: Mapping[str, Any], source: str) -> ModelConfig:
         artifact_sha256=_string(raw, "artifact_sha256", field),
         weight_quantization=_string(raw, "weight_quantization", field),
         context_limit_tokens=_positive_integer(raw, "context_limit_tokens", field),
+        kv_cache_quantization=(
+            _string(raw, "kv_cache_quantization", field)
+            if "kv_cache_quantization" in raw
+            else None
+        ),
     )
 
 
@@ -381,11 +440,120 @@ def _parse_backend(raw: Mapping[str, Any], source: str) -> BackendConfig:
     )
 
 
-def _parse_generation(raw: Mapping[str, Any], source: str) -> GenerationConfig:
+def _parse_environment(
+    raw: Mapping[str, Any], source: str
+) -> EnvironmentConfig:
+    field = f"{source}: environment"
+    allowed = {
+        "adapter",
+        "phase",
+        "adapter_revision",
+        "source_revision",
+        "source_sha256",
+        "suite_sha256",
+        "evaluator_revision",
+        "prompt_revision",
+        "observation_policy_revision",
+        "stop_signal_policy_revision",
+        "checkpoint_policy_revision",
+        "max_attempts",
+        "calibration_manifest_sha256",
+    }
+    _reject_unknown(raw, allowed, field)
+
+    adapter = _identifier(raw, "adapter", field)
+    phase = _string(raw, "phase", field)
+    if phase not in {"calibration", "confirmatory"}:
+        raise ValidationError(
+            f"{field}: phase must be calibration or confirmatory, got {phase!r}"
+        )
+
+    adapter_revision = _immutable_revision(
+        raw, "adapter_revision", field
+    )
+    source_revision = _string(raw, "source_revision", field)
+    if not _is_immutable_pin(source_revision):
+        raise ValidationError(
+            f"{field}: source_revision must be immutable and pinned to a commit"
+        )
+    if not COMMIT_PATTERN.fullmatch(source_revision):
+        raise ValidationError(
+            f"{field}: source_revision must be an immutable commit"
+        )
+
+    source_sha256 = _sha256(raw, "source_sha256", field)
+    suite_sha256 = _sha256(raw, "suite_sha256", field)
+    evaluator_revision = _immutable_revision(
+        raw, "evaluator_revision", field
+    )
+    prompt_revision = _immutable_revision(raw, "prompt_revision", field)
+
+    policy_revisions: dict[str, str] = {}
+    for name in (
+        "observation_policy_revision",
+        "stop_signal_policy_revision",
+        "checkpoint_policy_revision",
+    ):
+        value = _string(raw, name, field)
+        if not (
+            _is_immutable_pin(value)
+            or NAMED_REVISION_PATTERN.fullmatch(value)
+        ):
+            raise ValidationError(f"{field}: {name} must be immutable")
+        policy_revisions[name] = value
+
+    max_attempts = _positive_integer(raw, "max_attempts", field)
+    if max_attempts != 10:
+        raise ValidationError(
+            f"{field}: max_attempts must be 10 for the frozen verified-sampling K"
+        )
+
+    calibration_manifest_sha256: str | None = None
+    if "calibration_manifest_sha256" in raw:
+        calibration_manifest_sha256 = _sha256(
+            raw, "calibration_manifest_sha256", field
+        )
+    elif phase == "confirmatory":
+        raise ValidationError(
+            f"{field}: calibration_manifest_sha256 is required for confirmatory runs"
+        )
+
+    return EnvironmentConfig(
+        adapter=adapter,
+        phase=phase,
+        adapter_revision=adapter_revision,
+        source_revision=source_revision,
+        source_sha256=source_sha256,
+        suite_sha256=suite_sha256,
+        evaluator_revision=evaluator_revision,
+        prompt_revision=prompt_revision,
+        observation_policy_revision=policy_revisions[
+            "observation_policy_revision"
+        ],
+        stop_signal_policy_revision=policy_revisions[
+            "stop_signal_policy_revision"
+        ],
+        checkpoint_policy_revision=policy_revisions[
+            "checkpoint_policy_revision"
+        ],
+        max_attempts=max_attempts,
+        calibration_manifest_sha256=calibration_manifest_sha256,
+    )
+
+
+def _parse_generation(
+    raw: Mapping[str, Any], source: str, *, interactive: bool
+) -> GenerationConfig:
     field = f"{source}: generation"
     _reject_unknown(
         raw,
-        {"thinking", "temperature", "edit_schema_revision", "controller_revision"},
+        {
+            "thinking",
+            "temperature",
+            "edit_schema_revision",
+            "action_schema_revision",
+            "controller_revision",
+        },
         field,
     )
     temperature = raw.get("temperature")
@@ -394,14 +562,39 @@ def _parse_generation(raw: Mapping[str, Any], source: str) -> GenerationConfig:
     temperature = float(temperature)
     if not math.isfinite(temperature) or temperature < 0:
         raise ValidationError(f"{field}: temperature must be finite and nonnegative")
+    if interactive and temperature <= 0:
+        raise ValidationError(
+            f"{field}: temperature must be positive and nonzero for interactive sampling"
+        )
     controller_revision = _string(raw, "controller_revision", field)
     if not _is_immutable_pin(controller_revision):
         raise ValidationError(f"{field}: controller_revision must be immutable")
+    if interactive:
+        if "edit_schema_revision" in raw:
+            raise ValidationError(
+                f"{field}: edit_schema_revision is not valid for an interactive experiment"
+            )
+        if "action_schema_revision" not in raw:
+            raise ValidationError(
+                f"{field}: action_schema_revision is required for an interactive experiment"
+            )
+        edit_schema_revision = None
+        action_schema_revision = _identifier(
+            raw, "action_schema_revision", field
+        )
+    else:
+        if "action_schema_revision" in raw:
+            raise ValidationError(
+                f"{field}: action_schema_revision requires an interactive environment"
+            )
+        edit_schema_revision = _identifier(raw, "edit_schema_revision", field)
+        action_schema_revision = None
     return GenerationConfig(
         thinking=_boolean(raw, "thinking", field),
         temperature=temperature,
-        edit_schema_revision=_identifier(raw, "edit_schema_revision", field),
+        edit_schema_revision=edit_schema_revision,
         controller_revision=controller_revision,
+        action_schema_revision=action_schema_revision,
     )
 
 
@@ -416,6 +609,7 @@ def _parse_agent_track(
     model: ModelConfig,
     backend: BackendConfig,
     generation: GenerationConfig,
+    environment: EnvironmentConfig | None,
     manifest_sha256: str | None,
 ) -> ExperimentPlan:
     if "request_shapes" in raw or "measurement" in raw:
@@ -425,15 +619,41 @@ def _parse_agent_track(
 
     tasks = _unique_string_list(raw, "tasks", source)
     strategies = _unique_string_list(raw, "strategies", source)
-    if len(strategies) < 2:
-        raise ValidationError(
-            f"{source}: strategies must contain at least two comparison arms"
+    if environment is None:
+        if len(strategies) < 2:
+            raise ValidationError(
+                f"{source}: strategies must contain at least two comparison arms"
+            )
+        unsupported = sorted(set(strategies) - STRATEGIES)
+        if unsupported:
+            raise ValidationError(
+                f"{source}: unsupported strategies: {', '.join(unsupported)}"
+            )
+        interactive_only = sorted(
+            set(strategies) & (set(INTERACTIVE_STRATEGIES) - {"direct"})
         )
-    unsupported = sorted(set(strategies) - STRATEGIES)
-    if unsupported:
-        raise ValidationError(
-            f"{source}: unsupported strategies: {', '.join(unsupported)}"
-        )
+        if interactive_only:
+            raise ValidationError(
+                f"{source}: interactive strategies require an environment table: "
+                f"{', '.join(interactive_only)}"
+            )
+    else:
+        legacy_only = sorted((set(strategies) & LEGACY_STRATEGIES) - {"direct"})
+        if legacy_only:
+            raise ValidationError(
+                f"{source}: legacy strategies cannot be mixed with the exact "
+                "interactive strategy family"
+            )
+        if strategies != INTERACTIVE_STRATEGIES:
+            raise ValidationError(
+                f"{source}: strategies must equal the exact interactive strategy family "
+                f"{list(INTERACTIVE_STRATEGIES)!r}"
+            )
+        if model.kv_cache_quantization is None:
+            raise ValidationError(
+                f"{source}: model.kv_cache_quantization is required as a separate "
+                "variable from weight_quantization for interactive experiments"
+            )
     seeds = _unique_integer_list(raw, "seeds", source)
 
     budget_tables = _table(raw, "budgets", source)
@@ -447,7 +667,11 @@ def _parse_agent_track(
             raise ValidationError(f"{source}: invalid budget tier name {name!r}")
         if not isinstance(value, Mapping):
             raise ValidationError(f"{source}: budgets.{name} must be a table")
-        budget = _parse_budget(value, f"{source}: budgets.{name}")
+        budget = _parse_budget(
+            value,
+            f"{source}: budgets.{name}",
+            interactive=environment is not None,
+        )
         if budget.per_call_context_tokens > model.context_limit_tokens:
             raise ValidationError(
                 f"{source}: budgets.{name}.per_call_context_tokens exceeds the model context limit"
@@ -478,11 +702,14 @@ def _parse_agent_track(
         budgets=budgets,
         physical_budget=physical_budget,
         manifest_sha256=manifest_sha256,
+        environment=environment,
     )
 
 
-def _parse_budget(raw: Mapping[str, Any], source: str) -> LogicalBudget:
-    fields = (
+def _parse_budget(
+    raw: Mapping[str, Any], source: str, *, interactive: bool
+) -> LogicalBudget:
+    base_fields = (
         "prompt_tokens",
         "completion_tokens",
         "model_calls",
@@ -490,10 +717,19 @@ def _parse_budget(raw: Mapping[str, Any], source: str) -> LogicalBudget:
         "public_test_runs",
         "per_call_context_tokens",
     )
-    _reject_unknown(raw, set(fields), source)
-    return LogicalBudget(
-        **{field: _positive_integer(raw, field, source) for field in fields}
+    interactive_fields = (
+        "environment_actions",
+        "evaluator_calls",
+        "checkpoint_creates",
+        "checkpoint_restores",
     )
+    fields = base_fields + interactive_fields if interactive else base_fields
+    _reject_unknown(raw, set(fields), source)
+    values = {
+        field: _positive_integer(raw, field, source)
+        for field in fields
+    }
+    return LogicalBudget(**values)
 
 
 def _parse_physical_budget(raw: Mapping[str, Any], source: str) -> Mapping[str, float]:
@@ -595,6 +831,22 @@ def _string(raw: Mapping[str, Any], key: str, source: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValidationError(f"{source}: {key} must be a non-empty string")
     return value.strip()
+
+
+def _immutable_revision(
+    raw: Mapping[str, Any], key: str, source: str
+) -> str:
+    value = _string(raw, key, source)
+    if not _is_immutable_pin(value):
+        raise ValidationError(f"{source}: {key} must be immutable and pinned")
+    return value
+
+
+def _sha256(raw: Mapping[str, Any], key: str, source: str) -> str:
+    value = _string(raw, key, source)
+    if not SHA256_PATTERN.fullmatch(value):
+        raise ValidationError(f"{source}: {key} must be a SHA-256 digest")
+    return value
 
 
 def _identifier(raw: Mapping[str, Any], key: str, source: str) -> str:
