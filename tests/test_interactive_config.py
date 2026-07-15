@@ -96,6 +96,7 @@ environment_actions = 10
 evaluator_calls = 10
 checkpoint_creates = 10
 checkpoint_restores = 10
+safety_recoveries = 6
 per_call_context_tokens = 8192
 
 [environment]
@@ -110,7 +111,7 @@ prompt_revision = "sha256:555555555555555555555555555555555555555555555555555555
 observation_policy_revision = "agent-observation-v1"
 stop_signal_policy_revision = "controller-stop-signal-v1"
 checkpoint_policy_revision = "checkpoint-policy-v1"
-max_attempts = 10
+max_attempts = 6
 """
 
 
@@ -146,7 +147,7 @@ class InteractiveExperimentConfigTests(unittest.TestCase):
         )
         self.assertEqual(plan.environment.adapter, "intercode-bash-v1")
         self.assertEqual(plan.environment.phase, "calibration")
-        self.assertEqual(plan.environment.max_attempts, 10)
+        self.assertEqual(plan.environment.max_attempts, 6)
         self.assertEqual(plan.generation.action_schema_revision, "bash-command-v1")
         self.assertIsNone(plan.generation.edit_schema_revision)
         self.assertEqual(plan.model.weight_quantization, "q4_k_m")
@@ -155,6 +156,7 @@ class InteractiveExperimentConfigTests(unittest.TestCase):
         self.assertEqual(plan.budgets["fixed"].evaluator_calls, 10)
         self.assertEqual(plan.budgets["fixed"].checkpoint_creates, 10)
         self.assertEqual(plan.budgets["fixed"].checkpoint_restores, 10)
+        self.assertEqual(plan.budgets["fixed"].safety_recoveries, 6)
 
     def test_interactive_manifest_requires_each_reproducibility_pin(self) -> None:
         fields = (
@@ -297,6 +299,7 @@ class InteractiveExperimentConfigTests(unittest.TestCase):
             "evaluator_calls",
             "checkpoint_creates",
             "checkpoint_restores",
+            "safety_recoveries",
         )
 
         for field in fields:
@@ -343,16 +346,16 @@ class InteractiveExperimentConfigTests(unittest.TestCase):
         ):
             self.load_text(invalid)
 
-    def test_verified_sampling_requires_k_ten(self) -> None:
-        for maximum in (1, 4, 9, 11):
+    def test_verified_sampling_requires_frozen_k_six(self) -> None:
+        for maximum in (1, 4, 5, 7, 10):
             with self.subTest(maximum=maximum):
                 invalid = VALID_INTERACTIVE.replace(
-                    "max_attempts = 10", f"max_attempts = {maximum}"
+                    "max_attempts = 6", f"max_attempts = {maximum}"
                 )
 
                 with self.assertRaisesRegex(
                     ValidationError,
-                    "max_attempts.*10|K.*10",
+                    "max_attempts.*6|K.*6",
                 ):
                     self.load_text(invalid)
 

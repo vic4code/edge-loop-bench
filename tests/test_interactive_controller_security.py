@@ -19,9 +19,18 @@ from edgeloopbench.interactive_controller import (
 )
 from edgeloopbench.interactive_environment import (
     ActionExecution,
+    ActionPolicyFailureKind,
     AttemptEvaluation,
+    AttemptEvaluationKind,
     EnvironmentCheckpoint,
     StrictEvaluation,
+    TerminalFinalization,
+    TerminalSelection,
+)
+from edgeloopbench.model_adapter import (
+    PHI4_MINI_RAW_PROFILE,
+    PreparedPrompt,
+    TranscriptMessage,
 )
 
 
@@ -91,6 +100,7 @@ class SecurityFakeFactory:
         self.checkpoint_calls = 0
         self.evaluator_calls = 0
         self.restore_calls = 0
+        self.terminal_selections: list[TerminalSelection] = []
 
     def create(self) -> SecurityFakeEnvironment:
         environment = SecurityFakeEnvironment(self, len(self.environments) + 1)
@@ -114,9 +124,10 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
             "completion_tokens": 1_000,
             "model_calls": 4,
             "environment_actions": 4,
-            "evaluator_calls": 4,
+            "evaluator_calls": 5,
             "checkpoint_creates": 4,
             "checkpoint_restores": 4,
+            "safety_recoveries": 4,
             "per_call_context_tokens": 8_192,
             "max_output_tokens": 256,
         }
@@ -145,7 +156,23 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
     ) -> tuple[object, list[InteractiveModelRequest], list[EnvironmentCheckpoint], Path]:
         requests: list[InteractiveModelRequest] = []
         remaining = list(outputs)
+        planned = list(outputs)
         strict_checkpoints: list[EnvironmentCheckpoint] = []
+
+        def prepare(messages: tuple[TranscriptMessage, ...]) -> PreparedPrompt:
+            index = len(requests)
+            if index >= len(planned):
+                self.fail("controller prepared an unplanned model call")
+            rendered = PHI4_MINI_RAW_PROFILE.render(messages)
+            return PreparedPrompt(
+                rendered_prompt=rendered,
+                prompt_tokens=planned[index].prompt_tokens,
+                prompt_sha256=digest(rendered),
+                token_ids_sha256=digest(f"tokens-{index}"),
+                renderer_profile_sha256=PHI4_MINI_RAW_PROFILE.sha256,
+                tokenizer_artifact_sha256=digest("test-tokenizer"),
+                model_artifact_sha256=PHI4_MINI_RAW_PROFILE.model_artifact_sha256,
+            )
 
         def model(request: InteractiveModelRequest) -> InteractiveModelOutput:
             requests.append(request)
@@ -157,14 +184,29 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
             strict_checkpoints.append(checkpoint)
             return StrictEvaluation(False, digest("strict-evaluator-v1"))
 
+        def finalize(
+            selection: TerminalSelection,
+            strict_evaluate: object,
+            evaluator_call_limit: int,
+        ) -> TerminalFinalization:
+            factory.terminal_selections.append(selection)
+            if strict_evaluate is None:
+                return TerminalFinalization(None, 0, 0)
+            self.assertGreaterEqual(evaluator_call_limit, 1)
+            self.assertIsNotNone(selection.checkpoint)
+            result = strict_evaluate(selection.checkpoint)  # type: ignore[operator]
+            return TerminalFinalization(result, 1, 0)
+
         event_log = Path(directory) / f"{strategy}.security.events.jsonl"
         result = run_interactive_strategy(
             strategy=strategy,
             task=self.task,
             model=model,
+            prompt_preparer=prepare,
             environment_factory=factory.create,
             attempt_evaluate=factory.evaluate,
             strict_evaluate=strict,
+            terminal_finalize=finalize,
             budget=budget or self.budget(),
             replicate_seed=29,
             event_log=event_log,
@@ -197,9 +239,12 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
                         [record["type"] for record in records],
                         [
                             "controller_started",
+                            "model_preflighted",
                             "model_requested",
                             "model_completed",
                             "action_rejected",
+                            "terminal_finalization_requested",
+                            "terminal_finalized",
                             "controller_stopped",
                             "journal_sealed",
                         ],
@@ -265,15 +310,101 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     AttemptEvaluation(reward, success)
 
+    def test_action_execution_requires_typed_recovered_policy_state(self) -> None:
+        valid = ActionExecution(
+            observation="Command timed out.",
+            exit_code=None,
+            state_sha256=digest("restored"),
+            output_sha256=digest("private-output"),
+            admissible=False,
+            state_changed=False,
+            policy_failure=ActionPolicyFailureKind.TIMEOUT,
+            safety_recovery_performed=True,
+            safety_recovery_evidence_sha256=digest("private-recovery-ledger"),
+        )
+        self.assertFalse(valid.admissible)
+        invalid = (
+            {"policy_failure": None},
+            {"state_changed": True},
+            {"admissible": True},
+            {"safety_recovery_performed": False},
+            {"safety_recovery_evidence_sha256": None},
+        )
+        for replacement in invalid:
+            values = {
+                field.name: getattr(valid, field.name)
+                for field in fields(valid)
+            }
+            values.update(replacement)
+            with self.subTest(replacement=replacement):
+                with self.assertRaises(ValueError):
+                    ActionExecution(**values)
+
+    def test_candidate_surface_failure_is_counted_but_never_strictly_reclassified(self) -> None:
+        factory = SecurityFakeFactory()
+
+        def candidate_failure(_checkpoint: EnvironmentCheckpoint) -> AttemptEvaluation:
+            factory.evaluator_calls += 1
+            return AttemptEvaluation(
+                0.0,
+                False,
+                AttemptEvaluationKind.CANDIDATE_SURFACE_FAILURE,
+            )
+
+        factory.evaluate = candidate_failure  # type: ignore[method-assign]
+        with tempfile.TemporaryDirectory() as directory:
+            result, _requests, strict, event_log = self.run_case(
+                directory,
+                strategy="direct",
+                outputs=[self.output("create-special-state")],
+                factory=factory,
+            )
+
+            self.assertEqual(result.run_status, "completed")
+            self.assertFalse(result.official_success)
+            self.assertFalse(result.strict_success)
+            self.assertEqual(result.evaluator_calls, 1)
+            self.assertEqual(strict, [])
+            self.assertEqual(len(factory.terminal_selections), 1)
+            terminal = factory.terminal_selections[0]
+            self.assertIsNotNone(terminal.checkpoint)
+            self.assertEqual(
+                terminal.evaluation_kind,
+                AttemptEvaluationKind.CANDIDATE_SURFACE_FAILURE,
+            )
+            self.assertFalse(terminal.aborted)
+            records = [json.loads(line) for line in event_log.read_text().splitlines()]
+            evaluated = next(
+                record for record in records if record["type"] == "attempt_evaluated"
+            )
+            self.assertEqual(
+                evaluated["evaluation_kind"],
+                "candidate_surface_failure",
+            )
+            self.assertIn(
+                "strict_evaluation_defaulted",
+                [record["type"] for record in records],
+            )
+            self.assertNotIn(
+                "strict_evaluation_completed",
+                [record["type"] for record in records],
+            )
+
     def test_evaluator_result_types_have_no_diagnostic_or_path_channel(self) -> None:
         self.assertEqual(
             [field.name for field in fields(AttemptEvaluation)],
-            ["reward", "official_success"],
+            ["reward", "official_success", "evaluation_kind"],
         )
         self.assertEqual(
             [field.name for field in fields(StrictEvaluation)],
             ["strict_success", "evaluator_sha256"],
         )
+        with self.assertRaises(ValueError):
+            AttemptEvaluation(
+                0.5,
+                False,
+                AttemptEvaluationKind.CANDIDATE_SURFACE_FAILURE,
+            )
         with self.assertRaises(TypeError):
             AttemptEvaluation(0.0, False, diagnostics="gold patch")  # type: ignore[call-arg]
         with self.assertRaises(TypeError):
@@ -287,7 +418,7 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
             with self.subTest(budget=budget):
                 with tempfile.TemporaryDirectory() as directory:
                     factory = SecurityFakeFactory(rewards={"one": 0.0})
-                    result, requests, _strict, _event_log = self.run_case(
+                    result, requests, strict, _event_log = self.run_case(
                         directory,
                         strategy="raw_feedback_loop",
                         outputs=[self.output("one")],
@@ -307,7 +438,7 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
             with self.subTest(budget=budget):
                 with tempfile.TemporaryDirectory() as directory:
                     factory = SecurityFakeFactory(rewards={"one": 0.0})
-                    result, requests, _strict, _event_log = self.run_case(
+                    result, requests, strict, _event_log = self.run_case(
                         directory,
                         strategy="raw_feedback_loop",
                         outputs=[output],
@@ -323,13 +454,15 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
             (
                 self.budget(prompt_tokens=19),
                 self.output("must-not-run", prompt_tokens=20),
+                0,
             ),
             (
                 self.budget(per_call_context_tokens=24),
                 self.output("must-not-run", prompt_tokens=20, completion_tokens=5),
+                1,
             ),
         )
-        for budget, output in cases:
+        for budget, output, expected_model_calls in cases:
             with self.subTest(budget=budget):
                 with tempfile.TemporaryDirectory() as directory:
                     factory = SecurityFakeFactory()
@@ -340,8 +473,8 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
                         factory=factory,
                         budget=budget,
                     )
-                self.assertEqual(len(requests), 1)
-                self.assertEqual(result.model_calls, 1)
+                self.assertEqual(len(requests), expected_model_calls)
+                self.assertEqual(result.model_calls, expected_model_calls)
                 self.assertEqual(result.environment_actions, 0)
                 self.assertEqual(result.checkpoint_creates, 0)
                 self.assertEqual(result.evaluator_calls, 0)
@@ -354,19 +487,23 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
             with self.subTest(cap_name=cap_name):
                 with tempfile.TemporaryDirectory() as directory:
                     factory = SecurityFakeFactory(rewards={"one": 0.0})
-                    result, requests, _strict, _event_log = self.run_case(
+                    result, requests, strict, _event_log = self.run_case(
                         directory,
                         strategy="raw_feedback_loop",
                         outputs=[self.output("one"), self.output("not-executed")],
                         factory=factory,
                         budget=self.budget(**{cap_name: 1}),
                     )
-                self.assertEqual(factory.execute_calls, 1)
-                self.assertEqual(factory.checkpoint_calls, 1)
-                self.assertEqual(factory.evaluator_calls, 1)
+                expected_pipeline_calls = 0 if cap_name == "evaluator_calls" else 1
+                self.assertEqual(factory.execute_calls, expected_pipeline_calls)
+                self.assertEqual(factory.checkpoint_calls, expected_pipeline_calls)
+                self.assertEqual(factory.evaluator_calls, expected_pipeline_calls)
                 self.assertEqual(result.environment_actions, factory.execute_calls)
                 self.assertEqual(result.checkpoint_creates, factory.checkpoint_calls)
-                self.assertEqual(result.evaluator_calls, factory.evaluator_calls)
+                self.assertEqual(
+                    result.evaluator_calls,
+                    factory.evaluator_calls + len(strict),
+                )
                 self.assertEqual(result.model_calls, len(requests))
                 self.assertLessEqual(getattr(result, cap_name), 1)
 
@@ -397,7 +534,10 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
         self.assertEqual(result.model_calls, len(requests))
         self.assertEqual(result.environment_actions, factory.execute_calls)
         self.assertEqual(result.checkpoint_creates, factory.checkpoint_calls)
-        self.assertEqual(result.evaluator_calls, factory.evaluator_calls)
+        self.assertEqual(
+            result.evaluator_calls,
+            factory.evaluator_calls + len(strict),
+        )
         self.assertEqual(strict[0].state_sha256, digest("best-state"))
 
     def test_engineered_packet_is_absent_from_candidate_one_and_present_after_it(self) -> None:

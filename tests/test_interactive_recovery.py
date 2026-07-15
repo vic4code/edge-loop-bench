@@ -18,8 +18,15 @@ from edgeloopbench.interactive_environment import (
     AttemptEvaluation,
     EnvironmentCheckpoint,
     StrictEvaluation,
+    TerminalFinalization,
+    TerminalSelection,
 )
 from edgeloopbench.journal import JournalIntegrityError, inspect_journal
+from edgeloopbench.model_adapter import (
+    PHI4_MINI_RAW_PROFILE,
+    PreparedPrompt,
+    TranscriptMessage,
+)
 
 
 def digest(label: str) -> str:
@@ -48,6 +55,7 @@ class RecoveryHarness:
         self.restore_calls = 0
         self.strict_calls = 0
         self.close_calls = 0
+        self.terminal_calls = 0
 
     def model(self, _request: InteractiveModelRequest) -> InteractiveModelOutput:
         self.model_calls += 1
@@ -58,6 +66,18 @@ class RecoveryHarness:
             prompt_tokens=20,
             completion_tokens=5,
             total_duration_ns=1,
+        )
+
+    def prepare(self, messages: tuple[TranscriptMessage, ...]) -> PreparedPrompt:
+        rendered = PHI4_MINI_RAW_PROFILE.render(messages)
+        return PreparedPrompt(
+            rendered_prompt=rendered,
+            prompt_tokens=20,
+            prompt_sha256=digest(rendered),
+            token_ids_sha256=digest(f"tokens-{self.model_calls}"),
+            renderer_profile_sha256=PHI4_MINI_RAW_PROFILE.sha256,
+            tokenizer_artifact_sha256=digest("test-tokenizer"),
+            model_artifact_sha256=PHI4_MINI_RAW_PROFILE.model_artifact_sha256,
         )
 
     def create(self) -> RecoveryEnvironment:
@@ -77,6 +97,20 @@ class RecoveryHarness:
         self._fail("strict_evaluator")
         return StrictEvaluation(False, digest("strict-evaluator-v1"))
 
+    def finalize(
+        self,
+        selection: TerminalSelection,
+        strict_evaluate: object,
+        evaluator_call_limit: int,
+    ) -> TerminalFinalization:
+        self.terminal_calls += 1
+        if strict_evaluate is None:
+            return TerminalFinalization(None, 0, 0)
+        if evaluator_call_limit < 1 or selection.checkpoint is None:
+            raise AssertionError("strict terminal call lacks budget or checkpoint")
+        result = strict_evaluate(selection.checkpoint)  # type: ignore[operator]
+        return TerminalFinalization(result, 1, 0)
+
     def snapshot(self) -> tuple[int, ...]:
         return (
             self.model_calls,
@@ -87,6 +121,7 @@ class RecoveryHarness:
             self.restore_calls,
             self.strict_calls,
             self.close_calls,
+            self.terminal_calls,
         )
 
     def _fail(self, boundary: str) -> None:
@@ -148,9 +183,10 @@ class InteractiveRecoveryTests(unittest.TestCase):
             completion_tokens=100,
             model_calls=2,
             environment_actions=2,
-            evaluator_calls=2,
+            evaluator_calls=3,
             checkpoint_creates=2,
             checkpoint_restores=2,
+            safety_recoveries=2,
             per_call_context_tokens=512,
             max_output_tokens=32,
         )
@@ -160,9 +196,11 @@ class InteractiveRecoveryTests(unittest.TestCase):
             strategy=strategy,
             task=self.task,
             model=harness.model,
+            prompt_preparer=harness.prepare,
             environment_factory=harness.create,
             attempt_evaluate=harness.evaluate,
             strict_evaluate=harness.strict,
+            terminal_finalize=harness.finalize,
             budget=self.budget(),
             replicate_seed=47,
             event_log=harness.event_log,
@@ -212,11 +250,24 @@ class InteractiveRecoveryTests(unittest.TestCase):
                     with self.assertRaisesRegex(InjectedFailure, failure):
                         self.execute_case(harness, strategy=strategy)
 
+                    self.assertEqual(harness.terminal_calls, 1)
+
                     types_at_failure = [
                         str(record["type"]) for record in harness.records_at_failure
                     ]
                     self.assertIn(intent, types_at_failure)
                     self.assertNotIn(completion, types_at_failure)
+                    if failure == "model":
+                        requested = next(
+                            record
+                            for record in harness.records_at_failure
+                            if record["type"] == "model_requested"
+                        )
+                        self.assertEqual(requested["logical_model_calls_after"], 1)
+                        self.assertEqual(
+                            requested["logical_prompt_tokens_after"],
+                            20,
+                        )
 
                     inspection = inspect_journal(event_log)
                     self.assertGreater(inspection.record_count, 0)

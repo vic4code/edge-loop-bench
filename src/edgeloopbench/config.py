@@ -110,6 +110,7 @@ class LogicalBudget:
     evaluator_calls: int = 0
     checkpoint_creates: int = 0
     checkpoint_restores: int = 0
+    safety_recoveries: int = 0
 
 
 @dataclass(frozen=True)
@@ -503,9 +504,9 @@ def _parse_environment(
         policy_revisions[name] = value
 
     max_attempts = _positive_integer(raw, "max_attempts", field)
-    if max_attempts != 10:
+    if max_attempts != 6:
         raise ValidationError(
-            f"{field}: max_attempts must be 10 for the frozen verified-sampling K"
+            f"{field}: max_attempts must be 6 for the frozen verified-sampling K"
         )
 
     calibration_manifest_sha256: str | None = None
@@ -722,6 +723,7 @@ def _parse_budget(
         "evaluator_calls",
         "checkpoint_creates",
         "checkpoint_restores",
+        "safety_recoveries",
     )
     fields = base_fields + interactive_fields if interactive else base_fields
     _reject_unknown(raw, set(fields), source)

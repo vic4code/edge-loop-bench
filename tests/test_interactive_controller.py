@@ -16,9 +16,18 @@ from edgeloopbench.interactive_controller import (
 )
 from edgeloopbench.interactive_environment import (
     ActionExecution,
+    ActionPolicyFailureKind,
     AttemptEvaluation,
+    AttemptEvaluationKind,
     EnvironmentCheckpoint,
     StrictEvaluation,
+    TerminalFinalization,
+    TerminalSelection,
+)
+from edgeloopbench.model_adapter import (
+    PHI4_MINI_RAW_PROFILE,
+    PreparedPrompt,
+    TranscriptMessage,
 )
 
 
@@ -53,14 +62,23 @@ class FakeEnvironment:
             (f"output for {action}", digest(action), True),
         )
         previous_state_digest = self.state_digest
+        if not admissible:
+            state_digest = previous_state_digest
         self.state_digest = state_digest
         return ActionExecution(
             observation=observation,
-            exit_code=0,
+            exit_code=0 if admissible else None,
             state_sha256=state_digest,
             output_sha256=digest(observation),
             admissible=admissible,
             state_changed=state_digest != previous_state_digest,
+            policy_failure=(
+                None if admissible else ActionPolicyFailureKind.TIMEOUT
+            ),
+            safety_recovery_performed=not admissible,
+            safety_recovery_evidence_sha256=(
+                None if admissible else digest(f"recovery-{self.identifier}-{action}")
+            ),
         )
 
     def checkpoint(self) -> EnvironmentCheckpoint:
@@ -104,6 +122,8 @@ class FakeEnvironmentFactory:
         self.checkpoints: dict[str, dict[str, str]] = {}
         self.timeline: list[tuple[str, int, str]] = []
         self.evaluator_calls: list[EnvironmentCheckpoint] = []
+        self.terminal_calls: list[tuple[TerminalSelection, int]] = []
+        self.terminal_close_observations: list[bool] = []
 
     def create(self) -> FakeEnvironment:
         environment = FakeEnvironment(self, len(self.environments) + 1)
@@ -119,6 +139,22 @@ class FakeEnvironmentFactory:
             official_success=reward == 1.0,
         )
 
+    def finalize(
+        self,
+        selection: TerminalSelection,
+        strict_evaluate: Callable[[EnvironmentCheckpoint], StrictEvaluation] | None,
+        evaluator_call_limit: int,
+    ) -> TerminalFinalization:
+        self.terminal_calls.append((selection, evaluator_call_limit))
+        self.terminal_close_observations.append(
+            all(environment.closed for environment in self.environments)
+        )
+        if strict_evaluate is None:
+            return TerminalFinalization(None, 0, 0)
+        assert selection.checkpoint is not None
+        strict = strict_evaluate(selection.checkpoint)
+        return TerminalFinalization(strict, 1, 0)
+
 
 class InteractiveControllerTests(unittest.TestCase):
     task = InteractiveTask(
@@ -126,16 +162,24 @@ class InteractiveControllerTests(unittest.TestCase):
         query="Create reports/done.txt containing the word done.",
     )
 
-    def budget(self, *, attempts: int = 4) -> InteractiveBudget:
+    def budget(
+        self,
+        *,
+        attempts: int = 4,
+        safety_recoveries: int | None = None,
+    ) -> InteractiveBudget:
         return InteractiveBudget(
             attempts=attempts,
             prompt_tokens=20_000,
             completion_tokens=2_000,
             model_calls=attempts,
             environment_actions=attempts,
-            evaluator_calls=attempts,
+            evaluator_calls=attempts + 1,
             checkpoint_creates=attempts,
             checkpoint_restores=attempts,
+            safety_recoveries=(
+                attempts if safety_recoveries is None else safety_recoveries
+            ),
             per_call_context_tokens=8_192,
             max_output_tokens=256,
         )
@@ -165,9 +209,29 @@ class InteractiveControllerTests(unittest.TestCase):
         outputs: list[InteractiveModelOutput],
         factory: FakeEnvironmentFactory,
         strict_evaluate: Callable[[EnvironmentCheckpoint], StrictEvaluation] | None = None,
+        terminal_finalize: Callable[
+            [TerminalSelection, object, int], TerminalFinalization
+        ] | None = None,
         attempts: int = 4,
+        safety_recoveries: int | None = None,
     ):
         requests: list[InteractiveModelRequest] = []
+        planned = list(outputs)
+
+        def prepare(messages: tuple[TranscriptMessage, ...]) -> PreparedPrompt:
+            index = len(requests)
+            if index >= len(planned):
+                self.fail("controller prepared an unplanned model call")
+            rendered = PHI4_MINI_RAW_PROFILE.render(messages)
+            return PreparedPrompt(
+                rendered_prompt=rendered,
+                prompt_tokens=planned[index].prompt_tokens,
+                prompt_sha256=digest(rendered),
+                token_ids_sha256=digest(f"tokens-{index}"),
+                renderer_profile_sha256=PHI4_MINI_RAW_PROFILE.sha256,
+                tokenizer_artifact_sha256=digest("test-tokenizer"),
+                model_artifact_sha256=PHI4_MINI_RAW_PROFILE.model_artifact_sha256,
+            )
 
         def model(request: InteractiveModelRequest) -> InteractiveModelOutput:
             requests.append(request)
@@ -183,10 +247,15 @@ class InteractiveControllerTests(unittest.TestCase):
             strategy=strategy,
             task=self.task,
             model=model,
+            prompt_preparer=prepare,
             environment_factory=factory.create,
             attempt_evaluate=factory.evaluate,
             strict_evaluate=strict,
-            budget=self.budget(attempts=attempts),
+            terminal_finalize=terminal_finalize or factory.finalize,  # type: ignore[arg-type]
+            budget=self.budget(
+                attempts=attempts,
+                safety_recoveries=safety_recoveries,
+            ),
             replicate_seed=11,
             event_log=Path(directory) / f"{strategy}.events.jsonl",
         )
@@ -224,8 +293,201 @@ class InteractiveControllerTests(unittest.TestCase):
         self.assertEqual(len(requests), 1)
         self.assertEqual(result.model_calls, 1)
         self.assertEqual(result.environment_actions, 1)
-        self.assertEqual(result.evaluator_calls, 1)
+        self.assertEqual(result.evaluator_calls, 2)
         self.assertEqual([environment.actions for environment in factory.environments], [["wrong"]])
+        selection, _limit = factory.terminal_calls[0]
+        self.assertEqual(
+            selection.evaluation_kind,
+            AttemptEvaluationKind.EVALUATOR_DERIVED,
+        )
+        self.assertIsNotNone(selection.checkpoint)
+        self.assertEqual(factory.terminal_close_observations, [True])
+
+    def test_action_policy_failure_stays_in_denominator_without_checkpoint_or_evaluator(self) -> None:
+        frozen_observation = "Command timed out."
+        with tempfile.TemporaryDirectory() as directory:
+            factory = FakeEnvironmentFactory(
+                effects={
+                    "hang": (frozen_observation, digest("contaminated"), False),
+                    "finish": ("done", digest("done"), True),
+                },
+                rewards={"finish": 1.0},
+            )
+            result, requests = self.execute_strategy(
+                directory,
+                strategy="raw_feedback_loop",
+                outputs=[self.output("hang"), self.output("finish")],
+                factory=factory,
+            )
+            records = [
+                json.loads(line)
+                for line in (
+                    Path(directory) / "raw_feedback_loop.events.jsonl"
+                ).read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertTrue(result.official_success)
+        self.assertEqual(result.environment_actions, 2)
+        self.assertEqual(result.evaluator_calls, 2)
+        self.assertEqual(result.checkpoint_creates, 1)
+        self.assertEqual(result.safety_recoveries, 1)
+        self.assertEqual(result.maintenance_operations, 2)
+        recoveries = [
+            record for record in records
+            if record.get("type") == "safety_recovery_completed"
+        ]
+        self.assertEqual(len(recoveries), 1)
+        self.assertEqual(recoveries[0]["attempt"], 1)
+        self.assertEqual(recoveries[0]["state_sha256"], digest("initial"))
+        self.assertEqual(
+            recoveries[0]["recovery_evidence_sha256"],
+            digest("recovery-1-hang"),
+        )
+        self.assertIn(
+            f"Output: {frozen_observation}\nReward: 0.0",
+            requests[1].prompt,
+        )
+        self.assertEqual(
+            [entry[0] for entry in factory.timeline],
+            ["execute", "execute", "checkpoint", "close"],
+        )
+
+    def test_direct_policy_failure_has_no_selected_checkpoint_or_strict_call(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            factory = FakeEnvironmentFactory(
+                effects={
+                    "hang": ("Command timed out.", digest("contaminated"), False),
+                }
+            )
+            strict_calls: list[EnvironmentCheckpoint] = []
+
+            def strict(checkpoint: EnvironmentCheckpoint) -> StrictEvaluation:
+                strict_calls.append(checkpoint)
+                return StrictEvaluation(True, digest("must-not-run"))
+
+            result, _requests = self.execute_strategy(
+                directory,
+                strategy="direct",
+                outputs=[self.output("hang")],
+                factory=factory,
+                strict_evaluate=strict,
+            )
+
+        self.assertEqual(result.stop_reason, "direct_action_policy_failure")
+        self.assertEqual(result.environment_actions, 1)
+        self.assertEqual(result.evaluator_calls, 0)
+        self.assertEqual(result.checkpoint_creates, 0)
+        self.assertEqual(result.safety_recoveries, 1)
+        self.assertFalse(result.official_success)
+        self.assertFalse(result.strict_success)
+        self.assertEqual(strict_calls, [])
+        selection, _limit = factory.terminal_calls[0]
+        self.assertIsNone(selection.checkpoint)
+        self.assertIsNone(selection.evaluation_kind)
+        self.assertFalse(selection.aborted)
+        self.assertEqual(factory.terminal_close_observations, [True])
+
+    def test_safety_recovery_ceiling_stops_before_a_second_action_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            factory = FakeEnvironmentFactory(
+                effects={
+                    "hang": ("Command timed out.", digest("contaminated"), False),
+                }
+            )
+            result, requests = self.execute_strategy(
+                directory,
+                strategy="raw_feedback_loop",
+                outputs=[self.output("hang"), self.output("hang")],
+                factory=factory,
+                attempts=2,
+                safety_recoveries=1,
+            )
+
+        self.assertEqual(result.stop_reason, "action_pipeline_budget_exhausted")
+        self.assertEqual(result.safety_recoveries, 1)
+        self.assertEqual(result.environment_actions, 1)
+        self.assertEqual(result.checkpoint_creates, 0)
+        self.assertEqual(len(requests), 2)
+
+    def test_terminal_strict_and_posthoc_calls_enter_the_total_evaluator_count(self) -> None:
+        terminal_limits: list[int] = []
+
+        def finalize(
+            selection: TerminalSelection,
+            strict_evaluate: object,
+            evaluator_call_limit: int,
+        ) -> TerminalFinalization:
+            terminal_limits.append(evaluator_call_limit)
+            self.assertIsNotNone(selection.checkpoint)
+            strict = strict_evaluate(selection.checkpoint)  # type: ignore[operator]
+            return TerminalFinalization(strict, 1, 2)
+
+        with tempfile.TemporaryDirectory() as directory:
+            factory = FakeEnvironmentFactory(rewards={"wrong": 0.0})
+            result, _requests = self.execute_strategy(
+                directory,
+                strategy="direct",
+                outputs=[self.output("wrong")],
+                factory=factory,
+                terminal_finalize=finalize,
+            )
+
+        self.assertEqual(terminal_limits, [4])
+        self.assertEqual(len(factory.evaluator_calls), 1)
+        self.assertEqual(result.evaluator_calls, 4)
+
+    def test_independent_policy_failure_advances_to_a_fresh_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            factory = FakeEnvironmentFactory(
+                effects={
+                    "hang": ("Command timed out.", digest("contaminated"), False),
+                    "finish": ("done", digest("done"), True),
+                },
+                rewards={"finish": 1.0},
+            )
+            result, requests = self.execute_strategy(
+                directory,
+                strategy="independent_verified_sampling",
+                outputs=[self.output("hang"), self.output("finish")],
+                factory=factory,
+            )
+
+        self.assertTrue(result.official_success)
+        self.assertEqual(len(factory.environments), 2)
+        self.assertEqual(result.environment_actions, 2)
+        self.assertEqual(result.evaluator_calls, 2)
+        self.assertEqual(result.checkpoint_creates, 1)
+        self.assertEqual(result.safety_recoveries, 1)
+        self.assertEqual(requests[0].prompt, requests[1].prompt)
+
+    def test_engineered_repeated_policy_failures_trigger_no_progress_without_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            factory = FakeEnvironmentFactory(
+                effects={
+                    "hang": ("Command timed out.", digest("contaminated"), False),
+                }
+            )
+            result, requests = self.execute_strategy(
+                directory,
+                strategy="engineered_loop",
+                outputs=[self.output("hang") for _ in range(4)],
+                factory=factory,
+                attempts=4,
+            )
+
+        self.assertEqual(result.stop_reason, "no_progress_guard")
+        self.assertEqual(len(requests), 3)
+        self.assertEqual(result.environment_actions, 3)
+        self.assertEqual(result.evaluator_calls, 0)
+        self.assertEqual(result.checkpoint_creates, 0)
+        self.assertEqual(result.checkpoint_restores, 0)
+        self.assertEqual(result.safety_recoveries, 3)
+        self.assertEqual(result.maintenance_operations, 3)
+        self.assertFalse(result.official_success)
+        self.assertFalse(result.strict_success)
+        self.assertIn('"admissible": false', requests[1].prompt)
+        self.assertIn('"safety_recovery_performed": true', requests[1].prompt)
+        self.assertIn('"restored_state_sha256": "sha256:', requests[1].prompt)
 
     def test_independent_sampling_uses_fresh_environment_and_context_without_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -273,7 +535,8 @@ class InteractiveControllerTests(unittest.TestCase):
         self.assertTrue(result.official_success)
         self.assertEqual(len(factory.environments), 1)
         self.assertEqual(requests[0].context_id, requests[1].context_id)
-        self.assertTrue(requests[1].prompt.endswith(f"Output: {observation}\nReward: 0.25"))
+        self.assertIn(f"Output: {observation}\nReward: 0.25", requests[1].prompt)
+        self.assertTrue(requests[1].prompt.endswith("<|assistant|>"))
         self.assertNotIn("Controller state:", requests[0].prompt)
         self.assertNotIn("Controller state:", requests[1].prompt)
 
@@ -342,7 +605,7 @@ class InteractiveControllerTests(unittest.TestCase):
         self.assertFalse(result.strict_success)
         self.assertEqual(factory.environments, [])
 
-    def test_private_evaluator_output_never_enters_prompts_or_events_and_strict_runs_after_stop(self) -> None:
+    def test_private_evaluator_output_never_enters_prompts_or_events_and_strict_runs_after_close(self) -> None:
         attempt_secret = "DO NOT LEAK GOLD COMMAND OR EVALUATOR PATH"
         strict_secret = "DO NOT LEAK STRICT FILESYSTEM DIFF"
         with tempfile.TemporaryDirectory() as directory:
@@ -359,8 +622,9 @@ class InteractiveControllerTests(unittest.TestCase):
 
             def strict(checkpoint: EnvironmentCheckpoint) -> StrictEvaluation:
                 records = [json.loads(line) for line in event_log.read_text().splitlines()]
-                self.assertEqual(records[-1]["type"], "controller_stopped")
+                self.assertEqual(records[-1]["type"], "terminal_finalization_requested")
                 self.assertEqual(len(factory.evaluator_calls), 2)
+                self.assertEqual(factory.timeline[-1][0], "close")
                 strict_calls.append(checkpoint)
                 _private_output = strict_secret
                 self.assertEqual(_private_output, strict_secret)
@@ -400,7 +664,7 @@ class InteractiveControllerTests(unittest.TestCase):
         self.assertEqual(result.logical_prompt_tokens, 252)
         self.assertEqual(result.logical_completion_tokens, 16)
         self.assertEqual(result.environment_actions, 2)
-        self.assertEqual(result.evaluator_calls, 2)
+        self.assertEqual(result.evaluator_calls, 3)
         self.assertEqual(result.checkpoint_creates, 2)
         self.assertEqual(result.checkpoint_restores, 0)
         self.assertEqual(result.maintenance_operations, 2)

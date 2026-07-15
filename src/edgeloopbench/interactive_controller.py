@@ -5,20 +5,33 @@ from __future__ import annotations
 import json
 import math
 import unicodedata
-from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
 from .interactive_environment import (
     ActionExecution,
+    AttemptEvaluation,
     AttemptEvaluator,
+    AttemptEvaluationKind,
     EnvironmentCheckpoint,
     EnvironmentFactory,
     InteractiveEnvironment,
+    StrictEvaluation,
     StrictEvaluator,
+    TerminalFinalization,
+    TerminalFinalizer,
+    TerminalSelection,
 )
 from .journal import append_journal_event, inspect_journal, seal_journal
+from .model_adapter import (
+    InteractiveModel,
+    InteractiveModelOutput,
+    InteractiveModelRequest,
+    PromptPreparer,
+    RenderedPromptByteLimitExceeded,
+    TranscriptMessage,
+)
 
 
 INTERACTIVE_STRATEGIES = (
@@ -27,6 +40,7 @@ INTERACTIVE_STRATEGIES = (
     "raw_feedback_loop",
     "engineered_loop",
 )
+INTERACTIVE_CONTROLLER_REVISION = "interactive-controller-v3-terminal-finalization"
 MAX_ACTION_BYTES = 8 * 1024
 PARSER_RETRY_OBSERVATION = (
     "Invalid response. Return exactly one JSON object with one non-empty "
@@ -64,6 +78,7 @@ class InteractiveBudget:
     evaluator_calls: int
     checkpoint_creates: int
     checkpoint_restores: int
+    safety_recoveries: int
     per_call_context_tokens: int
     max_output_tokens: int
 
@@ -71,41 +86,6 @@ class InteractiveBudget:
         for field, value in self.__dict__.items():
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"interactive budget {field} must be a positive integer")
-
-
-@dataclass(frozen=True)
-class InteractiveModelRequest:
-    prompt: str
-    seed: int
-    context_id: str
-    max_output_tokens: int
-
-    def __post_init__(self) -> None:
-        if not self.prompt or not self.context_id:
-            raise ValueError("interactive request prompt and context_id must not be empty")
-        if isinstance(self.seed, bool) or not isinstance(self.seed, int):
-            raise ValueError("interactive request seed must be an integer")
-        if self.max_output_tokens <= 0:
-            raise ValueError("interactive request max_output_tokens must be positive")
-
-
-@dataclass(frozen=True)
-class InteractiveModelOutput:
-    text: str
-    prompt_tokens: int
-    completion_tokens: int
-    total_duration_ns: int
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.text, str):
-            raise ValueError("interactive model output text must be a string")
-        for field in ("prompt_tokens", "completion_tokens", "total_duration_ns"):
-            value = getattr(self, field)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"interactive model output {field} must be non-negative")
-
-
-InteractiveModel = Callable[[InteractiveModelRequest], InteractiveModelOutput]
 
 
 @dataclass(frozen=True)
@@ -122,6 +102,7 @@ class InteractiveResult:
     evaluator_calls: int
     checkpoint_creates: int
     checkpoint_restores: int
+    safety_recoveries: int
     parser_failures: int
     initial_prompts: int
     independent_sample_prompts: int
@@ -130,7 +111,11 @@ class InteractiveResult:
 
     @property
     def maintenance_operations(self) -> int:
-        return self.checkpoint_creates + self.checkpoint_restores
+        return (
+            self.checkpoint_creates
+            + self.checkpoint_restores
+            + self.safety_recoveries
+        )
 
 
 @dataclass
@@ -143,6 +128,7 @@ class _Counters:
     evaluator_calls: int = 0
     checkpoint_creates: int = 0
     checkpoint_restores: int = 0
+    safety_recoveries: int = 0
     parser_failures: int = 0
     initial_prompts: int = 0
     independent_sample_prompts: int = 0
@@ -154,6 +140,7 @@ class _SelectedCheckpoint:
     checkpoint: EnvironmentCheckpoint
     reward: float
     official_success: bool
+    evaluation_kind: AttemptEvaluationKind
     attempt: int
 
 
@@ -211,9 +198,11 @@ def run_interactive_strategy(
     strategy: str,
     task: InteractiveTask,
     model: InteractiveModel,
+    prompt_preparer: PromptPreparer,
     environment_factory: EnvironmentFactory,
     attempt_evaluate: AttemptEvaluator,
     strict_evaluate: StrictEvaluator,
+    terminal_finalize: TerminalFinalizer,
     budget: InteractiveBudget,
     replicate_seed: int,
     event_log: str | Path,
@@ -230,10 +219,13 @@ def run_interactive_strategy(
     independent_environments: list[InteractiveEnvironment] = []
     selected: _SelectedCheckpoint | None = None
     best: _SelectedCheckpoint | None = None
-    transcript = _common_prompt(task)
+    initial_transcript = (TranscriptMessage("user", _common_prompt(task)),)
+    transcript = list(initial_transcript)
     context_id = _context_id(task, strategy, replicate_seed, 1)
     stop_reason = "attempt_budget_exhausted"
+    infrastructure_reason: str | None = None
     signature_counts: dict[str, int] = {}
+    episode_error: BaseException | None = None
 
     existing_journal = inspect_journal(event_log)
     if existing_journal.record_count or existing_journal.partial_tail is not None:
@@ -254,11 +246,17 @@ def run_interactive_strategy(
     def close_environment(
         target: InteractiveEnvironment, *, scope: str
     ) -> None:
-        record("environment_close_requested", scope=scope)
+        request_error: BaseException | None = None
+        try:
+            record("environment_close_requested", scope=scope)
+        except BaseException as error:
+            request_error = error
         target.close()
+        if request_error is not None:
+            raise request_error
         record("environment_closed", scope=scope)
 
-    record("controller_started", controller_revision="interactive-controller-v1")
+    record("controller_started", controller_revision=INTERACTIVE_CONTROLLER_REVISION)
     try:
         maximum_attempts = min(budget.attempts, budget.model_calls)
         for attempt in range(1, maximum_attempts + 1):
@@ -270,14 +268,50 @@ def run_interactive_strategy(
                 break
 
             if attempt == 1:
-                prompt = transcript
-                counters.initial_prompts += 1
+                messages = tuple(transcript)
             elif strategy == "independent_verified_sampling":
-                prompt = _common_prompt(task)
-                counters.independent_sample_prompts += 1
+                messages = initial_transcript
             else:
-                prompt = transcript
-                counters.feedback_followups += 1
+                messages = tuple(transcript)
+
+            try:
+                prepared_prompt = prompt_preparer(messages)
+            except RenderedPromptByteLimitExceeded as error:
+                stop_reason = "rendered_prompt_byte_budget_exhausted"
+                record(
+                    "model_request_rejected",
+                    attempt=attempt,
+                    reason="rendered_prompt_byte_budget",
+                    prompt_sha256=error.prompt_sha256,
+                    renderer_profile_sha256=error.renderer_profile_sha256,
+                    observed_prompt_bytes=error.observed_bytes,
+                    prompt_byte_limit=error.limit_bytes,
+                )
+                break
+            record(
+                "model_preflighted",
+                attempt=attempt,
+                prompt_sha256=prepared_prompt.prompt_sha256,
+                prompt_tokens=prepared_prompt.prompt_tokens,
+                token_ids_sha256=prepared_prompt.token_ids_sha256,
+                renderer_profile_sha256=prepared_prompt.renderer_profile_sha256,
+                tokenizer_artifact_sha256=(
+                    prepared_prompt.tokenizer_artifact_sha256
+                ),
+                model_artifact_sha256=prepared_prompt.model_artifact_sha256,
+            )
+            remaining_prompt = budget.prompt_tokens - counters.prompt_tokens
+            if prepared_prompt.prompt_tokens > remaining_prompt:
+                stop_reason = "logical_prompt_token_budget_exhausted"
+                record(
+                    "model_request_rejected",
+                    attempt=attempt,
+                    reason="prompt_budget",
+                    prompt_sha256=prepared_prompt.prompt_sha256,
+                    prompt_tokens=prepared_prompt.prompt_tokens,
+                    remaining_prompt_tokens=remaining_prompt,
+                )
+                break
 
             request_context_id = (
                 _context_id(task, strategy, replicate_seed, attempt)
@@ -285,28 +319,56 @@ def run_interactive_strategy(
                 else context_id
             )
             remaining_completion = budget.completion_tokens - counters.completion_tokens
-            output_limit = min(budget.max_output_tokens, remaining_completion)
+            remaining_context = (
+                budget.per_call_context_tokens - prepared_prompt.prompt_tokens
+            )
+            if remaining_context <= 0:
+                stop_reason = "per_call_context_token_budget_exhausted"
+                record(
+                    "model_request_rejected",
+                    attempt=attempt,
+                    reason="per_call_context_budget",
+                    prompt_sha256=prepared_prompt.prompt_sha256,
+                    prompt_tokens=prepared_prompt.prompt_tokens,
+                    remaining_context_tokens=max(0, remaining_context),
+                )
+                break
+            output_limit = min(
+                budget.max_output_tokens,
+                remaining_completion,
+                remaining_context,
+            )
             if output_limit <= 0:
                 stop_reason = "logical_completion_token_budget_exhausted"
                 break
             request = InteractiveModelRequest(
-                prompt=prompt,
+                prepared_prompt=prepared_prompt,
                 seed=candidate_seed(replicate_seed, attempt),
                 context_id=request_context_id,
                 max_output_tokens=output_limit,
             )
+            if attempt == 1:
+                counters.initial_prompts += 1
+            elif strategy == "independent_verified_sampling":
+                counters.independent_sample_prompts += 1
+            else:
+                counters.feedback_followups += 1
             record(
                 "model_requested",
                 attempt=attempt,
-                prompt_sha256=_text_digest(prompt),
+                prompt_sha256=prepared_prompt.prompt_sha256,
+                logical_model_calls_after=counters.model_calls + 1,
+                logical_prompt_tokens_after=(
+                    counters.prompt_tokens + prepared_prompt.prompt_tokens
+                ),
                 candidate_seed=request.seed,
                 context_sha256=_text_digest(request_context_id),
                 max_output_tokens=output_limit,
             )
-            output = model(request)
             counters.attempts += 1
             counters.model_calls += 1
-            counters.prompt_tokens += output.prompt_tokens
+            counters.prompt_tokens += prepared_prompt.prompt_tokens
+            output = model(request)
             counters.completion_tokens += output.completion_tokens
             record(
                 "model_completed",
@@ -316,14 +378,33 @@ def run_interactive_strategy(
                 completion_tokens=output.completion_tokens,
                 total_duration_ns=output.total_duration_ns,
             )
+            if output.prompt_tokens != prepared_prompt.prompt_tokens:
+                stop_reason = "prompt_token_telemetry_mismatch"
+                infrastructure_reason = stop_reason
+                record(
+                    "infrastructure_invalid",
+                    attempt=attempt,
+                    reason=stop_reason,
+                    preflight_prompt_tokens=prepared_prompt.prompt_tokens,
+                    telemetry_prompt_tokens=output.prompt_tokens,
+                )
+                break
             call_context = output.prompt_tokens + output.completion_tokens
             if (
-                counters.prompt_tokens > budget.prompt_tokens
-                or counters.completion_tokens > budget.completion_tokens
-                or output.completion_tokens > output_limit
+                output.completion_tokens > output_limit
                 or call_context > budget.per_call_context_tokens
             ):
-                stop_reason = "logical_token_budget_exhausted"
+                stop_reason = "generation_telemetry_budget_violation"
+                infrastructure_reason = stop_reason
+                record(
+                    "infrastructure_invalid",
+                    attempt=attempt,
+                    reason=stop_reason,
+                    allowed_completion_tokens=output_limit,
+                    telemetry_completion_tokens=output.completion_tokens,
+                    allowed_context_tokens=budget.per_call_context_tokens,
+                    telemetry_context_tokens=call_context,
+                )
                 break
 
             try:
@@ -335,14 +416,9 @@ def run_interactive_strategy(
                     stop_reason = "direct_parser_failure"
                     break
                 if strategy in {"raw_feedback_loop", "engineered_loop"}:
-                    transcript = _append_feedback(
-                        transcript,
-                        output.text,
-                        PARSER_RETRY_OBSERVATION,
-                        0.0,
-                    )
+                    controller_packet: str | None = None
                     if strategy == "engineered_loop":
-                        packet = _engineered_packet(
+                        controller_packet = _engineered_packet(
                             attempt=attempt,
                             budget=budget,
                             counters=counters,
@@ -355,13 +431,23 @@ def run_interactive_strategy(
                             repeated_signature_count=0,
                             restored_state_sha256=None,
                         )
-                        transcript += "\n" + packet
+                    _append_feedback(
+                        transcript,
+                        output.text,
+                        PARSER_RETRY_OBSERVATION,
+                        0.0,
+                        controller_packet=controller_packet,
+                    )
                 continue
 
             if (
                 counters.environment_actions >= budget.environment_actions
-                or counters.evaluator_calls >= budget.evaluator_calls
+                # Reserve one evaluator slot for a possible selected strict
+                # endpoint.  The trusted terminal hook separately budgets any
+                # preregistered posthoc trajectory calls.
+                or counters.evaluator_calls >= budget.evaluator_calls - 1
                 or counters.checkpoint_creates >= budget.checkpoint_creates
+                or counters.safety_recoveries >= budget.safety_recoveries
             ):
                 stop_reason = "action_pipeline_budget_exhausted"
                 break
@@ -390,7 +476,78 @@ def run_interactive_strategy(
                 exit_code=execution.exit_code,
                 admissible=execution.admissible,
                 state_changed=execution.state_changed,
+                policy_failure=(
+                    None
+                    if execution.policy_failure is None
+                    else execution.policy_failure.value
+                ),
+                safety_recovery_performed=execution.safety_recovery_performed,
             )
+            if not execution.admissible:
+                counters.safety_recoveries += 1
+                record(
+                    "safety_recovery_completed",
+                    attempt=attempt,
+                    state_sha256=execution.state_sha256,
+                    recovery_evidence_sha256=(
+                        execution.safety_recovery_evidence_sha256
+                    ),
+                )
+                evaluation = AttemptEvaluation(
+                    reward=0.0,
+                    official_success=False,
+                    evaluation_kind=AttemptEvaluationKind.ACTION_POLICY_FAILURE,
+                )
+                record(
+                    "attempt_defaulted",
+                    attempt=attempt,
+                    reward=0.0,
+                    official_success=False,
+                    evaluation_kind=evaluation.evaluation_kind.value,
+                    policy_failure=execution.policy_failure.value,
+                )
+                if strategy == "independent_verified_sampling":
+                    close_environment(current_environment, scope=f"attempt-{attempt}")
+                    independent_environments.remove(current_environment)
+
+                repeated_signature_count = 0
+                if strategy == "engineered_loop":
+                    signature = _progress_signature(action, execution, 0.0)
+                    signature_counts[signature] = signature_counts.get(signature, 0) + 1
+                    repeated_signature_count = signature_counts[signature]
+
+                if strategy == "direct":
+                    stop_reason = "direct_action_policy_failure"
+                    break
+                if strategy in {"raw_feedback_loop", "engineered_loop"}:
+                    controller_packet = None
+                    if strategy == "engineered_loop":
+                        best_reward = best.reward if best is not None else 0.0
+                        controller_packet = _engineered_packet(
+                            attempt=attempt,
+                            budget=budget,
+                            counters=counters,
+                            action=action,
+                            execution=execution,
+                            reward=0.0,
+                            best_reward=best_reward,
+                            score_delta=-best_reward,
+                            rollback_performed=False,
+                            repeated_signature_count=repeated_signature_count,
+                            restored_state_sha256=execution.state_sha256,
+                        )
+                    _append_feedback(
+                        transcript,
+                        output.text,
+                        execution.observation,
+                        0.0,
+                        controller_packet=controller_packet,
+                    )
+                    if strategy == "engineered_loop" and repeated_signature_count >= 3:
+                        selected = best
+                        stop_reason = "no_progress_guard"
+                        break
+                continue
             record("checkpoint_create_requested", attempt=attempt)
             checkpoint = current_environment.checkpoint()
             counters.checkpoint_creates += 1
@@ -411,6 +568,7 @@ def run_interactive_strategy(
                 attempt=attempt,
                 reward=float(evaluation.reward),
                 official_success=evaluation.official_success,
+                evaluation_kind=evaluation.evaluation_kind.value,
             )
             if strategy == "independent_verified_sampling":
                 close_environment(current_environment, scope=f"attempt-{attempt}")
@@ -419,6 +577,7 @@ def run_interactive_strategy(
                 checkpoint=checkpoint,
                 reward=float(evaluation.reward),
                 official_success=evaluation.official_success,
+                evaluation_kind=evaluation.evaluation_kind,
                 attempt=attempt,
             )
             selected = candidate
@@ -465,15 +624,10 @@ def run_interactive_strategy(
                 break
 
             if strategy in {"raw_feedback_loop", "engineered_loop"}:
-                transcript = _append_feedback(
-                    transcript,
-                    output.text,
-                    execution.observation,
-                    float(evaluation.reward),
-                )
+                controller_packet = None
                 if strategy == "engineered_loop":
                     assert best is not None
-                    packet = _engineered_packet(
+                    controller_packet = _engineered_packet(
                         attempt=attempt,
                         budget=budget,
                         counters=counters,
@@ -486,49 +640,162 @@ def run_interactive_strategy(
                         repeated_signature_count=repeated_signature_count,
                         restored_state_sha256=restored_state_sha256,
                     )
-                    transcript += "\n" + packet
+                _append_feedback(
+                    transcript,
+                    output.text,
+                    execution.observation,
+                    float(evaluation.reward),
+                    controller_packet=controller_packet,
+                )
+                if strategy == "engineered_loop":
                     if repeated_signature_count >= 3:
                         selected = best
                         stop_reason = "no_progress_guard"
                         break
         else:
             stop_reason = "attempt_budget_exhausted"
+    except BaseException as error:
+        episode_error = error
     finally:
         if environment is not None:
-            close_environment(environment, scope="episode")
+            try:
+                close_environment(environment, scope="episode")
+            except BaseException as error:
+                if episode_error is None:
+                    episode_error = error
         for index, independent_environment in enumerate(independent_environments, 1):
-            close_environment(independent_environment, scope=f"incomplete-attempt-{index}")
+            try:
+                close_environment(
+                    independent_environment,
+                    scope=f"incomplete-attempt-{index}",
+                )
+            except BaseException as error:
+                if episode_error is None:
+                    episode_error = error
 
-    if strategy == "engineered_loop" and best is not None:
+    terminal_aborted = episode_error is not None or infrastructure_reason is not None
+    if terminal_aborted:
+        selected = None
+    elif strategy == "engineered_loop" and best is not None:
         selected = best
     official_success = selected.official_success if selected is not None else False
-    if selected is not None:
+    strict_is_allowed = bool(
+        selected is not None
+        and selected.evaluation_kind is AttemptEvaluationKind.EVALUATOR_DERIVED
+        and not terminal_aborted
+    )
+    terminal_selection = TerminalSelection(
+        checkpoint=None if selected is None else selected.checkpoint,
+        selected_attempt=None if selected is None else selected.attempt,
+        evaluation_kind=None if selected is None else selected.evaluation_kind,
+        official_success=official_success,
+        aborted=terminal_aborted,
+    )
+    remaining_evaluator_calls = budget.evaluator_calls - counters.evaluator_calls
+    try:
+        if strict_is_allowed:
+            assert selected is not None
+            record(
+                "strict_evaluation_planned",
+                selected_attempt=selected.attempt,
+                state_sha256=selected.checkpoint.state_sha256,
+            )
+        elif selected is not None:
+            record(
+                "strict_evaluation_defaulted",
+                selected_attempt=selected.attempt,
+                reason=selected.evaluation_kind.value,
+                strict_success=False,
+            )
         record(
-            "strict_evaluation_planned",
-            selected_attempt=selected.attempt,
-            state_sha256=selected.checkpoint.state_sha256,
+            "terminal_finalization_requested",
+            selected_attempt=terminal_selection.selected_attempt,
+            evaluation_kind=(
+                None
+                if terminal_selection.evaluation_kind is None
+                else terminal_selection.evaluation_kind.value
+            ),
+            aborted=terminal_selection.aborted,
+            remaining_evaluator_calls=remaining_evaluator_calls,
         )
+    except BaseException as error:
+        if episode_error is None:
+            episode_error = error
+        terminal_aborted = True
+        selected = None
+        official_success = False
+        strict_is_allowed = False
+        terminal_selection = TerminalSelection(
+            checkpoint=None,
+            selected_attempt=None,
+            evaluation_kind=None,
+            official_success=False,
+            aborted=True,
+        )
+    strict_calls = 0
+
+    def counted_strict_evaluate(
+        checkpoint: EnvironmentCheckpoint,
+    ) -> StrictEvaluation:
+        nonlocal strict_calls
+        if (
+            not strict_is_allowed
+            or selected is None
+            or checkpoint != selected.checkpoint
+        ):
+            raise RuntimeError("terminal strict evaluator checkpoint is invalid")
+        if strict_calls >= 1 or strict_calls >= remaining_evaluator_calls:
+            raise RuntimeError("terminal evaluator call budget is exhausted")
+        strict_calls += 1
+        return strict_evaluate(checkpoint)
+
+    terminal_outcome = terminal_finalize(
+        terminal_selection,
+        counted_strict_evaluate if strict_is_allowed else None,
+        remaining_evaluator_calls,
+    )
+    if type(terminal_outcome) is not TerminalFinalization:
+        raise RuntimeError("terminal finalizer returned an invalid result")
+    if terminal_outcome.strict_evaluator_calls != strict_calls:
+        raise RuntimeError("terminal strict evaluator accounting is contradictory")
+    if strict_is_allowed:
+        if strict_calls != 1 or terminal_outcome.strict_evaluation is None:
+            raise RuntimeError("selected evaluator-derived checkpoint lacks strict result")
+    elif terminal_outcome.strict_evaluation is not None or strict_calls:
+        raise RuntimeError("default or empty selection cannot have a strict result")
+    if terminal_outcome.evaluator_calls > remaining_evaluator_calls:
+        raise RuntimeError("terminal evaluator call budget was exceeded")
+    counters.evaluator_calls += terminal_outcome.evaluator_calls
+    record(
+        "terminal_finalized",
+        strict_evaluator_calls=terminal_outcome.strict_evaluator_calls,
+        posthoc_evaluator_calls=terminal_outcome.posthoc_evaluator_calls,
+    )
+
+    strict_success = False
+    if terminal_outcome.strict_evaluation is not None:
+        strict_success = terminal_outcome.strict_evaluation.strict_success
+        record(
+            "strict_evaluation_completed",
+            strict_success=terminal_outcome.strict_evaluation.strict_success,
+            evaluator_sha256=terminal_outcome.strict_evaluation.evaluator_sha256,
+        )
+    if episode_error is not None:
+        raise episode_error
     record(
         "controller_stopped",
         stop_reason=stop_reason,
         selected_attempt=selected.attempt if selected is not None else None,
         official_success=official_success,
     )
-
-    strict_success = False
-    if selected is not None:
-        strict = strict_evaluate(selected.checkpoint)
-        strict_success = strict.strict_success
-        record(
-            "strict_evaluation_completed",
-            strict_success=strict.strict_success,
-            evaluator_sha256=strict.evaluator_sha256,
-        )
     seal_journal(event_log)
 
-    run_status = (
-        "budget_exhausted" if "budget_exhausted" in stop_reason else "completed"
-    )
+    if infrastructure_reason is not None:
+        run_status = "infrastructure_error"
+    elif "budget_exhausted" in stop_reason:
+        run_status = "budget_exhausted"
+    else:
+        run_status = "completed"
     return InteractiveResult(
         run_status=run_status,
         official_success=official_success,
@@ -542,6 +809,7 @@ def run_interactive_strategy(
         evaluator_calls=counters.evaluator_calls,
         checkpoint_creates=counters.checkpoint_creates,
         checkpoint_restores=counters.checkpoint_restores,
+        safety_recoveries=counters.safety_recoveries,
         parser_failures=counters.parser_failures,
         initial_prompts=counters.initial_prompts,
         independent_sample_prompts=counters.independent_sample_prompts,
@@ -554,15 +822,22 @@ def _common_prompt(task: InteractiveTask) -> str:
 
 
 def _append_feedback(
-    transcript: str,
+    transcript: list[TranscriptMessage],
     model_text: str,
     observation: str,
     reward: float,
-) -> str:
+    *,
+    controller_packet: str | None = None,
+) -> None:
     rendered_reward = _render_reward(reward)
-    return (
-        f"{transcript}\nAssistant response: {model_text}\n"
-        f"Output: {observation}\nReward: {rendered_reward}"
+    feedback = f"Output: {observation}\nReward: {rendered_reward}"
+    if controller_packet is not None:
+        feedback += "\n" + controller_packet
+    transcript.extend(
+        (
+            TranscriptMessage("assistant", model_text),
+            TranscriptMessage("user", feedback),
+        )
     )
 
 
@@ -600,6 +875,9 @@ def _engineered_packet(
         "admissible": execution.admissible if execution is not None else False,
         "state_changed": execution.state_changed if execution is not None else False,
         "state_sha256": execution.state_sha256 if execution is not None else None,
+        "safety_recovery_performed": (
+            execution.safety_recovery_performed if execution is not None else False
+        ),
         "reward": reward,
         "best_reward": best_reward,
         "score_delta": score_delta,
