@@ -47,6 +47,11 @@ class RunRecord:
     wall_seconds: float
     energy_joules: float | None = None
     failure_reason: str | None = None
+    verifier_verdict: str | None = None
+    verifier_protocol_error: bool = False
+    fallback_used: bool = False
+    candidate_a_success: bool | None = None
+    candidate_b_success: bool | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -441,6 +446,11 @@ def _parse_record(raw: Mapping[str, Any], source: str) -> RunRecord:
         manifest_sha256 = _nonempty_string(raw, "manifest_sha256", source)
         if not SHA256_REFERENCE_PATTERN.fullmatch(manifest_sha256):
             raise ResultError(f"{source}: manifest_sha256 must be a SHA-256 reference")
+    verifier_verdict = None
+    if "verifier_verdict" in raw:
+        verifier_verdict = _nonempty_string(raw, "verifier_verdict", source)
+        if verifier_verdict not in {"APPROVE", "REJECT", "ESCALATE"}:
+            raise ResultError(f"{source}: verifier_verdict is invalid")
     return RunRecord(
         experiment_id=_nonempty_string(raw, "experiment_id", source),
         task_id=_nonempty_string(raw, "task_id", source),
@@ -467,6 +477,13 @@ def _parse_record(raw: Mapping[str, Any], source: str) -> RunRecord:
             else None
         ),
         failure_reason=failure_reason,
+        verifier_verdict=verifier_verdict,
+        verifier_protocol_error=_optional_boolean(
+            raw, "verifier_protocol_error", source, default=False
+        ),
+        fallback_used=_optional_boolean(raw, "fallback_used", source, default=False),
+        candidate_a_success=_optional_boolean(raw, "candidate_a_success", source),
+        candidate_b_success=_optional_boolean(raw, "candidate_b_success", source),
     )
 
 
@@ -645,6 +662,21 @@ def _nonnegative_number(raw: Mapping[str, Any], key: str, source: str) -> float:
     if number < 0:
         raise ResultError(f"{source}: {key} must be non-negative")
     return number
+
+
+def _optional_boolean(
+    raw: Mapping[str, Any],
+    key: str,
+    source: str,
+    *,
+    default: bool | None = None,
+) -> bool | None:
+    if key not in raw:
+        return default
+    value = raw[key]
+    if not isinstance(value, bool):
+        raise ResultError(f"{source}: {key} must be a boolean")
+    return value
 
 
 def _finite_float_mean(values: Iterable[float], count: int, source: str) -> float:

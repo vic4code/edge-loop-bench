@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import ExperimentPlan
-from .controller import Evaluator, ModelCall, ModelOutput, RunContext, run_strategy
+from .controller import Evaluator, ModelCall, ModelOutput, ModelRequest, RunContext, run_strategy
 from .ollama import OllamaClient, OllamaGenerateRequest
 from .results import load_results, validate_results_for_plan
-from .runner import EDIT_RESPONSE_SCHEMA, append_event
+from .runner import append_event
 from .tasks import TaskManifest, prepare_task
 
 
@@ -40,17 +40,17 @@ def build_ollama_model(plan: ExperimentPlan) -> ModelCall:
     endpoint = host if host.startswith("http://") else f"http://{host}"
     client = OllamaClient(endpoint)
 
-    def model(prompt: str, seed: int, max_output_tokens: int) -> ModelOutput:
+    def model(request: ModelRequest) -> ModelOutput:
         response = client.generate(
             OllamaGenerateRequest(
                 model=plan.model.id,
-                prompt=prompt,
+                prompt=request.prompt,
                 context_window=plan.model.context_limit_tokens,
-                max_output_tokens=max_output_tokens,
+                max_output_tokens=request.max_output_tokens,
                 thinking=plan.generation.thinking,
-                seed=seed,
+                seed=request.seed,
                 temperature=plan.generation.temperature,
-                response_schema=EDIT_RESPONSE_SCHEMA,
+                response_schema=dict(request.response_schema),
             )
         )
         return ModelOutput(
@@ -177,6 +177,16 @@ def execute_plan(
                     }
                     if result.failure_reason is not None:
                         record["failure_reason"] = result.failure_reason
+                    if result.verifier_verdict is not None:
+                        record["verifier_verdict"] = result.verifier_verdict
+                    if result.verifier_protocol_error:
+                        record["verifier_protocol_error"] = True
+                    if result.fallback_used:
+                        record["fallback_used"] = True
+                    if result.candidate_a_success is not None:
+                        record["candidate_a_success"] = result.candidate_a_success
+                    if result.candidate_b_success is not None:
+                        record["candidate_b_success"] = result.candidate_b_success
                     append_event(result_path, record)
                     completed_keys.add(key)
                     executed += 1

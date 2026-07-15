@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import LogicalBudget
 from .runner import (
+    EDIT_RESPONSE_SCHEMA,
     CandidatePatchError,
     append_event,
     apply_candidate_edits,
@@ -18,6 +20,32 @@ from .runner import (
 from .tasks import TaskManifest
 
 
+VERIFIER_RESPONSE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["APPROVE", "REJECT", "ESCALATE"]},
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "enum": ["requirement", "correctness", "edge_case", "regression"],
+                    },
+                    "location": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["category", "location", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["verdict", "findings"],
+    "additionalProperties": False,
+}
+
+
 @dataclass(frozen=True)
 class ModelOutput:
     text: str
@@ -25,6 +53,23 @@ class ModelOutput:
     prompt_tokens: int
     completion_tokens: int
     total_duration_ns: int
+
+
+@dataclass(frozen=True)
+class ModelRequest:
+    """A role-explicit model request with a role-specific output contract."""
+
+    role: str
+    prompt: str
+    seed: int
+    max_output_tokens: int
+    response_schema: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if self.role not in {"maker", "verifier"}:
+            raise ValueError(f"unsupported model role: {self.role}")
+        if self.max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be positive")
 
 
 @dataclass(frozen=True)
@@ -40,7 +85,7 @@ class RunContext:
             raise ValueError("run context manifest_sha256 must be a SHA-256 reference")
 
 
-ModelCall = Callable[[str, int, int], ModelOutput]
+ModelCall = Callable[[ModelRequest], ModelOutput]
 Evaluator = Callable[[Path, TaskManifest], bool]
 
 
@@ -56,6 +101,30 @@ class StrategyResult:
     public_test_runs: int
     max_call_context_tokens: int
     wall_seconds: float
+    verifier_verdict: str | None = None
+    verifier_protocol_error: bool = False
+    fallback_used: bool = False
+    candidate_a_success: bool | None = None
+    candidate_b_success: bool | None = None
+
+
+@dataclass
+class _Counters:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    model_calls: int = 0
+    tool_calls: int = 0
+    public_test_runs: int = 0
+    max_call_context_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class _Verdict:
+    verdict: str
+    findings: tuple[dict[str, str], ...]
+
+
+Snapshot = dict[str, bytes]
 
 
 def run_strategy(
@@ -70,13 +139,28 @@ def run_strategy(
     evaluate: Evaluator,
     context: RunContext,
 ) -> StrategyResult:
-    """Run direct or bounded-retry using only sanitized public feedback."""
+    """Run one v0.2 strategy without returning private evaluation feedback."""
 
     if strategy not in {"direct", "bounded_retry", "maker_verifier"}:
         raise ValueError(f"unsupported runnable strategy: {strategy}")
     root = Path(worktree).resolve()
     started_ns = time.monotonic_ns()
+    counters = _Counters()
     sequence = 0
+    failure_reason: str | None = None
+    verifier_verdict: str | None = None
+    verifier_protocol_error = False
+    fallback_used = False
+    candidate_a: Snapshot | None = None
+    candidate_b: Snapshot | None = None
+    final_candidate: Snapshot | None = None
+
+    # The first maker call has the same cap in every arm. Maker-Verifier also
+    # keeps a distinct 25% verifier reserve inside the shared episode budget.
+    maker_call_cap = max(1, budget.completion_tokens * 3 // 4)
+    verifier_cap = max(1, budget.completion_tokens - maker_call_cap)
+    maker_used = 0
+    verifier_used = 0
 
     def record(event_type: str, **fields: object) -> None:
         nonlocal sequence
@@ -96,121 +180,289 @@ def run_strategy(
             },
         )
 
-    record("run_started", initial_commit=task.initial_commit)
-    prompt_tokens = 0
-    completion_tokens = 0
-    model_calls = 0
-    tool_calls = 0
-    public_test_runs = 0
-    max_call_context_tokens = 0
-    prompt = build_agent_prompt(root, task)
-    failure_reason: str | None = None
-    objective_success = False
-
-    if strategy == "direct":
-        call_limit = 1
-    elif strategy == "maker_verifier":
-        call_limit = min(2, budget.model_calls)
-    else:
-        call_limit = budget.model_calls
-    for _attempt in range(call_limit):
-        remaining_completion = budget.completion_tokens - completion_tokens
-        if remaining_completion <= 0:
-            failure_reason = "completion_token_budget_exhausted"
-            break
-        output = model(prompt, seed, remaining_completion)
-        model_calls += 1
-        prompt_tokens += output.prompt_tokens
-        completion_tokens += output.completion_tokens
+    def call(role: str, prompt: str) -> ModelOutput | None:
+        nonlocal maker_used, verifier_used, failure_reason
+        if counters.model_calls >= budget.model_calls:
+            failure_reason = "model_call_budget_exhausted"
+            return None
+        remaining_total = budget.completion_tokens - counters.completion_tokens
+        if role == "verifier":
+            remaining_role = verifier_cap - verifier_used
+            schema = VERIFIER_RESPONSE_SCHEMA
+            per_call_cap = verifier_cap
+        else:
+            remaining_role = (
+                maker_call_cap - maker_used
+                if strategy == "maker_verifier"
+                else remaining_total
+            )
+            schema = EDIT_RESPONSE_SCHEMA
+            per_call_cap = maker_call_cap
+        limit = min(remaining_total, remaining_role, per_call_cap)
+        if limit <= 0:
+            failure_reason = f"{role}_completion_token_budget_exhausted"
+            return None
+        output = model(ModelRequest(role, prompt, seed, limit, schema))
+        counters.model_calls += 1
+        counters.prompt_tokens += output.prompt_tokens
+        counters.completion_tokens += output.completion_tokens
+        if role == "verifier":
+            verifier_used += output.completion_tokens
+        else:
+            maker_used += output.completion_tokens
         call_context = output.prompt_tokens + output.completion_tokens
-        max_call_context_tokens = max(max_call_context_tokens, call_context)
+        counters.max_call_context_tokens = max(counters.max_call_context_tokens, call_context)
         record(
             "model_completed",
-            model_call=model_calls,
+            role=role,
+            model_call=counters.model_calls,
             text=output.text,
             thinking=output.thinking,
             prompt_tokens=output.prompt_tokens,
             completion_tokens=output.completion_tokens,
+            max_output_tokens=limit,
             total_duration_ns=output.total_duration_ns,
         )
         if (
-            prompt_tokens > budget.prompt_tokens
-            or completion_tokens > budget.completion_tokens
+            counters.prompt_tokens > budget.prompt_tokens
+            or counters.completion_tokens > budget.completion_tokens
             or call_context > budget.per_call_context_tokens
+            or output.completion_tokens > limit
         ):
             failure_reason = "logical_token_budget_exhausted"
-            break
+            return None
+        return output
 
-        tool_calls += 1
-        if tool_calls > budget.tool_calls:
+    def apply_and_test(output: ModelOutput) -> tuple[bool, str]:
+        nonlocal failure_reason
+        if counters.tool_calls >= budget.tool_calls:
             failure_reason = "tool_call_budget_exhausted"
-            break
+            return False, "Tool-call budget exhausted."
+        counters.tool_calls += 1
         try:
             apply_candidate_edits(root, task, output.text)
         except CandidatePatchError as error:
             failure_reason = "candidate_edit_rejected"
             feedback = str(error)
             record("candidate_rejected", reason=feedback)
-            prompt = build_agent_prompt(root, task) + (
-                "\n\nThe previous candidate was rejected: " + feedback +
-                "\nReturn corrected JSON only."
-            )
-            continue
-        record("candidate_applied", model_call=model_calls)
-
-        if public_test_runs >= budget.public_test_runs or tool_calls >= budget.tool_calls:
+            return False, feedback
+        record("candidate_applied", model_call=counters.model_calls)
+        if (
+            counters.public_test_runs >= budget.public_test_runs
+            or counters.tool_calls >= budget.tool_calls
+        ):
             failure_reason = "public_test_budget_exhausted"
-            break
+            return False, "Public-test budget exhausted."
         public = run_public_tests(root, task)
-        public_test_runs += 1
-        tool_calls += 1
+        counters.public_test_runs += 1
+        counters.tool_calls += 1
         record(
             "public_test_completed",
             passed=public.passed,
             returncode=public.returncode,
             output=public.output,
         )
-        if public.passed:
-            if strategy == "maker_verifier" and model_calls == 1:
-                record("verification_requested")
-                prompt = build_agent_prompt(root, task) + (
-                    "\n\nAct as verifier. Re-read the stated requirements and the current "
-                    "implementation even though public tests passed. Return complete, robust "
-                    "replacement edits as JSON only."
-                )
-                continue
+        failure_reason = None if public.passed else "public_tests_failed"
+        return public.passed, public.output
+
+    record("run_started", initial_commit=task.initial_commit, controller="read-only-verifier-v2")
+    base_prompt = build_agent_prompt(root, task)
+    attempt = 0
+    public_passed = False
+    while True:
+        attempt += 1
+        maker_prompt = base_prompt if attempt == 1 else _retry_prompt(root, task, attempt, failure_reason, feedback)
+        output = call("maker", maker_prompt)
+        if output is None:
+            break
+        public_passed, feedback = apply_and_test(output)
+        if public_passed:
+            final_candidate = _snapshot(root)
+            break
+        if strategy == "direct" or counters.model_calls >= budget.model_calls:
+            break
+
+    if strategy == "maker_verifier" and public_passed and final_candidate is not None:
+        candidate_a = final_candidate
+        record("candidate_checkpointed", candidate="A", sha256=_snapshot_digest(candidate_a))
+        verifier_output = call("verifier", _verifier_prompt(root, task))
+        if verifier_output is None:
+            verifier_verdict = "ESCALATE"
+            fallback_used = True
+            record("candidate_fallback", candidate="A", reason=failure_reason)
+        else:
             try:
-                objective_success = bool(evaluate(root, task))
-            except Exception:
-                return _finish(
-                    record, started_ns, "infrastructure_error", False,
-                    "isolated_evaluation_error", prompt_tokens, completion_tokens,
-                    model_calls, tool_calls, public_test_runs, max_call_context_tokens,
+                verdict = _parse_verdict(verifier_output.text)
+            except ValueError as error:
+                verifier_protocol_error = True
+                verifier_verdict = "ESCALATE"
+                fallback_used = True
+                failure_reason = None
+                record("verifier_protocol_error", reason=str(error))
+                record("candidate_fallback", candidate="A", reason="verifier_protocol_error")
+            else:
+                verifier_verdict = verdict.verdict
+                record(
+                    "verifier_completed",
+                    verdict=verdict.verdict,
+                    findings=list(verdict.findings),
                 )
+                if verdict.verdict == "REJECT":
+                    revision = call("maker", _revision_prompt(root, task, verdict))
+                    if revision is None:
+                        fallback_used = True
+                        record("candidate_fallback", candidate="A", reason=failure_reason)
+                    else:
+                        revision_passed, _revision_feedback = apply_and_test(revision)
+                        if revision_passed:
+                            candidate_b = _snapshot(root)
+                            final_candidate = candidate_b
+                            record(
+                                "candidate_checkpointed",
+                                candidate="B",
+                                sha256=_snapshot_digest(candidate_b),
+                            )
+                        else:
+                            fallback_used = True
+                            final_candidate = candidate_a
+                            _restore(root, candidate_a)
+                            record("candidate_fallback", candidate="A", reason=failure_reason)
+                elif verdict.verdict == "ESCALATE":
+                    fallback_used = True
+                    record("candidate_fallback", candidate="A", reason="verifier_escalated")
+
+    objective_success = False
+    candidate_a_success: bool | None = None
+    candidate_b_success: bool | None = None
+    if final_candidate is not None:
+        try:
+            if candidate_a is not None:
+                _restore(root, candidate_a)
+                candidate_a_success = bool(evaluate(root, task))
+                record("candidate_evaluation_completed", candidate="A", passed=candidate_a_success)
+            if candidate_b is not None:
+                _restore(root, candidate_b)
+                candidate_b_success = bool(evaluate(root, task))
+                record("candidate_evaluation_completed", candidate="B", passed=candidate_b_success)
+            _restore(root, final_candidate)
+            objective_success = (
+                candidate_b_success
+                if final_candidate is candidate_b
+                else candidate_a_success
+                if final_candidate is candidate_a
+                else bool(evaluate(root, task))
+            )
             record("evaluation_completed", passed=objective_success)
             failure_reason = None if objective_success else "isolated_evaluation_failed"
-            break
-        failure_reason = "public_tests_failed"
-        role = "Act as verifier. " if strategy == "maker_verifier" else ""
-        prompt = build_agent_prompt(root, task) + (
-            "\n\n" + role + "The previous edit failed public tests. Sanitized output:\n" +
-            public.output + "\nReturn corrected JSON only."
-        )
+        except Exception:
+            _restore(root, final_candidate)
+            failure_reason = "isolated_evaluation_error"
+            return _finish(
+                record, started_ns, "infrastructure_error", False, failure_reason,
+                counters, verifier_verdict, verifier_protocol_error, fallback_used,
+                candidate_a_success, candidate_b_success,
+            )
 
     status = "completed"
     if failure_reason is not None and failure_reason.endswith("budget_exhausted"):
         status = "budget_exhausted"
-    elif (
-        not objective_success
-        and model_calls >= call_limit
-        and strategy in {"bounded_retry", "maker_verifier"}
-    ):
-        status = "budget_exhausted"
     return _finish(
-        record, started_ns, status, objective_success, failure_reason,
-        prompt_tokens, completion_tokens, model_calls, tool_calls,
-        public_test_runs, max_call_context_tokens,
+        record, started_ns, status, objective_success, failure_reason, counters,
+        verifier_verdict, verifier_protocol_error, fallback_used,
+        candidate_a_success, candidate_b_success,
     )
+
+
+def _retry_prompt(
+    root: Path,
+    task: TaskManifest,
+    attempt: int,
+    failure_class: str | None,
+    feedback: str,
+) -> str:
+    return build_agent_prompt(root, task) + (
+        "\n\nRetry packet\n"
+        f"Attempt: {attempt}\n"
+        f"Failure class: {(failure_class or 'unknown').upper()}\n"
+        "Sanitized public evidence:\n"
+        f"{feedback}\n"
+        "Return corrected JSON only."
+    )
+
+
+def _verifier_prompt(root: Path, task: TaskManifest) -> str:
+    maker_prompt = build_agent_prompt(root, task)
+    public_snapshot = "\n".join(maker_prompt.splitlines()[4:])
+    return (
+        "Act as a read-only verifier for Candidate A. Do not propose or return file edits.\n\n"
+        + public_snapshot
+        +
+        "\n\nCandidate A passed all public tests. Judge the stated requirements and visible "
+        "source for blocking correctness problems. Return only a verdict object with "
+        "verdict APPROVE, REJECT, or ESCALATE and structured findings."
+    )
+
+
+def _revision_prompt(root: Path, task: TaskManifest, verdict: _Verdict) -> str:
+    return build_agent_prompt(root, task) + (
+        "\n\nA read-only verifier rejected Candidate A with these agent-visible findings:\n"
+        + json.dumps(list(verdict.findings), sort_keys=True)
+        + "\nReturn a complete corrected edit JSON only."
+    )
+
+
+def _parse_verdict(text: str) -> _Verdict:
+    try:
+        raw = json.loads(text)
+    except (json.JSONDecodeError, RecursionError, ValueError) as error:
+        raise ValueError("verifier response is not valid JSON") from error
+    if not isinstance(raw, dict) or set(raw) != {"verdict", "findings"}:
+        raise ValueError("verifier response must contain only verdict and findings")
+    verdict = raw["verdict"]
+    findings = raw["findings"]
+    if verdict not in {"APPROVE", "REJECT", "ESCALATE"} or not isinstance(findings, list):
+        raise ValueError("verifier response has an invalid verdict or findings list")
+    parsed: list[dict[str, str]] = []
+    for finding in findings:
+        if not isinstance(finding, dict) or set(finding) != {"category", "location", "reason"}:
+            raise ValueError("verifier finding has an invalid shape")
+        if finding["category"] not in {"requirement", "correctness", "edge_case", "regression"}:
+            raise ValueError("verifier finding has an invalid category")
+        if not all(isinstance(finding[key], str) and finding[key].strip() for key in ("location", "reason")):
+            raise ValueError("verifier finding text must not be empty")
+        parsed.append(dict(finding))
+    if verdict == "REJECT" and not parsed:
+        raise ValueError("REJECT requires at least one actionable finding")
+    return _Verdict(verdict, tuple(parsed))
+
+
+def _snapshot(root: Path) -> Snapshot:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and ".git" not in path.parts
+    }
+
+
+def _restore(root: Path, snapshot: Snapshot) -> None:
+    for path in sorted(root.rglob("*"), reverse=True):
+        if path.is_file() and ".git" not in path.parts:
+            relative = path.relative_to(root).as_posix()
+            if relative not in snapshot:
+                path.unlink()
+    for relative, payload in snapshot.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+
+
+def _snapshot_digest(snapshot: Snapshot) -> str:
+    from hashlib import sha256
+
+    digest = sha256()
+    for relative, payload in sorted(snapshot.items()):
+        digest.update(relative.encode("utf-8") + b"\0" + payload + b"\0")
+    return "sha256:" + digest.hexdigest()
 
 
 def _finish(
@@ -219,25 +471,46 @@ def _finish(
     run_status: str,
     objective_success: bool,
     failure_reason: str | None,
-    prompt_tokens: int,
-    completion_tokens: int,
-    model_calls: int,
-    tool_calls: int,
-    public_test_runs: int,
-    max_call_context_tokens: int,
+    counters: _Counters,
+    verifier_verdict: str | None,
+    verifier_protocol_error: bool,
+    fallback_used: bool,
+    candidate_a_success: bool | None,
+    candidate_b_success: bool | None,
 ) -> StrategyResult:
     wall_seconds = (time.monotonic_ns() - started_ns) / 1_000_000_000
     record(
-        "run_completed", run_status=run_status,
-        objective_success=objective_success, failure_reason=failure_reason,
-        prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-        model_calls=model_calls, tool_calls=tool_calls,
-        public_test_runs=public_test_runs,
-        max_call_context_tokens=max_call_context_tokens,
+        "run_completed",
+        run_status=run_status,
+        objective_success=objective_success,
+        failure_reason=failure_reason,
+        prompt_tokens=counters.prompt_tokens,
+        completion_tokens=counters.completion_tokens,
+        model_calls=counters.model_calls,
+        tool_calls=counters.tool_calls,
+        public_test_runs=counters.public_test_runs,
+        max_call_context_tokens=counters.max_call_context_tokens,
         wall_seconds=wall_seconds,
+        verifier_verdict=verifier_verdict,
+        verifier_protocol_error=verifier_protocol_error,
+        fallback_used=fallback_used,
+        candidate_a_success=candidate_a_success,
+        candidate_b_success=candidate_b_success,
     )
     return StrategyResult(
-        run_status, objective_success, failure_reason,
-        prompt_tokens, completion_tokens, model_calls, tool_calls,
-        public_test_runs, max_call_context_tokens, wall_seconds,
+        run_status,
+        objective_success,
+        failure_reason,
+        counters.prompt_tokens,
+        counters.completion_tokens,
+        counters.model_calls,
+        counters.tool_calls,
+        counters.public_test_runs,
+        counters.max_call_context_tokens,
+        wall_seconds,
+        verifier_verdict,
+        verifier_protocol_error,
+        fallback_used,
+        candidate_a_success,
+        candidate_b_success,
     )

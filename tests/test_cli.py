@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from edgeloopbench.controller import ModelOutput
+from edgeloopbench.controller import ModelOutput, ModelRequest
 
 from edgeloopbench.cli import main
 from edgeloopbench.config import load_experiment
@@ -215,7 +215,7 @@ def clamp_page(page: int, total_pages: int) -> int:
     return max(1, min(page, total_pages))
 '''
 
-        def fake_model(_prompt: str, _seed: int, _limit: int) -> ModelOutput:
+        def fake_model(_request: ModelRequest) -> ModelOutput:
             text = json.dumps({"edits": [{"path": "src/pagination.py", "content": source}]})
             return ModelOutput(text, "", 600, 120, 1_000_000_000)
 

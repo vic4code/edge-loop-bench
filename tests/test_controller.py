@@ -6,7 +6,12 @@ import unittest
 from pathlib import Path
 
 from edgeloopbench.config import LogicalBudget
-from edgeloopbench.controller import ModelOutput, RunContext, run_strategy
+from edgeloopbench.controller import (
+    ModelOutput,
+    ModelRequest,
+    RunContext,
+    run_strategy,
+)
 from edgeloopbench.tasks import prepare_task
 
 
@@ -44,8 +49,9 @@ def clamp_page(page: int, total_pages: int) -> int:
             events = Path(directory) / "events.jsonl"
             task = prepare_task(self.task_root, worktree)
 
-            def model(prompt: str, seed: int, max_output_tokens: int) -> ModelOutput:
-                self.assertNotIn("evaluator", prompt.lower())
+            def model(request: ModelRequest) -> ModelOutput:
+                self.assertEqual(request.role, "maker")
+                self.assertNotIn("evaluator", request.prompt.lower())
                 return ModelOutput(
                     text=json.dumps({"edits": [{"path": "src/pagination.py", "content": self.fixed_source}]}),
                     thinking="", prompt_tokens=600, completion_tokens=120,
@@ -79,8 +85,8 @@ def clamp_page(page: int, total_pages: int) -> int:
                 ),
             ]
 
-            def model(prompt: str, seed: int, max_output_tokens: int) -> ModelOutput:
-                prompts.append(prompt)
+            def model(request: ModelRequest) -> ModelOutput:
+                prompts.append(request.prompt)
                 return outputs.pop(0)
 
             result = run_strategy(
@@ -110,7 +116,7 @@ def clamp_page(page: int, total_pages: int) -> int:
 
             result = run_strategy(
                 "direct", worktree, task,
-                lambda _prompt, _seed, _limit: ModelOutput("{}", "", 600, 1, 1),
+                lambda _request: ModelOutput("{}", "", 600, 1, 1),
                 budget, seed=11, event_log=Path(directory) / "events.jsonl",
                 evaluate=lambda _root, _task: True,
                 context=self.context(),
@@ -119,7 +125,7 @@ def clamp_page(page: int, total_pages: int) -> int:
             self.assertEqual(result.run_status, "budget_exhausted")
             self.assertEqual(result.prompt_tokens, 600)
 
-    def test_maker_verifier_reviews_publicly_passing_superficial_fix(self) -> None:
+    def test_maker_verifier_uses_read_only_verdict_then_maker_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             worktree = Path(directory) / "worktree"
             task = prepare_task(self.adversarial_task_root, worktree)
@@ -139,26 +145,117 @@ def canonical_key(label: str) -> str:
                 'normalized.replace(" ", "-").replace("--", "-")',
                 '"-".join(normalized.split())',
             )
-            outputs = [superficial, robust]
-
-            def model(prompt: str, seed: int, max_output_tokens: int) -> ModelOutput:
-                prompts.append(prompt)
-                content = outputs.pop(0)
-                return ModelOutput(
-                    json.dumps({"edits": [{"path": "src/keys.py", "content": content}]}),
+            outputs = [
+                ModelOutput(
+                    json.dumps({"edits": [{"path": "src/keys.py", "content": superficial}]}),
                     "", 500, 100, 1_000_000_000,
-                )
+                ),
+                ModelOutput(
+                    json.dumps({
+                        "verdict": "REJECT",
+                        "findings": [{
+                            "category": "edge_case",
+                            "location": "canonical_key",
+                            "reason": "Repeated whitespace is not fully collapsed.",
+                        }],
+                    }),
+                    "", 400, 80, 1_000_000_000,
+                ),
+                ModelOutput(
+                    json.dumps({"edits": [{"path": "src/keys.py", "content": robust}]}),
+                    "", 550, 110, 1_000_000_000,
+                ),
+            ]
+
+            def model(request: ModelRequest) -> ModelOutput:
+                prompts.append(request)
+                return outputs.pop(0)
 
             result = run_strategy(
-                "maker_verifier", worktree, task, model, self.budget(2), seed=11,
+                "maker_verifier", worktree, task, model, self.budget(3), seed=11,
                 event_log=Path(directory) / "events.jsonl",
                 evaluate=lambda root, _task: ".split()" in (root / "src/keys.py").read_text(),
                 context=self.context(),
             )
 
             self.assertTrue(result.objective_success)
-            self.assertEqual((result.model_calls, result.public_test_runs), (2, 2))
-            self.assertIn("Act as verifier", prompts[1])
+            self.assertEqual((result.model_calls, result.public_test_runs), (3, 2))
+            self.assertEqual([request.role for request in prompts], ["maker", "verifier", "maker"])
+            self.assertEqual(prompts[0].max_output_tokens, 750)
+            self.assertEqual(prompts[1].max_output_tokens, 250)
+            self.assertNotIn("Return corrected JSON", prompts[1].prompt)
+            self.assertNotIn("Each edit must contain", prompts[1].prompt)
+            self.assertNotIn("Allowed edit patterns", prompts[1].prompt)
+            self.assertEqual(result.verifier_verdict, "REJECT")
+            self.assertEqual((result.candidate_a_success, result.candidate_b_success), (False, True))
+
+    def test_maker_verifier_restores_candidate_a_after_invalid_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "worktree"
+            task = prepare_task(self.task_root, worktree)
+            candidate_a = self.fixed_source
+            outputs = [
+                ModelOutput(
+                    json.dumps({"edits": [{"path": "src/pagination.py", "content": candidate_a}]}),
+                    "", 500, 100, 1,
+                ),
+                ModelOutput(
+                    json.dumps({
+                        "verdict": "REJECT",
+                        "findings": [{
+                            "category": "correctness",
+                            "location": "clamp_page",
+                            "reason": "Review the upper bound.",
+                        }],
+                    }),
+                    "", 300, 50, 1,
+                ),
+                ModelOutput("not edit json", "", 400, 20, 1),
+            ]
+
+            result = run_strategy(
+                "maker_verifier", worktree, task, lambda _request: outputs.pop(0),
+                self.budget(3), seed=11,
+                event_log=Path(directory) / "events.jsonl",
+                evaluate=lambda root, _task: root.joinpath("src/pagination.py").read_text() == candidate_a,
+                context=self.context(),
+            )
+
+            self.assertTrue(result.objective_success)
+            self.assertTrue(result.fallback_used)
+            self.assertTrue(result.candidate_a_success)
+            self.assertIsNone(result.candidate_b_success)
+            self.assertEqual((worktree / "src/pagination.py").read_text(), candidate_a)
+
+    def test_invalid_verifier_output_escalates_without_changing_candidate_a(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "worktree"
+            events = Path(directory) / "events.jsonl"
+            task = prepare_task(self.task_root, worktree)
+            outputs = [
+                ModelOutput(
+                    json.dumps({"edits": [{"path": "src/pagination.py", "content": self.fixed_source}]}),
+                    "", 500, 100, 1,
+                ),
+                ModelOutput(
+                    json.dumps({"edits": [{"path": "src/pagination.py", "content": "malicious"}]}),
+                    "", 300, 50, 1,
+                ),
+            ]
+
+            result = run_strategy(
+                "maker_verifier", worktree, task, lambda _request: outputs.pop(0),
+                self.budget(2), seed=11, event_log=events,
+                evaluate=lambda root, _task: root.joinpath("src/pagination.py").read_text() == self.fixed_source,
+                context=self.context(),
+            )
+
+            self.assertTrue(result.objective_success)
+            self.assertEqual(result.verifier_verdict, "ESCALATE")
+            self.assertTrue(result.verifier_protocol_error)
+            self.assertEqual((worktree / "src/pagination.py").read_text(), self.fixed_source)
+            records = [json.loads(line) for line in events.read_text().splitlines()]
+            self.assertIn("verifier_protocol_error", [record["type"] for record in records])
 
 
 if __name__ == "__main__":

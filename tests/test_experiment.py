@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from edgeloopbench.config import load_experiment
-from edgeloopbench.controller import ModelOutput
+from edgeloopbench.controller import ModelOutput, ModelRequest
 from edgeloopbench.experiment import build_isolated_evaluator, execute_plan
 from edgeloopbench.results import load_results
 from edgeloopbench.runner import apply_candidate_edits, run_public_tests
@@ -108,7 +108,7 @@ def clamp_page(page: int, total_pages: int) -> int:
             results = root / "runs.jsonl"
             events = root / "events.jsonl"
 
-            def model(_prompt: str, _seed: int, _limit: int) -> ModelOutput:
+            def model(_request: ModelRequest) -> ModelOutput:
                 text = json.dumps({"edits": [{
                     "path": "src/pagination.py", "content": self.fixed_source,
                 }]})
