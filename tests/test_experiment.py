@@ -9,7 +9,11 @@ from pathlib import Path
 
 from edgeloopbench.config import load_experiment
 from edgeloopbench.controller import ModelOutput, ModelRequest
-from edgeloopbench.experiment import build_isolated_evaluator, execute_plan
+from edgeloopbench.experiment import (
+    build_isolated_evaluator,
+    build_run_schedule,
+    execute_plan,
+)
 from edgeloopbench.results import load_results
 from edgeloopbench.runner import apply_candidate_edits, run_public_tests
 from edgeloopbench.tasks import prepare_task
@@ -27,6 +31,26 @@ def clamp_page(page: int, total_pages: int) -> int:
         raise ValueError("total_pages must be positive")
     return max(1, min(page, total_pages))
 '''
+
+    def test_manifest_bound_schedule_randomizes_tasks_and_strategies_reproducibly(self) -> None:
+        plan = load_experiment(
+            self.project_root / "configs/experiments/v0.2/confirmatory-qwen35-4b.toml"
+        )
+
+        first = build_run_schedule(plan)
+        second = build_run_schedule(plan)
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), plan.run_count)
+        self.assertEqual(
+            {item.task_id for item in first},
+            set(plan.tasks),
+        )
+        strategy_orders = {}
+        for item in first:
+            strategy_orders.setdefault(item.task_id, []).append(item.strategy)
+        self.assertTrue(any(order[0] != "direct" for order in strategy_orders.values()))
+        self.assertTrue(all(set(order) == set(plan.strategies) for order in strategy_orders.values()))
 
     def test_isolated_evaluator_returns_only_the_objective_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

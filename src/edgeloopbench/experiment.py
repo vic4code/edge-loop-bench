@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import tempfile
 import os
+import random
 import subprocess
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 
 from .config import ExperimentPlan
@@ -25,6 +27,44 @@ class ExecutionSummary:
     planned_runs: int
     executed_runs: int
     skipped_runs: int
+
+
+@dataclass(frozen=True)
+class RunSpec:
+    budget_tier: str
+    task_id: str
+    strategy: str
+    seed: int
+
+
+def build_run_schedule(plan: ExperimentPlan) -> tuple[RunSpec, ...]:
+    """Build a reproducible task-blocked schedule bound to the manifest digest."""
+
+    if plan.manifest_sha256 is None:
+        raise ExperimentError("plan must be loaded from a manifest file")
+    blocks = [
+        (budget_tier, task_id, seed)
+        for budget_tier in (plan.budgets or {})
+        for task_id in plan.tasks
+        for seed in plan.seeds
+    ]
+    block_rng = random.Random(int(plan.manifest_sha256[:16], 16))
+    block_rng.shuffle(blocks)
+    schedule: list[RunSpec] = []
+    for budget_tier, task_id, seed in blocks:
+        strategies = list(plan.strategies)
+        material = (
+            f"{plan.manifest_sha256}|{budget_tier}|{task_id}|{seed}"
+        ).encode("utf-8")
+        strategy_rng = random.Random(
+            int.from_bytes(sha256(material).digest()[:8], "big")
+        )
+        strategy_rng.shuffle(strategies)
+        schedule.extend(
+            RunSpec(budget_tier, task_id, strategy, seed)
+            for strategy in strategies
+        )
+    return tuple(schedule)
 
 
 def build_ollama_model(plan: ExperimentPlan) -> ModelCall:
@@ -128,42 +168,40 @@ def execute_plan(
     executed = 0
     skipped = 0
 
-    for budget_tier, budget in (plan.budgets or {}).items():
-        for task_id in plan.tasks:
-            for strategy in plan.strategies:
-                for seed in plan.seeds:
-                    key = (plan.id, task_id, strategy, budget_tier, seed)
-                    if key in completed_keys:
-                        skipped += 1
-                        continue
-                    if max_runs is not None and executed >= max_runs:
-                        return ExecutionSummary(plan.run_count, executed, skipped)
-                    with tempfile.TemporaryDirectory(
-                        prefix="edgeloop-run-", dir=scratch
-                    ) as directory:
-                        worktree = Path(directory) / "worktree"
-                        task = prepare_task(catalog / task_id, worktree)
-                        result = run_strategy(
-                            strategy,
-                            worktree,
-                            task,
-                            model,
-                            budget,
-                            seed=seed,
-                            event_log=event_log,
-                            evaluate=evaluate,
-                            context=RunContext(
-                                experiment_id=plan.id,
-                                budget_tier=budget_tier,
-                                manifest_sha256=manifest_reference,
-                            ),
-                        )
-                    record: dict[str, object] = {
+    for run in build_run_schedule(plan):
+        budget = (plan.budgets or {})[run.budget_tier]
+        key = (plan.id, run.task_id, run.strategy, run.budget_tier, run.seed)
+        if key in completed_keys:
+            skipped += 1
+            continue
+        if max_runs is not None and executed >= max_runs:
+            return ExecutionSummary(plan.run_count, executed, skipped)
+        with tempfile.TemporaryDirectory(
+            prefix="edgeloop-run-", dir=scratch
+        ) as directory:
+            worktree = Path(directory) / "worktree"
+            task = prepare_task(catalog / run.task_id, worktree)
+            result = run_strategy(
+                run.strategy,
+                worktree,
+                task,
+                model,
+                budget,
+                seed=run.seed,
+                event_log=event_log,
+                evaluate=evaluate,
+                context=RunContext(
+                    experiment_id=plan.id,
+                    budget_tier=run.budget_tier,
+                    manifest_sha256=manifest_reference,
+                ),
+            )
+        record: dict[str, object] = {
                         "experiment_id": plan.id,
-                        "task_id": task_id,
-                        "strategy": strategy,
-                        "budget_tier": budget_tier,
-                        "seed": seed,
+                        "task_id": run.task_id,
+                        "strategy": run.strategy,
+                        "budget_tier": run.budget_tier,
+                        "seed": run.seed,
                         "manifest_sha256": manifest_reference,
                         "run_status": result.run_status,
                         "objective_success": result.objective_success,
@@ -174,20 +212,20 @@ def execute_plan(
                         "public_test_runs": result.public_test_runs,
                         "max_call_context_tokens": result.max_call_context_tokens,
                         "wall_seconds": result.wall_seconds,
-                    }
-                    if result.failure_reason is not None:
-                        record["failure_reason"] = result.failure_reason
-                    if result.verifier_verdict is not None:
-                        record["verifier_verdict"] = result.verifier_verdict
-                    if result.verifier_protocol_error:
-                        record["verifier_protocol_error"] = True
-                    if result.fallback_used:
-                        record["fallback_used"] = True
-                    if result.candidate_a_success is not None:
-                        record["candidate_a_success"] = result.candidate_a_success
-                    if result.candidate_b_success is not None:
-                        record["candidate_b_success"] = result.candidate_b_success
-                    append_event(result_path, record)
-                    completed_keys.add(key)
-                    executed += 1
+        }
+        if result.failure_reason is not None:
+            record["failure_reason"] = result.failure_reason
+        if result.verifier_verdict is not None:
+            record["verifier_verdict"] = result.verifier_verdict
+        if result.verifier_protocol_error:
+            record["verifier_protocol_error"] = True
+        if result.fallback_used:
+            record["fallback_used"] = True
+        if result.candidate_a_success is not None:
+            record["candidate_a_success"] = result.candidate_a_success
+        if result.candidate_b_success is not None:
+            record["candidate_b_success"] = result.candidate_b_success
+        append_event(result_path, record)
+        completed_keys.add(key)
+        executed += 1
     return ExecutionSummary(plan.run_count, executed, skipped)
