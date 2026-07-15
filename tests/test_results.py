@@ -87,6 +87,13 @@ class ResultSummaryTests(unittest.TestCase):
         self.assertEqual(pair.pair_count, 2)
         self.assertEqual(pair.success_delta_pp, 50.0)
         self.assertEqual(pair.mean_total_token_delta, 350.0)
+        self.assertEqual(pair.task_count, 2)
+        self.assertEqual(pair.rescued, 1)
+        self.assertEqual(pair.regressed, 0)
+        self.assertEqual(pair.net_rescue, 1)
+        self.assertEqual(pair.exact_p_value, 1.0)
+        self.assertLessEqual(pair.bootstrap_ci_low_pp, pair.success_delta_pp)
+        self.assertGreaterEqual(pair.bootstrap_ci_high_pp, pair.success_delta_pp)
 
     def test_summary_reports_manifest_binding(self) -> None:
         item = record("a", "direct", True, 1000)

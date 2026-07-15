@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
+import random
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -107,7 +108,15 @@ class PairSummary:
     baseline_strategy: str
     candidate_strategy: str
     pair_count: int
+    task_count: int
     success_delta_pp: float
+    rescued: int
+    regressed: int
+    unchanged: int
+    net_rescue: int
+    bootstrap_ci_low_pp: float
+    bootstrap_ci_high_pp: float
+    exact_p_value: float | None
     mean_total_token_delta: float
     mean_wall_delta_seconds: float
 
@@ -581,13 +590,48 @@ def _summarize_pair(
         for key in shared
     ]
     count = len(shared)
+    rescued = sum(
+        not baseline_by_unit[key].objective_success
+        and candidate_by_unit[key].objective_success
+        for key in shared
+    )
+    regressed = sum(
+        baseline_by_unit[key].objective_success
+        and not candidate_by_unit[key].objective_success
+        for key in shared
+    )
+    task_deltas: dict[str, list[int]] = {}
+    task_observations: dict[str, int] = {}
+    for key, delta in zip(shared, success_deltas, strict=True):
+        task_id = baseline_by_unit[key].task_id
+        task_deltas.setdefault(task_id, []).append(delta)
+        task_observations[task_id] = task_observations.get(task_id, 0) + 1
+    clustered = tuple(
+        math.fsum(values) / len(values)
+        for _task, values in sorted(task_deltas.items())
+    )
+    ci_low, ci_high = _cluster_bootstrap_interval(
+        clustered,
+        seed_material=f"{experiment_id}|{budget_tier}|{baseline}|{candidate}",
+    )
+    exact_p_value = None
+    if all(observations == 1 for observations in task_observations.values()):
+        exact_p_value = _exact_paired_p_value(rescued, regressed)
     return PairSummary(
         experiment_id=experiment_id,
         budget_tier=budget_tier,
         baseline_strategy=baseline,
         candidate_strategy=candidate,
         pair_count=count,
+        task_count=len(clustered),
         success_delta_pp=100 * sum(success_deltas) / count,
+        rescued=rescued,
+        regressed=regressed,
+        unchanged=count - rescued - regressed,
+        net_rescue=rescued - regressed,
+        bootstrap_ci_low_pp=ci_low,
+        bootstrap_ci_high_pp=ci_high,
+        exact_p_value=exact_p_value,
         mean_total_token_delta=_finite_integer_mean(
             sum(token_deltas), count, "token delta aggregate"
         ),
@@ -595,6 +639,39 @@ def _summarize_pair(
             wall_deltas, count, "wall delta aggregate"
         ),
     )
+
+
+def _cluster_bootstrap_interval(
+    task_deltas: tuple[float, ...],
+    *,
+    seed_material: str,
+    repetitions: int = 10_000,
+) -> tuple[float, float]:
+    """Return a deterministic percentile interval by resampling whole tasks."""
+
+    if not task_deltas:
+        raise ResultError("cannot bootstrap an empty paired task collection")
+    from hashlib import sha256
+
+    seed = int.from_bytes(sha256(seed_material.encode("utf-8")).digest()[:8], "big")
+    generator = random.Random(seed)
+    count = len(task_deltas)
+    estimates = sorted(
+        100 * math.fsum(generator.choice(task_deltas) for _ in range(count)) / count
+        for _ in range(repetitions)
+    )
+    return estimates[int(0.025 * repetitions)], estimates[int(0.975 * repetitions) - 1]
+
+
+def _exact_paired_p_value(rescued: int, regressed: int) -> float:
+    """Two-sided exact McNemar/binomial sensitivity test."""
+
+    discordant = rescued + regressed
+    if discordant == 0:
+        return 1.0
+    smaller = min(rescued, regressed)
+    tail = math.fsum(math.comb(discordant, index) for index in range(smaller + 1))
+    return min(1.0, 2 * tail / (2**discordant))
 
 
 def _strategy_sort_key(strategy: str) -> tuple[int, str]:
