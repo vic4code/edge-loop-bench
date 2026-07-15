@@ -176,6 +176,111 @@ The collector's semantic pins are independent of its source bytes:
 | collection and writable-surface policy | `sha256:70eeeda4091cb2da38aa8024af7c52dbacb464cf5b20a9f6bfdac5d66ecb67a9` |
 | fs1..fs4 profile set | `sha256:1c515db46e794a58c457ac5d906ad80cae2ecb696ce2f07932733087368b1990` |
 
+## Image-build control contract
+
+The build utility is a private, pre-qualification instrument. Its default
+mode is read-only: it validates the repository inputs and real Docker client,
+then emits one canonical deterministic plan. Docker mutation is unreachable
+unless the operator supplies the literal, unabbreviated `--execute` flag;
+long-option abbreviation is disabled. Planning and tests must not contact a
+daemon, build an image, start a model, or use a network.
+
+The supported command surface is:
+
+```text
+python -m edgeloopbench.intercode_image_build \
+  --repo-root /absolute/path/to/edge-loop-bench \
+  --docker-binary /absolute/path/to/the/real/docker-binary \
+  --docker-binary-sha256 sha256:<64-lowercase-hex> \
+  --docker-endpoint unix:///absolute/local/docker.sock \
+  --docker-client-version <exact-version> \
+  --docker-server-version <exact-version>
+```
+
+Execution adds `--execute`, an absolute private `--manifest`, an absolute
+Docker data path, and a private canonical `HostSafetyPins` JSON record. The
+implementation is Python standard-library only and lives in
+`src/edgeloopbench/intercode_image_build.py`; focused offline tests live in
+`tests/test_intercode_image_build.py`.
+
+Each plan binds all of the following before mutation:
+
+- the content hash of a canonical, absolute, non-symlink, executable Docker
+  client plus exact client and server versions;
+- one explicit canonical local Unix endpoint; inherited `DOCKER_HOST` and
+  `DOCKER_CONTEXT` are rejected rather than cleared silently;
+- the canonical non-symlink repository root as the only build context,
+  platform `linux/arm64`, the reviewed `Dockerfile.agent` SHA-256, root
+  `.dockerignore` SHA-256, the four setup scripts, state collector, and
+  byte-pinned upstream `docker.gitignore`;
+- exactly four ordered `FILE_SYSTEM_VERSION` values, `1` through `4`.
+
+The builder intentionally creates no image tag. An earlier deterministic-tag
+design was rejected because Docker provides no atomic "create this tag only if
+absent" operation: checking a predictable tag and then building with it leaves
+a check-to-mutation race that can overwrite a concurrently created tag. The
+private iidfile's full content-addressed image ID is the sole image authority.
+A manifest-missing stratum always executes its exact pinned build; it never
+adopts an existing image by label, tag, prefix, or predicted ID.
+The corrected plan and manifest schemas are both `v2`; obsolete tag-bearing
+`v1` records are not migrated or resumed.
+
+`--execute` must use the existing `HostTelemetryCollector` and
+`HostSafetyPolicy` immediately before every possible build. The final
+admission occurs after input re-hashing, iidfile creation, and every other
+potentially slow preparation step, directly before the `image build` process
+is invoked. Admission is quiescent and fail-closed: VM pressure is exactly
+`1`, there are zero resident
+Ollama models, zero running containers, no power/thermal/disk/memory policy
+failure, and the observed Docker binary, endpoint, client version, and server
+version equal the plan and host-safety pins. Caller-declared expected
+resources cannot relax this gate. Any unrelated running container stops the
+utility without cleanup or build.
+
+One nonblocking exclusive lock on the canonical repository directory is held
+for the complete execute/resume operation. This makes cooperating utility
+invocations across different manifest paths mutually exclusive; a second
+invocation fails before telemetry or Docker access.
+
+Every build uses fixed `shell=False` argv, the real pinned client, explicit
+`--host`, `--platform linux/arm64`, repository-root context,
+`Dockerfile.agent`, one exact `FILE_SYSTEM_VERSION`, and no `--tag`. After a
+successful build, the full image ID is inspected directly. Each build receives
+a fixed per-stratum `--iidfile` beneath the
+manifest's private mode-`0700` parent. The controller proves that pathname
+absent, creates a mode-`0600` regular file with `O_EXCL` and `O_NOFOLLOW`,
+retains its inode, bounds and exactly parses the full `sha256:` image ID, and
+revalidates pathname/inode identity. Docker stdout is never the authority for
+the image identity. The image is admitted only when ID, OS, architecture, agent and
+network-policy labels, filesystem version, fs-specific collector profile, and
+all collector source/policy/root/profile-set/argv pins are exact. Binary and
+build-input hashes are rechecked around each mutation and inspection; symlink,
+path, or content drift fails closed.
+
+The private manifest is mode `0600`, canonical JSONL, append-only, sequenced,
+and hash-chained. Its first event binds the complete plan; each later event
+binds one inspected fs image by full ID. The journal retains both its file and
+private parent directory descriptors and initial identities. File mode, link
+count, file pathname/inode identity, and parent pathname/inode identity are
+revalidated before and after every read and append and immediately before a
+successful return. An absent manifest starts a new execution. A complete valid
+prefix containing fs1 through fsN is resumable: existing records are
+re-attested by their recorded full IDs, then fsN+1 through fs4 are rebuilt
+without lookup or adoption. Empty existing files, missing terminal newlines,
+malformed or duplicate JSON fields, sequence gaps, out-of-order/duplicate strata,
+changed plan identity, broken hashes, or an invalid/missing recorded image are
+partial or tampered state and stop without mutation. The utility never
+truncates, repairs, retags, prunes, or deletes an existing image.
+
+Offline tests use real temporary files plus bounded fake telemetry/Docker
+runners. They prove default plan-only behavior, exact ID-only argv and
+inspections, last-moment quiescent admission, resume from a valid prefix,
+refusal of torn/tampered/replaced journal state, unrelated-container refusal,
+symlink and context-drift refusal, and the absence of every image-tagging or
+image-deletion command. A real build remains blocked until
+those tests and the repository checks pass and an operator explicitly invokes
+`--execute` with reviewed live pins.
+
 ## Evaluator execution scope
 
 `Dockerfile.evaluator` remains a non-scoring, standard-library placeholder. It
