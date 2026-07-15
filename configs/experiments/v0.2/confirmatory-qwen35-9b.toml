@@ -1,0 +1,76 @@
+schema_version = 1
+id = "v02-confirmatory-qwen35-9b"
+track = "effectiveness"
+draft = false
+
+tasks = [
+  "confirm-adversarial-001",
+  "confirm-adversarial-002",
+  "confirm-adversarial-003",
+  "confirm-adversarial-004",
+  "confirm-cross-file-001",
+  "confirm-cross-file-002",
+  "confirm-cross-file-003",
+  "confirm-cross-file-004",
+  "confirm-cross-file-005",
+  "confirm-cross-file-006",
+  "confirm-cross-file-007",
+  "confirm-cross-file-008",
+  "confirm-diagnosis-001",
+  "confirm-diagnosis-002",
+  "confirm-diagnosis-003",
+  "confirm-diagnosis-004",
+  "confirm-diagnosis-005",
+  "confirm-diagnosis-006",
+  "confirm-localized-001",
+  "confirm-localized-002",
+  "confirm-localized-003",
+  "confirm-localized-004",
+  "confirm-localized-005",
+  "confirm-localized-006",
+  "confirm-localized-007",
+  "confirm-localized-008",
+  "confirm-localized-009",
+  "confirm-localized-010",
+  "confirm-localized-011",
+  "confirm-localized-012",
+]
+strategies = ["direct", "bounded_retry", "maker_verifier"]
+seeds = [20260715]
+
+[generation]
+thinking = false
+temperature = 0.0
+edit_schema_revision = "full-file-edits-v1"
+controller_revision = "11d5ce8b9118920baccedeac0f17347f883cdfb6"
+
+[model]
+id = "qwen3.5:9b"
+revision = "sha256:dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c"
+artifact_sha256 = "sha256:dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c"
+weight_quantization = "Q4_K_M"
+context_limit_tokens = 4096
+
+[backend]
+name = "ollama"
+version = "0.31.1"
+artifact_sha256 = "sha256:67d4b4e0e8a6742b8fec7491ea67653c4cc802651a8fa396aa569af4e12026a2"
+command = ["ollama", "serve"]
+
+[backend.environment]
+OLLAMA_HOST = "127.0.0.1:11434"
+OLLAMA_NO_CLOUD = "1"
+OLLAMA_NUM_PARALLEL = "1"
+OLLAMA_MAX_LOADED_MODELS = "1"
+OLLAMA_KEEP_ALIVE = "-1"
+OLLAMA_CONTEXT_LENGTH = "4096"
+OLLAMA_FLASH_ATTENTION = "1"
+OLLAMA_KV_CACHE_TYPE = "q8_0"
+
+[budgets.medium]
+prompt_tokens = 12000
+completion_tokens = 2400
+model_calls = 3
+tool_calls = 8
+public_test_runs = 2
+per_call_context_tokens = 4096
