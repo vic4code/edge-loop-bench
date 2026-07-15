@@ -126,6 +126,9 @@ logical `(task_id, replay_index)` units each have a deterministic key and a
 separate mode-`0600`, hash-chained attempt journal. For every unit the trusted
 adapter durably appends start, container-acquire intent/completion, result,
 container-release intent/completion, unit-completion, and a terminal seal.
+The acquire intent binds a deterministic locator and is fsynced before the
+container-create side effect; acquisition completion is appended only after the
+adapter inspects the resulting full container identity and frozen profile.
 Each acquire is bound to a source-owned opaque task capability, the exact
 image/evaluator/state-normalizer pins, and globally unique replay and container
 lifecycle identities. The second replay cannot reuse either identity from the
