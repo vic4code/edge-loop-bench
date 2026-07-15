@@ -107,11 +107,12 @@ def main() -> None:
             (OUTPUT / f"{phase}-{label}.toml").write_text(
                 render(label, phase, tasks), encoding="utf-8"
             )
-    for label in ("qwen35-9b", "gemma4-12b"):
-        (OUTPUT / f"calibration-current-{label}.toml").write_text(
-            render(label, "calibration-current", CALIBRATION_TASKS), encoding="utf-8"
-        )
-    print("generated 8 v0.2 manifests")
+    for phase in ("calibration-current", "calibration-ac"):
+        for label in ("qwen35-9b", "gemma4-12b"):
+            (OUTPUT / f"{phase}-{label}.toml").write_text(
+                render(label, phase, CALIBRATION_TASKS), encoding="utf-8"
+            )
+    print("generated 10 v0.2 manifests")
 
 
 if __name__ == "__main__":
