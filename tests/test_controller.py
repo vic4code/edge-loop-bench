@@ -102,6 +102,40 @@ def clamp_page(page: int, total_pages: int) -> int:
             self.assertEqual(result.tool_calls, 3)
             self.assertIn("not valid JSON", prompts[1])
 
+    def test_retry_does_not_call_maker_without_a_remaining_public_test(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "worktree"
+            task = prepare_task(self.task_root, worktree)
+            calls = 0
+            still_broken = (worktree / "src/pagination.py").read_text()
+
+            def model(_request: ModelRequest) -> ModelOutput:
+                nonlocal calls
+                calls += 1
+                return ModelOutput(
+                    json.dumps({"edits": [{"path": "src/pagination.py", "content": still_broken}]}),
+                    "", 500, 100, 1,
+                )
+
+            base = self.budget(3)
+            budget = LogicalBudget(
+                prompt_tokens=base.prompt_tokens,
+                completion_tokens=base.completion_tokens,
+                model_calls=base.model_calls,
+                tool_calls=base.tool_calls,
+                public_test_runs=1,
+                per_call_context_tokens=base.per_call_context_tokens,
+            )
+            result = run_strategy(
+                "bounded_retry", worktree, task, model, budget, seed=11,
+                event_log=Path(directory) / "events.jsonl",
+                evaluate=lambda _root, _task: False,
+                context=self.context(),
+            )
+
+            self.assertEqual(calls, 1)
+            self.assertEqual(result.failure_reason, "public_test_budget_exhausted")
+
     def test_direct_reports_logical_token_budget_exhaustion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             worktree = Path(directory) / "worktree"

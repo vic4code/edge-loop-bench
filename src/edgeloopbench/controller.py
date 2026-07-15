@@ -270,6 +270,12 @@ def run_strategy(
     attempt = 0
     public_passed = False
     while True:
+        if attempt > 0 and (
+            counters.public_test_runs >= budget.public_test_runs
+            or counters.tool_calls + 2 > budget.tool_calls
+        ):
+            failure_reason = "public_test_budget_exhausted"
+            break
         attempt += 1
         maker_prompt = base_prompt if attempt == 1 else _retry_prompt(root, task, attempt, failure_reason, feedback)
         output = call("maker", maker_prompt)
