@@ -72,6 +72,13 @@ Retrieved on **2026-07-15**.
 - [Google Research MBPP split](https://github.com/google-research/google-research/blob/master/mbpp/README.md) — canonical task-ID splits used to audit the unreconstructable InterCode-Python 117 count.
 - [NL2Bash dataset license](https://github.com/TellinaTool/nl2bash/blob/master/data/bash/LICENSE) — separate MIT license for the underlying dataset.
 
+## Loop-engineering guidance
+
+Retrieved on **2026-07-15**.
+
+- [Claude: Getting started with loops](https://claude.com/blog/getting-started-with-loops) — official definition of a loop as repeated work until a stop condition, the turn/goal/time/proactive taxonomy, quantitative verification guidance, independent review, bounded usage, and pilot-first advice. It motivates controls; it does not report a benchmark uplift or prescribe the EdgeLoop rollback policy.
+- [Loop Engineering reference repository at `6a67035`](https://github.com/cobusgreyling/loop-engineering/tree/6a670357ab748e20d14752bda82999a97f8afc6f) — community patterns for schedules, isolated worktrees, skills, sub-agents, durable state, budgets, and human gates. EdgeLoop cites this as a systems reference, not an official Claude implementation or a source of measured performance claims.
+
 ## Claim labels
 
 Repository prose uses these interpretations:

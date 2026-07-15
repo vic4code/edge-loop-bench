@@ -19,9 +19,20 @@ The primary loop-engineering contrast is `engineered_loop - raw_feedback_loop`.
 The sampling and raw-feedback arms explain the mechanism; they prevent extra
 test-time compute from being mislabeled as loop design.
 
-This is an interactive shell-command study. It is not a SWE-bench score, a
-repository-level software-engineering result, a reproduction of Claude Code
-`/goal`, or evidence about unobserved human prompt counts.
+Claude's official loop guidance defines loops as repeated work until a stop
+condition and recommends explicit success criteria, quantitative verification,
+bounded usage, independent review, and pilot-first rollout. v0.6 operationalizes
+that narrow control-system idea: the user supplies the task once, automatic
+follow-ups are counted, the verifier supplies the stop signal, and the
+controller has a fixed turn/token cap. The guidance is not itself an evaluation
+topology and reports no performance uplift, so it does not define an
+"official" benchmark arm. Rollback, checkpoint selection, and the no-progress
+guard below are EdgeLoop-owned treatment components.
+
+This is an interactive shell-command study of a turn/goal-conditioned loop. It
+is not a SWE-bench score, a repository-level software-engineering result, a
+reproduction of Claude Code `/goal`, a test of time-based or proactive loops, or
+evidence about unobserved human prompt counts.
 
 ## 2. Why InterCode and why Bash only
 

@@ -16,6 +16,14 @@ this 16 GB host. InterCode was designed around action, execution observation,
 and iterative correction; its Bash source population is a plausible local
 candidate pending Docker and sustained-load qualification.
 
+The official Claude loop guide supplies design principles rather than an
+experimental topology: repeat until an explicit stop condition, make checks
+quantitative, bound token usage, pilot before scaling, and use fresh review when
+appropriate. The community Loop Engineering repository adds useful systems
+patterns such as isolated worktrees, durable state, budgets, and human gates.
+Neither source publishes a controlled uplift estimate, and neither makes
+EdgeLoop's rollback packet an official Claude strategy.
+
 Due diligence found several boundaries that prevent a direct unqualified run:
 
 - the paper's 117-task Python set is not a reproducible declared split;
