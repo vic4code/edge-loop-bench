@@ -17,6 +17,7 @@ RUN apt-get update \
         findutils \
         g++ \
         gawk \
+        git \
         grep \
         gzip \
         hostname \
@@ -57,14 +58,52 @@ RUN case "${FILE_SYSTEM_VERSION}" in 1|2|3|4) ;; *) exit 64 ;; esac \
     && bash "/opt/edgeloop/setup/setup_nl2b_fs_${FILE_SYSTEM_VERSION}.sh" \
     && rm -rf /opt/edgeloop/setup
 
-# Setup is the only root phase. Keep the upstream cwd while sticky-root mode
-# permits new top-level outputs without permitting deletion of root-owned paths.
+# Match the public initial Git baseline exposed by pinned InterCode while
+# keeping every gold/evaluator asset outside the agent image.  Ownership and
+# stat data are finalized before the index is written, and the repository is
+# then frozen against UID 65532 mutation.
 RUN chmod 1777 / \
     && mkdir -p /home/agent /usr/workspace \
     && chown 65532:65532 /home/agent /usr/workspace \
     && for path in /testbed /system /workspace /backup; do \
          if [[ -e "${path}" ]]; then chown -R 65532:65532 "${path}"; fi; \
-       done
+       done \
+    && git config --system --add safe.directory /
+COPY --chown=0:0 --chmod=0444 vendor/intercode/c3e46d827cfc9d4c704ec078f7abf9f41e3191d8/docker/docker.gitignore /.gitignore
+RUN git init --quiet / \
+    && git -C / add -A \
+    && GIT_AUTHOR_DATE='@1685577598 +0000' \
+       GIT_COMMITTER_DATE='@1685577598 +0000' \
+       git -C / \
+         -c user.name=intercode \
+         -c user.email=intercode@pnlp.org \
+         commit --quiet -m 'initial commit' \
+    && rm -f /.git/index \
+    && git -C / read-tree HEAD \
+    && find /.git -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} + \
+    && touch -d "@${SOURCE_DATE_EPOCH}" /.gitignore \
+    && chown -R 0:0 /.git \
+    && chmod -R a-w /.git
+
+# Trusted state acquisition uses one source-pinned helper and an absolute,
+# shell-free argv.  The runtime adapter supplies the frozen fs1..fs4 value.
+COPY docker/intercode/state_collector.py /opt/edgeloop/state_collector.py
+RUN chown 0:0 /opt/edgeloop/state_collector.py \
+    && chmod 0555 /opt/edgeloop/state_collector.py
+LABEL org.edgeloopbench.state-collector.sha256="sha256:513a0261fad1e52ce77479afd1c3196921ce558cc80e83632b68795e5639bba0" \
+      org.edgeloopbench.state-collector.argv="/usr/bin/python3 -I -S -B /opt/edgeloop/state_collector.py --profile fsN" \
+      org.edgeloopbench.state-collector.policy-sha256="sha256:70eeeda4091cb2da38aa8024af7c52dbacb464cf5b20a9f6bfdac5d66ecb67a9" \
+      org.edgeloopbench.state-collector.root-baseline-sha256="sha256:06dcf54e33c9412b1c0bb2cf7ddab33848169e640012209b9d05c81ee1da457f" \
+      org.edgeloopbench.state-collector.profile-set-sha256="sha256:1c515db46e794a58c457ac5d906ad80cae2ecb696ce2f07932733087368b1990" \
+      org.edgeloopbench.state-collector.profile="fs${FILE_SYSTEM_VERSION}" \
+      org.edgeloopbench.filesystem-version="${FILE_SYSTEM_VERSION}"
+
+# The final root phase proves the complete writable surface. Keep the upstream
+# cwd while sticky-root mode permits new top-level outputs without permitting
+# deletion of root-owned baseline paths.
+RUN /usr/bin/python3 -I -S -B /opt/edgeloop/state_collector.py \
+         --build-audit "fs${FILE_SYSTEM_VERSION}"
 USER 65532:65532
 ENV HOME=/home/agent
+ENV GIT_OPTIONAL_LOCKS=0
 WORKDIR /

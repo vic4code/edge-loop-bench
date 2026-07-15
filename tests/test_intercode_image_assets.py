@@ -32,11 +32,12 @@ DERIVED_SHA256 = {
     "setup/setup_nl2b_fs_4.sh": "e155eece189f409162571aa0f300a1a7f57ea216adbe8dec36e6b73affd94858",
 }
 DERIVED_AUX_SHA256 = {
-    "Dockerfile.agent": "1b517c32b59548974d4cdc9005326e34088094d9ebe645493d0cae3e80dc5912",
-    "Dockerfile.evaluator": "103107c2d9bdc906380f6862ca0775adab6bf4de354aff1c9a6a4b3773a434fc",
+    "Dockerfile.agent": "6c2b440dc7ebe277355fb21664de2a94eb0644f86698c92bcb836b88667a214f",
+    "Dockerfile.evaluator": "318fc5e51345036ada580f2552ae8fed61d37d31c9853eddcd3a893fd9c22ffa",
     "evaluator_placeholder.py": "de4642dd71f18a3b5f1bfcb7a73f99292129aa9e73a25034a49d76269cd32cad",
+    "state_collector.py": "513a0261fad1e52ce77479afd1c3196921ce558cc80e83632b68795e5639bba0",
 }
-DOCKERIGNORE_SHA256 = "effea9dab4a4907f298a1af85886ab8539a79a4b86c80f97c250aebd58952ca5"
+DOCKERIGNORE_SHA256 = "41f598c8c3bb3868c615a3e59c23b215a4ce3754c2127538427f43b5a3653983"
 
 
 def sha256(path: Path) -> str:
@@ -93,6 +94,7 @@ class InterCodeImageAssetTests(unittest.TestCase):
         self.assertIn("--no-install-recommends", shared(agent))
         for package in (
             "md5deep",
+            "git",
             "ncompress",
             "rename",
             "g++",
@@ -124,6 +126,64 @@ class InterCodeImageAssetTests(unittest.TestCase):
         self.assertNotIn("mkdir -p /work ", content)
         self.assertNotRegex(content, r"(?m)chown(?:\s+-R)?\s+65532:65532\s+/usr(?:\s|$)")
 
+    def test_agent_includes_source_pinned_root_owned_state_collector(self) -> None:
+        content = (DERIVED_ROOT / "Dockerfile.agent").read_text(encoding="utf-8")
+        helper_sha256 = DERIVED_AUX_SHA256["state_collector.py"]
+        policy_sha256 = (
+            "sha256:70eeeda4091cb2da38aa8024af7c52dbacb464cf5b20a9f6bfdac5d66ecb67a9"
+        )
+        root_baseline_sha256 = (
+            "sha256:06dcf54e33c9412b1c0bb2cf7ddab33848169e640012209b9d05c81ee1da457f"
+        )
+        profile_set_sha256 = (
+            "sha256:1c515db46e794a58c457ac5d906ad80cae2ecb696ce2f07932733087368b1990"
+        )
+        fixed_argv = (
+            "/usr/bin/python3 -I -S -B "
+            "/opt/edgeloop/state_collector.py --profile fsN"
+        )
+
+        self.assertIn(
+            "COPY docker/intercode/state_collector.py "
+            "/opt/edgeloop/state_collector.py",
+            content,
+        )
+        self.assertIn("chown 0:0 /opt/edgeloop/state_collector.py", content)
+        self.assertIn("chmod 0555 /opt/edgeloop/state_collector.py", content)
+        self.assertIn(
+            f'org.edgeloopbench.state-collector.sha256="sha256:{helper_sha256}"',
+            content,
+        )
+        self.assertIn(
+            f'org.edgeloopbench.state-collector.argv="{fixed_argv}"', content
+        )
+        self.assertIn(
+            f'org.edgeloopbench.state-collector.policy-sha256="{policy_sha256}"',
+            content,
+        )
+        self.assertIn(
+            "org.edgeloopbench.state-collector.root-baseline-sha256="
+            f'"{root_baseline_sha256}"',
+            content,
+        )
+        self.assertIn(
+            "org.edgeloopbench.state-collector.profile-set-sha256="
+            f'"{profile_set_sha256}"',
+            content,
+        )
+        self.assertIn(
+            'org.edgeloopbench.state-collector.profile="fs${FILE_SYSTEM_VERSION}"',
+            content,
+        )
+        self.assertIn(
+            'org.edgeloopbench.filesystem-version="${FILE_SYSTEM_VERSION}"',
+            content,
+        )
+        self.assertNotRegex(
+            content,
+            r"(?m)^\s*(?:ENTRYPOINT|CMD)\s+.*state_collector",
+        )
+
     def test_runtime_setup_scripts_have_no_network_or_package_install(self) -> None:
         forbidden = ("curl ", "wget ", "git clone", "apt-get", "apt ", "pip ")
         for script in sorted((DERIVED_ROOT / "setup").glob("*.sh")):
@@ -132,20 +192,60 @@ class InterCodeImageAssetTests(unittest.TestCase):
                 for token in forbidden:
                     self.assertNotIn(token, lowered)
 
-    def test_build_context_and_image_omit_root_git_baseline(self) -> None:
+    def test_build_context_and_agent_preserve_read_only_upstream_git_baseline(self) -> None:
         dockerignore_path = ROOT / ".dockerignore"
         dockerignore = dockerignore_path.read_text(encoding="utf-8")
-        self.assertEqual(sha256(dockerignore_path), DOCKERIGNORE_SHA256)
         self.assertEqual(
             dockerignore.splitlines(),
-            ["**", "!docker/", "!docker/intercode/", "!docker/intercode/**"],
+            [
+                "**",
+                "!docker/",
+                "!docker/intercode/",
+                "!docker/intercode/**",
+                "!vendor/",
+                "!vendor/intercode/",
+                f"!vendor/intercode/{INTERCODE_REVISION}/",
+                f"!vendor/intercode/{INTERCODE_REVISION}/docker/",
+                (
+                    f"!vendor/intercode/{INTERCODE_REVISION}/docker/"
+                    "docker.gitignore"
+                ),
+            ],
         )
-        for name in ("Dockerfile.agent", "Dockerfile.evaluator"):
-            content = (DERIVED_ROOT / name).read_text(encoding="utf-8")
-            self.assertNotIn("git init", content)
-            self.assertNotIn("git -C /", content)
-            self.assertNotIn("COPY vendor/", content)
-            self.assertNotRegex(content, r"(?m)^\s+git\s+\\$")
+        self.assertEqual(sha256(dockerignore_path), DOCKERIGNORE_SHA256)
+
+        content = (DERIVED_ROOT / "Dockerfile.agent").read_text(encoding="utf-8")
+        source = (
+            f"vendor/intercode/{INTERCODE_REVISION}/docker/docker.gitignore"
+        )
+        self.assertIn(f"COPY --chown=0:0 --chmod=0444 {source} /.gitignore", content)
+        self.assertIn("git init --quiet /", content)
+        self.assertIn("git -C / add -A", content)
+        self.assertIn("GIT_AUTHOR_DATE='@1685577598 +0000'", content)
+        self.assertIn("GIT_COMMITTER_DATE='@1685577598 +0000'", content)
+        self.assertIn("rm -f /.git/index", content)
+        self.assertIn("git -C / read-tree HEAD", content)
+        self.assertIn(
+            'find /.git -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +',
+            content,
+        )
+        self.assertIn('touch -d "@${SOURCE_DATE_EPOCH}" /.gitignore', content)
+        self.assertIn("chmod -R a-w /.git", content)
+        self.assertIn("ENV GIT_OPTIONAL_LOCKS=0", content)
+        self.assertLess(content.index("commit --quiet"), content.index("rm -f /.git/index"))
+        self.assertLess(content.index("git -C / read-tree HEAD"), content.index("chmod -R a-w /.git"))
+        self.assertLess(
+            content.index("git init --quiet /"),
+            content.index("--build-audit"),
+        )
+        for forbidden in (
+            "gold_command",
+            "gold.json",
+            "/opt/edgeloop/evaluator",
+            "evaluator_placeholder",
+            "intercode/data/",
+        ):
+            self.assertNotIn(forbidden, content.lower())
 
     def test_fs2_repairs_are_exact_and_deterministic(self) -> None:
         content = (DERIVED_ROOT / "setup/setup_nl2b_fs_2.sh").read_text(
