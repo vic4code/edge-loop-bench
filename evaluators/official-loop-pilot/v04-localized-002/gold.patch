@@ -1,0 +1,13 @@
+diff --git a/src/solution.py b/src/solution.py
+index 74b6b94..3a49911 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,5 +1,7 @@
+ def normalize_key(text):
++    if not isinstance(text, str):
++        raise ValueError('text required')
+     value = text.strip().lower()
+     if not value:
+         raise ValueError('blank')
+-    return value.replace('  ', '_').replace(' ', '_')
++    return '_'.join(value.split())

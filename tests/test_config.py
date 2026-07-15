@@ -119,6 +119,18 @@ class ExperimentConfigTests(unittest.TestCase):
             ("direct", "bounded_retry", "evidence_gated_loop"),
         )
 
+    def test_accepts_goal_skill_loop_strategy(self) -> None:
+        manifest = VALID_EFFECTIVENESS.replace(
+            '"maker_verifier"', '"goal_skill_loop"'
+        )
+
+        plan = self.load_text(manifest)
+
+        self.assertEqual(
+            plan.strategies,
+            ("direct", "bounded_retry", "goal_skill_loop"),
+        )
+
     def test_effectiveness_plan_requires_explicit_generation_contract(self) -> None:
         invalid = VALID_EFFECTIVENESS.replace(
             '[generation]\nthinking = false\ntemperature = 0.0\nedit_schema_revision = "full-file-edits-v1"\ncontroller_revision = "35f7f97000000000000000000000000000000000"\n',

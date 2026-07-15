@@ -1,0 +1,11 @@
+diff --git a/src/solution.py b/src/solution.py
+index 054e19a..db1a1be 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,2 +1,5 @@
+ def clamp_ratio(value):
+-    return max(0.0, min(float(value), 0.99))
++    import math
++    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
++        raise ValueError('finite number required')
++    return max(0.0, min(float(value), 1.0))

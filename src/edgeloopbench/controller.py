@@ -179,9 +179,15 @@ def run_strategy(
     evaluate: Evaluator,
     context: RunContext,
 ) -> StrategyResult:
-    """Run one v0.2 strategy without returning private evaluation feedback."""
+    """Run one strategy without returning private evaluation feedback."""
 
-    if strategy not in {"direct", "bounded_retry", "maker_verifier", "evidence_gated_loop"}:
+    if strategy not in {
+        "direct",
+        "bounded_retry",
+        "maker_verifier",
+        "evidence_gated_loop",
+        "goal_skill_loop",
+    }:
         raise ValueError(f"unsupported runnable strategy: {strategy}")
     root = Path(worktree).resolve()
     started_ns = time.monotonic_ns()
@@ -319,6 +325,8 @@ def run_strategy(
         controller=(
             "evidence-gated-checker-v5"
             if strategy == "evidence_gated_loop"
+            else "goal-skill-loop-v1"
+            if strategy == "goal_skill_loop"
             else "read-only-verifier-v2"
         ),
     )
@@ -333,7 +341,20 @@ def run_strategy(
             failure_reason = "public_test_budget_exhausted"
             break
         attempt += 1
-        maker_prompt = base_prompt if attempt == 1 else _retry_prompt(root, task, attempt, failure_reason, feedback)
+        if strategy == "goal_skill_loop":
+            maker_prompt = _goal_skill_prompt(
+                root,
+                task,
+                attempt,
+                failure_reason if attempt > 1 else None,
+                feedback if attempt > 1 else None,
+            )
+        else:
+            maker_prompt = (
+                base_prompt
+                if attempt == 1
+                else _retry_prompt(root, task, attempt, failure_reason, feedback)
+            )
         output = call("maker", maker_prompt)
         if output is None:
             break
@@ -341,7 +362,8 @@ def run_strategy(
         if public_passed:
             final_candidate = _snapshot(root)
             break
-        if strategy == "direct" or attempt >= 3 or counters.model_calls >= budget.model_calls:
+        attempt_cap = 5 if strategy == "goal_skill_loop" else 3
+        if strategy == "direct" or attempt >= attempt_cap or counters.model_calls >= budget.model_calls:
             break
 
     if strategy == "maker_verifier" and public_passed and final_candidate is not None:
@@ -506,6 +528,34 @@ def _retry_prompt(
         "Sanitized public evidence:\n"
         f"{feedback}\n"
         "Return corrected JSON only."
+    )
+
+
+def _goal_skill_prompt(
+    root: Path,
+    task: TaskManifest,
+    attempt: int,
+    failure_class: str | None,
+    feedback: str | None,
+) -> str:
+    prompt = build_agent_prompt(root, task) + (
+        "\n\nDeterministic goal\n"
+        "Make the agent-visible public tests pass. Stop immediately when they pass. "
+        "The controller permits at most five maker attempts.\n\n"
+        "Verification skill\n"
+        "Before returning edits, inspect the visible requirements and source. Check "
+        "requirement coverage, boundary conditions, state and side effects, cross-file "
+        "contracts, and regression risk. Then return only the required full-file edit JSON."
+    )
+    if feedback is None:
+        return prompt + f"\nCurrent attempt: {attempt}."
+    return prompt + (
+        "\n\nPrevious attempt evidence\n"
+        f"Current attempt: {attempt}.\n"
+        f"Failure class: {(failure_class or 'unknown').upper()}.\n"
+        "Sanitized public evidence:\n"
+        f"{feedback}\n"
+        "Use this evidence and repeat the verification skill before returning corrected JSON."
     )
 
 

@@ -1,0 +1,13 @@
+diff --git a/src/service.py b/src/service.py
+index 9729bf6..dc0ec94 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -1,5 +1,6 @@
+ from repository import has_key
+ 
+ def record_lookup(records, key):
+-    value = records.get(key)
+-    return (bool(value), value)
++    if not has_key(records, key):
++        return (False, None)
++    return (True, records[key])

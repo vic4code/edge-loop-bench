@@ -1,0 +1,20 @@
+diff --git a/src/solution.py b/src/solution.py
+index 417195c..29f2062 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,3 +1,14 @@
+ def safe_relative(parts):
+-    usable = [part.strip() for part in parts if part]
++    usable = []
++    for part in parts:
++        if not isinstance(part, str):
++            continue
++        value = part.strip()
++        if not value:
++            continue
++        if value == '..' or value.startswith(('/', '\\')):
++            raise ValueError('unsafe path')
++        usable.append(value)
++    if not usable:
++        raise ValueError('empty path')
+     return '/'.join(usable)

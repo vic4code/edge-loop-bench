@@ -1,0 +1,12 @@
+diff --git a/src/service.py b/src/service.py
+index 35aa53b..b520aa8 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -1,4 +1,6 @@
+ from policy import discount_rate
+ 
+ def final_price(subtotal, tier):
+-    return round(subtotal - discount_rate(tier), 2)
++    if subtotal < 0:
++        raise ValueError('negative subtotal')
++    return round(subtotal * (1 - discount_rate(tier)), 2)

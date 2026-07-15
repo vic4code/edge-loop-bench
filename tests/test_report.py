@@ -10,6 +10,7 @@ from edgeloopbench.config import load_experiment
 from edgeloopbench.report import (
     ComparisonError,
     _controller_flow,
+    _study_snapshot,
     _task_suite,
     render_model_comparison,
     render_report,
@@ -54,6 +55,24 @@ class StaticReportTests(unittest.TestCase):
         self.assertEqual(tasks.count('<article class="task-card">'), 6)
         self.assertIn("shipping_quote", tasks)
         self.assertIn("Verifier adversarial", tasks)
+
+    def test_v04_report_names_goal_loop_and_fresh_pilot_tasks(self) -> None:
+        plan = load_experiment(
+            self.project_root / "configs/experiments/v0.4/pilot-qwen35-4b.toml"
+        )
+
+        flow = _controller_flow(plan)
+        tasks = _task_suite(plan)
+        snapshot = _study_snapshot(((plan, None, ()),))
+
+        self.assertIn("Goal Skill Loop", flow)
+        self.assertIn("at most five", flow)
+        self.assertIn("OfficialLoopPilot-8", tasks)
+        self.assertIn("Ceiling page count", tasks)
+        self.assertIn("Falsy repository values", tasks)
+        self.assertEqual(tasks.count('<article class="task-card">'), 8)
+        self.assertIn("OfficialLoopPilot-8", snapshot)
+        self.assertIn("1 seed × 1 budget tier", snapshot)
 
     def test_renders_agent_visible_microrepair_task_catalog(self) -> None:
         plan = load_experiment(
@@ -188,6 +207,74 @@ class StaticReportTests(unittest.TestCase):
                 ),
                 tempfile.gettempdir(),
             )
+
+    def test_cross_model_report_supports_manifest_declared_goal_skill_loop(self) -> None:
+        base_plan = load_experiment(
+            self.project_root / "examples/results/sample-plan.toml"
+        )
+        base_records = load_results(
+            self.project_root / "examples/results/sample-runs.jsonl"
+        )
+        first_sha = "c" * 64
+        plan = replace(
+            base_plan,
+            id="goal-loop-first",
+            strategies=("direct", "bounded_retry", "goal_skill_loop"),
+            manifest_sha256=first_sha,
+        )
+        records = tuple(
+            replace(
+                record,
+                experiment_id=plan.id,
+                strategy=(
+                    "goal_skill_loop"
+                    if record.strategy == "maker_verifier"
+                    else record.strategy
+                ),
+                manifest_sha256="sha256:" + first_sha,
+            )
+            for record in base_records
+        )
+        report = summarize(records, plan, validate_results_for_plan(records, plan))
+        second_sha = "d" * 64
+        second_plan = replace(
+            plan,
+            id="goal-loop-second",
+            model=replace(
+                plan.model,
+                id="phi4-mini:latest",
+                revision="sha256:" + "e" * 64,
+                artifact_sha256="sha256:" + "e" * 64,
+            ),
+            manifest_sha256=second_sha,
+        )
+        second_records = tuple(
+            replace(
+                record,
+                experiment_id=second_plan.id,
+                manifest_sha256="sha256:" + second_sha,
+            )
+            for record in records
+        )
+        second_report = summarize(
+            second_records,
+            second_plan,
+            validate_results_for_plan(second_records, second_plan),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            index = render_model_comparison(
+                (
+                    (plan, report, records),
+                    (second_plan, second_report, second_records),
+                ),
+                directory,
+            )
+            html = index.read_text(encoding="utf-8")
+
+        self.assertIn("Goal Skill Loop", html)
+        self.assertIn("at most five", html)
+        self.assertNotIn("Current Maker–Verifier", html)
 
 
 if __name__ == "__main__":

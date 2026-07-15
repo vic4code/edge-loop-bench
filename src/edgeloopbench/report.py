@@ -234,12 +234,21 @@ def _study_snapshot(
     budget_count = len(plan.budgets or {})
     strategy_count = len(plan.strategies)
     episode_count = sum(len(records) for _, _, records in items)
-    dataset = "MicroRepair-6" if set(plan.tasks) == set(_TASK_SUMMARIES) else "Configured repair suite"
+    if task_count == 8 and all(task.startswith("v04-") for task in plan.tasks):
+        dataset = "OfficialLoopPilot-8"
+    elif task_count == 6 and all(task.startswith("python-") for task in plan.tasks):
+        dataset = "MicroRepair-6"
+    else:
+        dataset = "Configured repair suite"
+    seed_label = "seed" if seed_count == 1 else "seeds"
+    budget_label = "budget tier" if budget_count == 1 else "budget tiers"
+    model_label = "model" if len(items) == 1 else "models"
+    strategy_label = "strategy" if strategy_count == 1 else "strategies"
     facts = (
         ("Dataset", dataset),
         ("Workload", f"{task_count} offline Python repair tasks"),
-        ("Pairing", f"{seed_count} seeds × {budget_count} budget tiers"),
-        ("Arms", f"{len(items)} models × {strategy_count} strategies"),
+        ("Pairing", f"{seed_count} {seed_label} × {budget_count} {budget_label}"),
+        ("Arms", f"{len(items)} {model_label} × {strategy_count} {strategy_label}"),
         ("Observed", f"{episode_count} complete episodes"),
     )
     return (
@@ -284,10 +293,10 @@ def _comparison_conclusion(
             for row in _transition_rows(plan, records)
             if row["budget_tier"] == budget
         }
-        for strategy, label in (
-            ("bounded_retry", "Bounded Retry"),
-            ("maker_verifier", "Maker–Verifier"),
-        ):
+        for strategy in plan.strategies:
+            if strategy == "direct":
+                continue
+            label = _strategy_label(strategy)
             delta = 100 * (arms[strategy].success_rate or 0) - direct_rate
             row = transitions[strategy]
             rescued = int(row["rescued"])
@@ -308,12 +317,28 @@ def _comparison_conclusion(
     else:
         loop_finding = "No tested loop improved verified success over its own Direct baseline in this budget tier."
 
+    if "goal_skill_loop" in items[0][0].strategies:
+        limitation = (
+            '<article class="warning"><span>Design limitation</span>'
+            '<h3>Goal-based looping cannot create missing capability</h3>'
+            '<p>The controller adds a deterministic public-test goal, a fixed verification skill, '
+            'and at most five Maker attempts. Extra attempts count as test-time scaling and are useful '
+            'only when the model can convert visible failure evidence into a better edit.</p></article>'
+        )
+    else:
+        limitation = (
+            '<article class="warning"><span>Design limitation</span>'
+            '<h3>Current Maker–Verifier is not the target verifier</h3>'
+            f'<p>It rescued {maker_rescued} and regressed {maker_regressed} of {maker_pairs} paired outcomes here. '
+            'It is a second edit call, not a read-only judge, so this is not evidence that verifier loops generally fail.</p></article>'
+        )
+
     return f'''<section class="conclusion-section"><div class="section-head"><div><div class="eyebrow">BOTTOM LINE</div>
 <h2>What the evidence supports</h2></div><div class="direction">Medium-budget paired comparison</div></div>
 <div class="conclusion-lead"><strong>{_e(loop_finding)}</strong><span>The strongest Direct baseline was {_e(direct_model)} at {direct_rate:.1f}% verified success.</span></div>
 <div class="conclusion-grid">
 <article><span>Measured finding</span><h3>Loops can help, do nothing, or regress</h3><p>Judge each loop against Direct within the same model. More calls are useful only when rescued outcomes exceed regressions at an acceptable cost.</p></article>
-<article class="warning"><span>Design limitation</span><h3>Current Maker–Verifier is not the target verifier</h3><p>It rescued {maker_rescued} and regressed {maker_regressed} of {maker_pairs} paired outcomes here. It is a second edit call, not a read-only judge, so this is not evidence that verifier loops generally fail.</p></article>
+{limitation}
 <article><span>Inference boundary</span><h3>Qualification, not a general coding leaderboard</h3><p>The result applies to this small deterministic repair suite. It does not establish broad model quality or serving efficiency.</p></article>
 </div></section>'''
 
@@ -396,10 +421,10 @@ def _baseline_uplift(
         direct = arms["direct"]
         direct_rate = 100 * (direct.success_rate or 0)
         rows: list[str] = []
-        for strategy, label in (
-            ("bounded_retry", "Bounded Retry"),
-            ("maker_verifier", "Maker–Verifier"),
-        ):
+        for strategy in plan.strategies:
+            if strategy == "direct":
+                continue
+            label = _strategy_label(strategy)
             arm = arms[strategy]
             delta = 100 * (arm.success_rate or 0) - direct_rate
             pair = next(
@@ -438,7 +463,7 @@ def _comparison_inference(
         for pair in report.pairs:
             if pair.budget_tier != "medium" or pair.baseline_strategy != "direct":
                 continue
-            label = "Bounded Retry" if pair.candidate_strategy == "bounded_retry" else "Maker–Verifier"
+            label = _strategy_label(pair.candidate_strategy)
             p_value = "—" if pair.exact_p_value is None else f"{pair.exact_p_value:.4f}"
             rows.append(
                 f"<tr><td><strong>{_e(_short_model_label(plan.model.id))}</strong></td>"
@@ -463,9 +488,49 @@ def _ratio(candidate: float | None, baseline: float | None) -> str:
 
 
 def _controller_flow(plan: ExperimentPlan) -> str:
+    is_v04 = "goal_skill_loop" in plan.strategies
     is_v03 = "evidence_gated_loop" in plan.strategies
     is_v02 = any(task.startswith("confirm-") for task in plan.tasks)
-    if is_v03:
+    if is_v04:
+        lanes = (
+            (
+                "Direct baseline",
+                "One Maker attempt; no controller retry",
+                (
+                    "Reset the pinned clean task worktree",
+                    "Maker returns full-file edit JSON",
+                    "Validate, apply, and run public tests once",
+                    "Run isolated hidden evaluation after the episode",
+                ),
+            ),
+            (
+                "Bounded Retry",
+                "At most three evidence-driven Maker attempts",
+                (
+                    "Start from the same agent-visible task bundle",
+                    "On failure, return sanitized public evidence",
+                    "Repair the current visible worktree",
+                    "Exit on public pass or the three-attempt cap",
+                    "Run isolated hidden evaluation after the episode",
+                ),
+            ),
+            (
+                "Goal Skill Loop",
+                "Deterministic goal, fixed skill, at most five attempts",
+                (
+                    "State public-test pass as the deterministic goal",
+                    "Apply the same five-part verification skill every turn",
+                    "Return sanitized public evidence after failures",
+                    "Exit on public pass or the five-attempt cap",
+                    "Count every logical token and evaluate hidden tests only afterward",
+                ),
+            ),
+        )
+        boundary = (
+            "Public tests are the only agent-visible stop condition. Hidden tests, gold edits, "
+            "evaluator paths, and hidden outcomes are never returned to the model."
+        )
+    elif is_v03:
         lanes = (
             (
                 "Direct baseline",
@@ -638,6 +703,46 @@ _TASK_SUMMARIES = {
         "Normalize every non-empty whitespace run to one hyphen and reject whitespace-only labels.",
         "Resistance to a superficial public-test-only fix.",
     ),
+    "v04-localized-001": (
+        "Localized", "Generated mutation", "Ceiling page count",
+        "Compute ceiling division, preserve zero, and reject invalid counts or page sizes.",
+        "Single-file arithmetic boundaries and input validation.",
+    ),
+    "v04-localized-002": (
+        "Localized", "Generated mutation", "Whitespace-normalized key",
+        "Trim and lowercase text, collapse every whitespace run, and reject blank input.",
+        "Text normalization across spaces, tabs, newlines, and invalid types.",
+    ),
+    "v04-localized-003": (
+        "Localized", "Generated mutation", "Finite ratio clamp",
+        "Accept finite numeric values excluding booleans and clamp to inclusive 0.0…1.0.",
+        "Numeric type, finiteness, and inclusive-bound reasoning.",
+    ),
+    "v04-cross-file-001": (
+        "Cross-file", "Generated mutation", "Policy-based final price",
+        "Apply a repository policy rate as a fraction of subtotal and reject negative input.",
+        "Cross-module policy contracts and monetary arithmetic.",
+    ),
+    "v04-cross-file-002": (
+        "Cross-file", "Generated mutation", "Falsy repository values",
+        "Preserve the found/value contract for stored zero, False, and None values.",
+        "Cross-module presence semantics independent of value truthiness.",
+    ),
+    "v04-diagnosis-001": (
+        "Diagnosis", "Generated mutation", "Robust active total",
+        "Sum finite numeric amounts from active dict rows while ignoring malformed entries.",
+        "Diagnosis, malformed-data handling, and numeric validation.",
+    ),
+    "v04-diagnosis-002": (
+        "Diagnosis", "Generated mutation", "First valid email",
+        "Find the first structurally valid email in malformed records and normalize its case.",
+        "Ordered search, structural validation, and noisy input.",
+    ),
+    "v04-adversarial-001": (
+        "Adversarial", "Verifier adversarial", "Safe relative path",
+        "Join usable path segments while rejecting traversal, absolute paths, and empty input.",
+        "Resistance to a public-test-only path-normalization shortcut.",
+    ),
 }
 
 
@@ -657,8 +762,10 @@ def _task_suite(plan: ExperimentPlan) -> str:
             '<dt>Hidden evaluation</dt><dd>Final objective pass/fail only; no feedback returns to the model.</dd></dl></article>'
         )
     observations = len(plan.tasks) * len(plan.seeds)
-    if set(plan.tasks) == set(_TASK_SUMMARIES):
+    if len(plan.tasks) == 6 and all(task.startswith("python-") for task in plan.tasks):
         dataset_name = "MicroRepair-6 task catalog"
+    elif len(plan.tasks) == 8 and all(task.startswith("v04-") for task in plan.tasks):
+        dataset_name = "OfficialLoopPilot-8"
     elif len(plan.tasks) == 6 and all(task.startswith("cal3-") for task in plan.tasks):
         dataset_name = "TopologyCalibration-6"
     elif len(plan.tasks) == 30 and all(task.startswith("v03-") for task in plan.tasks):
@@ -734,6 +841,7 @@ def _comparison_metric_cards(
             if arm.budget_tier == budget
         }
         series.append((plan.model.id, arms))
+    strategies = items[0][0].strategies
     cards = (
         _metric_card(
             "success",
@@ -741,6 +849,7 @@ def _comparison_metric_cards(
             "Objective repair success · Higher is better",
             series,
             lambda arm: 100 * (arm.success_rate or 0),
+            strategies,
             fixed_maximum=100,
             suffix="%",
         ),
@@ -750,6 +859,7 @@ def _comparison_metric_cards(
             "Mean logical tokens per episode · Lower is better",
             series,
             lambda arm: arm.mean_total_tokens or 0,
+            strategies,
             suffix=" tok",
         ),
         _metric_card(
@@ -758,6 +868,7 @@ def _comparison_metric_cards(
             "End-to-end wall seconds · Lower is better",
             series,
             lambda arm: arm.mean_wall_seconds or 0,
+            strategies,
             suffix=" s",
             precision=1,
         ),
@@ -771,12 +882,12 @@ def _metric_card(
     subtitle: str,
     series: list[tuple[str, dict[str, ArmSummary]]],
     value_for: Callable[[ArmSummary], float],
+    strategies: tuple[str, ...],
     *,
     suffix: str,
     fixed_maximum: float | None = None,
     precision: int = 0,
 ) -> str:
-    strategies = ("direct", "bounded_retry", "maker_verifier")
     values = [
         float(value_for(arms[strategy]))
         for _model, arms in series
@@ -852,9 +963,7 @@ def _metric_card(
     legend = "".join(
         f'<span><i class="legend-swatch bar-{strategy}"></i>{label}</span>'
         for strategy, label in (
-            ("direct", "Direct"),
-            ("bounded_retry", "Retry"),
-            ("maker_verifier", "Maker–Verifier"),
+            (strategy, _strategy_label(strategy)) for strategy in strategies
         )
     )
     return f"""<article class="metric-card metric-{_e(metric)}">
@@ -868,6 +977,16 @@ def _metric_value(value: float, suffix: str, precision: int) -> str:
     if suffix == "%":
         return f"{value:.0f}%"
     return f"{value:,.{precision}f}{suffix}"
+
+
+def _strategy_label(strategy: str) -> str:
+    return {
+        "direct": "Direct",
+        "bounded_retry": "Bounded Retry",
+        "maker_verifier": "Maker–Verifier",
+        "evidence_gated_loop": "Evidence-Gated Loop",
+        "goal_skill_loop": "Goal Skill Loop",
+    }.get(strategy, strategy.replace("_", " ").title())
 
 
 def _short_model_label(model: str) -> str:
@@ -1000,4 +1119,10 @@ _COMPARISON_CSS = """
 
 _CSS = """
 :root{color-scheme:light dark;--bg:#f6f7f4;--panel:#fff;--text:#172019;--muted:#657068;--line:#dfe4df;--green:#62d84e;--green-dark:#268b35;--amber:#e0b23f;--red:#d95d55;--metric-success:#8247e5;--metric-tokens:#f0c800;--metric-time:#f0773c;--bar-direct:#202321;--bar-retry:#36a852;--bar-maker:#ef6d9a}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}header{height:58px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 max(24px,calc((100% - 1180px)/2));background:color-mix(in srgb,var(--bg) 92%,transparent)}.brand{color:var(--text);text-decoration:none;font-weight:500;letter-spacing:-.04em}.brand span{color:var(--green-dark)}.meta,.direction,.chart-title span,footer,.empty span{color:var(--muted)}main{max-width:1180px;margin:auto;padding:58px 24px 80px}.eyebrow{font-size:11px;font-weight:500;letter-spacing:.14em;color:var(--green-dark)}h1,h2,h3,strong{font-weight:500}h1{font-family:ui-serif,Georgia,serif;font-size:54px;letter-spacing:-.045em;line-height:1.02;max-width:750px;margin:10px 0 16px}h2{font-size:28px;letter-spacing:-.03em;margin:5px 0}h3{font-size:16px;margin:0}.lede{font-size:17px;color:var(--muted);max-width:720px;margin:0 0 64px}section{border-top:1px solid var(--line);padding:34px 0 48px}.section-head,.chart-title{display:flex;align-items:flex-end;justify-content:space-between;gap:18px}.chart-title{margin:30px 0 13px;align-items:baseline}.metric-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:28px}.metric-card{min-width:0;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:16px}.metric-head h3{display:flex;align-items:center;gap:9px;font-family:ui-serif,Georgia,serif;font-size:22px}.metric-head h3 i{display:block;width:14px;height:14px;flex:0 0 14px}.metric-success .metric-head h3 i{background:var(--metric-success)}.metric-tokens .metric-head h3 i{background:var(--metric-tokens)}.metric-time .metric-head h3 i{background:var(--metric-time)}.metric-head p{min-height:38px;margin:8px 0 0;color:var(--muted);font-size:12px}.metric-chart{display:block;width:100%;height:auto}.metric-gridline{stroke:var(--line);stroke-width:1;stroke-dasharray:2 4}.metric-axis,.metric-model,.metric-value{fill:var(--text);font-size:10px}.metric-axis{fill:var(--muted)}.metric-value{font-weight:500}.metric-bar{shape-rendering:crispEdges}.bar-direct{fill:var(--bar-direct);background:var(--bar-direct)}.bar-bounded_retry{fill:var(--bar-retry);background:var(--bar-retry)}.bar-maker_verifier{fill:var(--bar-maker);background:var(--bar-maker)}.zero-marker{stroke-width:5;stroke-linecap:square}.zero-marker[data-strategy="direct"]{stroke:var(--bar-direct)}.zero-marker[data-strategy="bounded_retry"]{stroke:var(--bar-retry)}.zero-marker[data-strategy="maker_verifier"]{stroke:var(--bar-maker)}.metric-legend{display:flex;justify-content:center;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px}.metric-legend span{display:flex;align-items:center;gap:5px}.legend-swatch{display:block;width:9px;height:9px}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;background:var(--panel)}th,td{padding:12px 14px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:500}th:first-child,td:first-child{text-align:left}td strong{display:block}small{display:block;color:var(--muted)}.score{min-width:240px;position:relative}.score span{position:relative;z-index:1;font-variant-numeric:tabular-nums}.score i{position:absolute;left:12px;bottom:7px;height:3px;background:var(--green);display:block}.split{display:grid;grid-template-columns:1.08fr .92fr;gap:36px}.scatter{width:100%;background:var(--panel);display:block}.scatter line{stroke:var(--line);stroke-width:1}.scatter .grid{stroke-dasharray:3 5}.scatter text{fill:var(--text);font-size:11px}.scatter .axis{fill:var(--muted)}.point{fill:var(--green-dark);stroke:var(--panel);stroke-width:2}.point.bounded_retry{fill:var(--green)}.point.maker_verifier{fill:var(--amber)}.positive{color:var(--green-dark)}.negative{color:var(--red)}.heat-title{margin-top:42px}.heatmap .heat{text-align:center;font-weight:500;min-width:110px}.heat.pass{background:color-mix(in srgb,var(--green) 26%,var(--panel))}.heat.mixed{background:color-mix(in srgb,var(--amber) 24%,var(--panel))}.heat.fail{background:color-mix(in srgb,var(--red) 15%,var(--panel))}.empty-cell{color:var(--muted)}.serving{margin-top:12px}.empty{border:1px dashed var(--line);padding:22px;margin-top:25px;display:grid;gap:5px}.empty strong{font-size:16px}footer{border-top:1px solid var(--line);padding-top:20px;font-size:12px;overflow-wrap:anywhere}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}@media(max-width:980px){.metric-grid{grid-template-columns:1fr}.metric-head p{min-height:0}}@media(max-width:760px){header{padding:0 16px}.meta{display:none}main{padding:38px 16px 60px}h1{font-size:40px}.lede{margin-bottom:48px}.split{grid-template-columns:1fr}.section-head,.chart-title{align-items:flex-start;flex-direction:column;gap:4px}.metric-card{padding:12px}.table-wrap{overflow:visible}th,td{padding:10px 8px;white-space:normal}.leaderboard th:nth-child(3),.leaderboard td:nth-child(3),.leaderboard th:nth-child(5),.leaderboard td:nth-child(5),.leaderboard th:nth-child(6),.leaderboard td:nth-child(6){display:none}.leaderboard .score{min-width:120px}.comparison-leaderboard th:nth-child(3),.comparison-leaderboard td:nth-child(3){display:table-cell}.comparison-leaderboard th:nth-child(5),.comparison-leaderboard td:nth-child(5),.comparison-leaderboard th:nth-child(6),.comparison-leaderboard td:nth-child(6),.comparison-leaderboard th:nth-child(7),.comparison-leaderboard td:nth-child(7){display:none}.comparison-leaderboard .score{min-width:80px}.transitions th:nth-child(2),.transitions td:nth-child(2),.transitions th:nth-child(6),.transitions td:nth-child(6){display:none}.paired th:nth-child(4),.paired td:nth-child(4),.paired th:nth-child(5),.paired td:nth-child(5){display:none}.heatmap{table-layout:fixed}.heatmap th,.heatmap td{font-size:10px;overflow-wrap:anywhere;padding:8px 4px}.heatmap th:first-child{width:38%}.heatmap .heat{min-width:0}}@media(prefers-color-scheme:dark){:root{--bg:#101310;--panel:#171b18;--text:#eef4ef;--muted:#a4aea6;--line:#303731;--green:#74e45f;--green-dark:#64cf55;--amber:#e5bd55;--red:#eb7770;--bar-direct:#f1f3f1;--bar-retry:#6bd47d;--bar-maker:#f58bb0}}
+"""
+
+_CSS += """
+.bar-goal_skill_loop{fill:#7958d6;background:#7958d6}
+.zero-marker[data-strategy="goal_skill_loop"]{stroke:#7958d6}
+.point.goal_skill_loop{fill:#7958d6}
 """

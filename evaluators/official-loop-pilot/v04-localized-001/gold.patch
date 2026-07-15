@@ -1,0 +1,12 @@
+diff --git a/src/solution.py b/src/solution.py
+index 4578e1d..bb0dc9a 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,4 +1,4 @@
+ def page_count(total_items, page_size):
+-    if page_size <= 0:
+-        raise ValueError('invalid size')
+-    return total_items // page_size
++    if page_size <= 0 or total_items < 0:
++        raise ValueError('invalid pagination')
++    return (total_items + page_size - 1) // page_size

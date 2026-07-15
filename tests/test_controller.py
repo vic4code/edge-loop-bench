@@ -121,6 +121,49 @@ def clamp_page(page: int, total_pages: int) -> int:
             self.assertEqual(result.tool_calls, 3)
             self.assertIn("not valid JSON", prompts[1])
 
+    def test_goal_skill_loop_uses_fixed_skill_and_can_reach_fifth_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "worktree"
+            task = prepare_task(self.task_root, worktree)
+            prompts: list[str] = []
+            broken_source = (worktree / "src/pagination.py").read_text()
+            outputs = [
+                ModelOutput(
+                    json.dumps({"edits": [{"path": "src/pagination.py", "content": broken_source}]}),
+                    "", 500, 100, 1,
+                )
+                for _ in range(4)
+            ]
+            outputs.append(
+                ModelOutput(
+                    json.dumps({"edits": [{"path": "src/pagination.py", "content": self.fixed_source}]}),
+                    "", 500, 100, 1,
+                )
+            )
+
+            def model(request: ModelRequest) -> ModelOutput:
+                prompts.append(request.prompt)
+                return outputs.pop(0)
+
+            budget = LogicalBudget(
+                prompt_tokens=4000, completion_tokens=1000,
+                model_calls=5, tool_calls=10,
+                public_test_runs=5, per_call_context_tokens=4096,
+            )
+            result = run_strategy(
+                "goal_skill_loop", worktree, task, model, budget, seed=31,
+                event_log=Path(directory) / "events.jsonl",
+                evaluate=lambda _root, _task: True,
+                context=self.context(),
+            )
+
+            self.assertTrue(result.objective_success)
+            self.assertEqual((result.model_calls, result.public_test_runs), (5, 5))
+            self.assertEqual(result.tool_calls, 10)
+            self.assertTrue(all("Verification skill" in prompt for prompt in prompts))
+            self.assertTrue(all("five maker attempts" in prompt for prompt in prompts))
+            self.assertIn("Failure class: PUBLIC_TESTS_FAILED", prompts[1])
+
     def test_retry_does_not_call_maker_without_a_remaining_public_test(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             worktree = Path(directory) / "worktree"

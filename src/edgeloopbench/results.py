@@ -19,6 +19,7 @@ STRATEGY_ORDER = {
     "bounded_retry": 1,
     "maker_verifier": 2,
     "evidence_gated_loop": 3,
+    "goal_skill_loop": 4,
 }
 RUN_STATUSES = frozenset(
     {"completed", "budget_exhausted", "timeout", "infrastructure_error", "invalid"}

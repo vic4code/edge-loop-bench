@@ -18,7 +18,13 @@ MAX_MANIFEST_FILE_BYTES = 4 * 1024 * 1024
 MAX_PLANNED_RUNS = 250_000
 TRACKS = frozenset({"effectiveness", "serving", "deployment"})
 STRATEGIES = frozenset(
-    {"direct", "bounded_retry", "maker_verifier", "evidence_gated_loop"}
+    {
+        "direct",
+        "bounded_retry",
+        "maker_verifier",
+        "evidence_gated_loop",
+        "goal_skill_loop",
+    }
 )
 BACKENDS = frozenset({"ollama", "vllm-metal", "mlx-lm"})
 UNPINNED_VALUES = frozenset(
