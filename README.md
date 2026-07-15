@@ -5,8 +5,8 @@ more inference.**
 
 [Open the current interactive result](results/OPEN-ME/index.html) ·
 [Read the v0.4 run record](docs/runs/v04-goal-skill-loop-pilot.md) ·
-[Inspect the v0.4 design](docs/experiment-design-v0.4.md) ·
-[Review the proposed faithful `/goal` experiment](docs/experiment-design-v0.5-fresh-evaluator-goal.md)
+[Review the active v0.6 preregistration](docs/experiment-design-v0.6-intercode-bash.md) ·
+[Inspect its implementation plan](docs/plans/v0.6-intercode-implementation.md)
 
 ## Abstract
 
@@ -22,6 +22,12 @@ Retry, and a five-attempt Goal Skill Loop adapted from Anthropic's official
 loop guidance. It uses eight fresh offline Python repair tasks, isolated hidden
 evaluation, identical episode-level budgets, append-only raw events, and
 within-model paired statistics.
+
+The next study is now preregistered for implementation on qualified,
+offline InterCode-Bash tasks. It adds an independent verified-sampling control
+so that the full stateful interaction package and engineered-loop effects are
+not confused with extra test-time samples. No v0.6 performance result exists
+yet; the current HTML remains the completed v0.4 pilot.
 
 The motivation for local inference is practical: exploratory controller work
 can consume many repeated prompts before a topology is worth scaling. Running
@@ -137,6 +143,7 @@ multi-step environments rather than only static repair prompts.
 
 | Benchmark | What it measures | Fit for this project | Local-pilot constraint |
 | --- | --- | --- | --- |
+| [InterCode](https://github.com/princeton-nlp/intercode) | Native action–execution-observation loops with a gold-derived scalar reward | Active v0.6 target; supports Direct, verified sampling, Raw feedback, and Engineered causal arms | Upstream images and task rows require offline qualification, fresh-container isolation, and evaluator hardening |
 | [LongCLI-Bench](https://github.com/finyorko/longcli-bench) | 20 long-horizon CLI tasks; F2P/P2P tests, step score, and explicit `--give-test-output` self-correction turns | Best coding benchmark for comparing no feedback with one or more correction turns | Requires Docker, Python 3.12, and a compatible agent adapter |
 | [Frontier-Eng](https://lab.einsia.ai/frontier-eng/) | Iterative propose–execute–evaluate optimization with frozen executable verifiers and continuous reward | Best direct test of whether deeper loop iterations improve an objective | Engineering simulators are heavy; even the 10-task lite set is difficult for small models |
 | [General AgentBench](https://github.com/cxcscmu/General-AgentBench) | Sequential and parallel agent test-time scaling across coding, search, reasoning, and tools | Strong external comparison for context ceilings and verification gaps | Several tracks use external APIs and large hosted models |
@@ -144,14 +151,19 @@ multi-step environments rather than only static repair prompts.
 | [RigorBench](https://github.com/MeherBhaskar/RigorBench) | Planning, verification, recovery, abstention, testing, and trajectory discipline | Useful process audit for whether an agent loops responsibly | Composite scoring and judge-based components are less objective than frozen executable verifiers |
 | [Test-Time Interaction](https://test-time-interaction.github.io/) | Whether longer environment interaction enables exploration, backtracking, and new-information gathering | Strong evidence for the task class in which loops should matter | Web environments are network-dependent and therefore are not imported into this offline suite |
 
-The recommended next external validation is a small preregistered
-[SWE-bench Verified](https://www.swebench.com/SWE-bench/) pilot because it is
-the most widely recognized repository-level coding-agent benchmark. The causal
-comparison should hold task, model, and total budget fixed while changing only
-the stop controller: Direct versus fresh-evaluator Goal. LongCLI-Bench remains
-the lighter benchmark for explicitly varying zero versus one versus three
-test-feedback turns, and Frontier-Eng v1-lite is the next choice when continuous
-improvement—not binary repair—is the research question.
+The active external validation is the
+[v0.6 InterCode-Bash causal study](docs/experiment-design-v0.6-intercode-bash.md).
+Its source boundary is pinned to one official commit, but measured scoring is
+blocked until network-dependent or nondeterministic rows are excluded by
+repeatable offline gold replay. The scalar reward is explicitly treated as a
+benchmark-native verifier signal. Therefore the result will answer whether a
+feedback loop and its engineered controller beat extra verified samples when
+such a verifier exists; it will not be generalized to unaided repository work.
+
+SWE-bench Verified remains the preferred later repository-level validation,
+LongCLI-Bench remains the lighter long-horizon correction benchmark, and
+Frontier-Eng v1-lite remains the next choice for continuous rather than binary
+improvement.
 
 The official SWE-bench harness requires Docker. Its setup guide recommends at
 least 16 GB allocated to Docker and roughly 120 GB of working storage for the

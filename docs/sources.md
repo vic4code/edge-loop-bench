@@ -60,6 +60,18 @@ Retrieved on **2026-07-14** unless noted otherwise. Runtime capabilities change 
 - [Devstral Small 2](https://huggingface.co/mistralai/Devstral-Small-2-24B-Instruct-2512) — official coding focus and hardware positioning.
 - [Ollama Devstral Small 2 artifacts](https://ollama.com/library/devstral-small-2/tags) — packaged artifact sizes.
 
+## Interactive coding benchmarks
+
+Retrieved on **2026-07-15**.
+
+- [InterCode paper](https://papers.neurips.cc/paper_files/paper/2023/file/4b175d846fb008d540d233c188379ff9-Paper-Datasets_and_Benchmarks.pdf) — benchmark formulation, Single Turn and Try Again strategies, task counts, prompts, and reported results.
+- [InterCode source at the pinned commit](https://github.com/princeton-nlp/intercode/tree/c3e46d827cfc9d4c704ec078f7abf9f41e3191d8) — environment, experiment, data, Docker, and license source for v0.6 qualification.
+- [Pinned NL2Bash data description](https://github.com/princeton-nlp/intercode/blob/c3e46d827cfc9d4c704ec078f7abf9f41e3191d8/data/nl2bash/README.md) — the four filesystem strata and 200-row source population.
+- [Pinned Try Again experiment](https://github.com/princeton-nlp/intercode/blob/c3e46d827cfc9d4c704ec078f7abf9f41e3191d8/experiments/eval_n_turn.py) — action, submit, reward-feedback, and stopping implementation inspected for the adapted protocol.
+- [Pinned Bash reward](https://github.com/princeton-nlp/intercode/blob/c3e46d827cfc9d4c704ec078f7abf9f41e3191d8/intercode/envs/bash/bash_env.py) — gold-derived reward and evaluator-detail boundary.
+- [Google Research MBPP split](https://github.com/google-research/google-research/blob/master/mbpp/README.md) — canonical task-ID splits used to audit the unreconstructable InterCode-Python 117 count.
+- [NL2Bash dataset license](https://github.com/TellinaTool/nl2bash/blob/master/data/bash/LICENSE) — separate MIT license for the underlying dataset.
+
 ## Claim labels
 
 Repository prose uses these interpretations:
