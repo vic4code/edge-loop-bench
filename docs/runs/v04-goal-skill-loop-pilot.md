@@ -71,6 +71,39 @@ For Qwen3.5 4B, Goal Skill Loop rescued `v04-cross-file-002` but regressed
 change in which tasks succeed. For Phi-4 Mini, every paired outcome was
 unchanged.
 
+### Mechanism and prompt accounting
+
+The paired rescue on `v04-cross-file-002` occurred on the Goal arm's first
+call. It is evidence of an initial prompt/verification-skill effect, not of
+iterative recovery. The one feedback-converged success was
+`v04-cross-file-001`: Qwen first produced the wrong formula, received a public
+test failure, corrected it on call two, and passed isolated evaluation.
+
+| Strategy | Model prompts | Automatic follow-ups | Feedback-converged successes | Unresolved handoffs |
+| --- | ---: | ---: | ---: | ---: |
+| Direct | 16 | 0 | 0 | 12/16 |
+| Bounded Retry | 33 | 17 | 0 | 12/16 |
+| Goal Skill Loop | 54 | 38 | 1 | 12/16 |
+
+A model call is counted as one logical prompt; calls after an episode's first
+call are automatic follow-ups. A final objective failure is an unresolved
+handoff, not an invented human prompt. No human continuation was observed in
+this run, so actual human prompt count is not available.
+
+## Post-run topology audit
+
+The implemented `goal_skill_loop` is not a reproduction of Claude Code
+`/goal`. Official `/goal` runs a complete main-agent turn and then gives the
+goal and transcript to a fresh small evaluator. A negative judgment and reason
+start another main-agent turn. The evaluator cannot call tools or inspect the
+working tree directly.
+
+v0.4 instead runs deterministic public tests after each Maker edit and returns
+sanitized failures to the same Maker role. Its evidence applies only to this
+test-driven bounded controller. A faithful fresh-evaluator comparison is
+specified separately in
+[`experiment-design-v0.5-fresh-evaluator-goal.md`](../experiment-design-v0.5-fresh-evaluator-goal.md).
+
 ## Interpretation
 
 This topology did not qualify for a larger confirmatory uplift claim on either

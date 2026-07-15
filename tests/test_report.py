@@ -103,6 +103,32 @@ class StaticReportTests(unittest.TestCase):
         for row in expected_rows:
             self.assertIn(row, readme)
 
+        records = [
+            record
+            for experiment in comparison["experiments"]
+            for record in experiment["records"]
+        ]
+        for strategy, label in (
+            ("direct", "Direct"),
+            ("bounded_retry", "Bounded Retry"),
+            ("goal_skill_loop", "Goal Skill Loop"),
+        ):
+            arm = [record for record in records if record["strategy"] == strategy]
+            prompts = sum(record["model_calls"] for record in arm)
+            follow_ups = prompts - len(arm)
+            converged = sum(
+                record["objective_success"] and record["model_calls"] > 1
+                for record in arm
+            )
+            unresolved = sum(not record["objective_success"] for record in arm)
+            self.assertIn(
+                f"| {label} | {prompts} | {follow_ups} | {converged} | "
+                f"{unresolved}/{len(arm)} |",
+                readme,
+            )
+        self.assertIn("not be presented as a reproduction", readme)
+        self.assertIn("fresh small evaluator", readme)
+
     def test_renders_agent_visible_microrepair_task_catalog(self) -> None:
         plan = load_experiment(
             self.project_root / "configs/experiments/smoke.toml"

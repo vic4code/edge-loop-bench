@@ -4,6 +4,11 @@
 
 Accepted
 
+Post-run audit: the v0.4 controller remains accepted as a deterministic
+goal-and-skill qualification arm, but it is not an implementation of Claude
+Code `/goal`. A faithful fresh-evaluator topology is proposed separately in
+`docs/experiment-design-v0.5-fresh-evaluator-goal.md`.
+
 ## Date
 
 2026-07-15
@@ -11,10 +16,10 @@ Accepted
 ## Context
 
 Earlier EdgeLoopBench studies tested bounded retry and model-based verifier
-topologies. Anthropic's official loop guidance describes a different pattern
-for tasks with verifiable exit criteria: define a goal, impose an explicit turn
-cap, encode verification behavior as a reusable skill, and pilot the loop
-before scaling it.
+topologies. The v0.4 design combined published goal, verification-skill,
+attempt-cap, and pilot-first ideas into a deterministic test-driven controller.
+The later topology audit established that official Claude Code `/goal` instead
+uses a fresh small evaluator after each complete main-agent turn.
 
 The repository needs an executable interpretation of that guidance without
 claiming to reproduce Claude Code internals or exposing hidden evaluation to

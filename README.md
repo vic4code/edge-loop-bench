@@ -5,7 +5,8 @@ more inference.**
 
 [Open the current interactive result](results/OPEN-ME/index.html) ·
 [Read the v0.4 run record](docs/runs/v04-goal-skill-loop-pilot.md) ·
-[Inspect the experiment design](docs/experiment-design-v0.4.md)
+[Inspect the v0.4 design](docs/experiment-design-v0.4.md) ·
+[Review the proposed faithful `/goal` experiment](docs/experiment-design-v0.5-fresh-evaluator-goal.md)
 
 ## Abstract
 
@@ -58,7 +59,7 @@ tasks. The result is not evidence that all loop engineering fails. It is
 evidence that additional test-time compute has value only when the model can
 reliably convert visible failure evidence into a better candidate.
 
-## Why the official-style loop did not improve the total
+## Why the v0.4 adaptation did not improve the total
 
 The controller worked as specified; the task distribution did not consistently
 need the capability that a loop adds. These repairs were static and fully
@@ -82,12 +83,49 @@ The raw event chains separate three effects that an aggregate score can hide:
    Because hidden feedback is correctly unavailable, another loop iteration
    could not repair it.
 
-Thus, “official loop topology” is not a treatment that guarantees uplift. It
-provides a control surface—goal, observations, retries, verification, and stop
-rules. It helps only when the observations carry actionable new information,
-the verifier aligns with the real objective, and the model can use the signal.
-On this pilot, one genuine self-correction prevented a failure inside the Goal
+Thus, a loop controller is not a treatment that guarantees uplift. It provides
+a control surface—goal, observations, retries, verification, and stop rules.
+It helps only when the observations carry actionable new information, the
+verifier aligns with the real objective, and the model can use the signal. On
+this pilot, one genuine self-correction prevented a failure inside the Goal
 arm, but it did not create a net advantage over an already-correct Direct arm.
+
+### Post-run topology audit
+
+The v0.4 name `goal_skill_loop` describes the implemented adaptation; it must
+not be presented as a reproduction of Claude Code `/goal`. The official
+topology starts a full main-agent turn, then asks a fresh small evaluator to
+judge the goal from the transcript. A negative judgment and its reason start a
+new main-agent turn. The evaluator does not run tools or inspect files itself.
+
+In contrast, v0.4 runs deterministic public tests directly after each Maker
+edit and returns sanitized test evidence to the same Maker role. That is a
+test-driven bounded controller with a goal prompt and fixed skill. It omits the
+fresh stop evaluator, separate evaluator-token accounting, and evaluator reason
+channel that distinguish official `/goal`. This audit narrows the claim: v0.4
+is evidence about the committed adaptation only.
+
+### Prompt and human-handoff accounting
+
+One model call is one logical model prompt. `Automatic follow-ups` are calls
+after the first call in an episode. `Feedback-converged successes` are episodes
+that failed an earlier visible check and later reached objective success.
+`Unresolved handoffs` are final failures that would return control to a user;
+they are not retroactively counted as human prompts because no manual
+continuation was observed.
+
+| Strategy | Model prompts | Automatic follow-ups | Feedback-converged successes | Unresolved handoffs |
+| --- | ---: | ---: | ---: | ---: |
+| Direct | 16 | 0 | 0 | 12/16 |
+| Bounded Retry | 33 | 17 | 0 | 12/16 |
+| Goal Skill Loop | 54 | 38 | 1 | 12/16 |
+
+By model, Phi used `8 / 20 / 36` prompts for Direct / Bounded Retry /
+Goal Skill Loop; Qwen used `8 / 13 / 18`. The only feedback-converged success
+was Qwen Goal Skill Loop on `v04-cross-file-001`. Therefore v0.4 automated 38
+Goal follow-up prompts but did not reduce the final number of user handoffs.
+This is the operational reason the current loop does not yet support a
+“hands-free” claim.
 
 For a hands-free automation claim, the better primary endpoint is not only
 clean-condition pass rate. It is **intervention-free completion**: how often an
@@ -107,11 +145,22 @@ multi-step environments rather than only static repair prompts.
 | [Test-Time Interaction](https://test-time-interaction.github.io/) | Whether longer environment interaction enables exploration, backtracking, and new-information gathering | Strong evidence for the task class in which loops should matter | Web environments are network-dependent and therefore are not imported into this offline suite |
 
 The recommended next external validation is a small preregistered
-LongCLI-Bench subset comparing zero versus one versus three test-feedback turns,
-with the same local model and token ceiling. Frontier-Eng v1-lite is the next
-choice when continuous improvement—not binary repair—is the research question.
-Neither suite should be copied into EdgeLoopBench as a network-dependent task;
-an adapter should preserve its upstream environment, license, and evaluator.
+[SWE-bench Verified](https://www.swebench.com/SWE-bench/) pilot because it is
+the most widely recognized repository-level coding-agent benchmark. The causal
+comparison should hold task, model, and total budget fixed while changing only
+the stop controller: Direct versus fresh-evaluator Goal. LongCLI-Bench remains
+the lighter benchmark for explicitly varying zero versus one versus three
+test-feedback turns, and Frontier-Eng v1-lite is the next choice when continuous
+improvement—not binary repair—is the research question.
+
+The official SWE-bench harness requires Docker. Its setup guide recommends at
+least 16 GB allocated to Docker and roughly 120 GB of working storage for the
+standard evaluation workflow. The current 16 GB host and available disk do not
+meet that safety envelope, so the official pilot is resource-blocked locally;
+running an unofficial host-only evaluator would not be reported as SWE-bench.
+External suites should be used through adapters that preserve their upstream
+environment, license, and evaluator rather than copied into this offline task
+catalog.
 
 ## Research question
 
@@ -131,8 +180,8 @@ separate track and is never folded into an agent-quality score.
 | Bounded Retry | Public pass or cap | 3 | Sanitized edit/public-test failure |
 | Goal Skill Loop | Public goal achieved or cap | 5 | Same failure evidence plus frozen verification skill |
 
-The Goal Skill Loop maps the official goal-based pattern into a benchmark
-controller:
+The Goal Skill Loop maps selected goal, verification-skill, and bounded-retry
+ideas into a deterministic benchmark controller:
 
 ```text
 visible task + fixed verification skill
