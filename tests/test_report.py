@@ -9,6 +9,7 @@ from pathlib import Path
 from edgeloopbench.config import load_experiment
 from edgeloopbench.report import (
     ComparisonError,
+    _controller_flow,
     _task_suite,
     render_model_comparison,
     render_report,
@@ -18,6 +19,23 @@ from edgeloopbench.results import load_results, summarize, validate_results_for_
 
 class StaticReportTests(unittest.TestCase):
     project_root = Path(__file__).parents[1]
+
+    def test_v02_report_explains_read_only_loop_and_exact_confirmatory_tasks(self) -> None:
+        plan = load_experiment(
+            self.project_root / "configs/experiments/v0.2/confirmatory-qwen35-4b.toml"
+        )
+
+        flow = _controller_flow(plan)
+        tasks = _task_suite(plan)
+
+        self.assertIn("Read-only verifier", flow)
+        self.assertIn("Candidate A", flow)
+        self.assertIn("APPROVE / REJECT / ESCALATE", flow)
+        self.assertNotIn("Tested implementation is review-and-revise", flow)
+        self.assertIn("ConfirmatoryRepair-30", tasks)
+        self.assertEqual(tasks.count('<article class="task-card">'), 30)
+        self.assertIn("clamp(value, low, high)", tasks)
+        self.assertIn("30 paired observations per arm", tasks)
 
     def test_renders_agent_visible_microrepair_task_catalog(self) -> None:
         plan = load_experiment(
@@ -124,6 +142,8 @@ class StaticReportTests(unittest.TestCase):
         self.assertIn("Direct baseline", html)
         self.assertIn("Gemma 4 12B", html)
         self.assertIn("Success Δ", html)
+        self.assertIn("Task-clustered 95% CI", html)
+        self.assertIn("Exact paired p", html)
         self.assertIn("Token cost", html)
         self.assertIn("Controller flow", html)
         self.assertIn("Review and revise", html)

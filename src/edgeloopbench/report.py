@@ -199,9 +199,10 @@ def _comparison_document(
             )
     metric_cards = _comparison_metric_cards(items)
     uplift = _baseline_uplift(items)
+    inference = _comparison_inference(items)
     study_snapshot = _study_snapshot(items)
     conclusion = _comparison_conclusion(items)
-    controller_flow = _controller_flow()
+    controller_flow = _controller_flow(items[0][0])
     task_suite = _task_suite(items[0][0])
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,">
@@ -211,7 +212,7 @@ def _comparison_document(
 <p class="lede">Objective repair success under identical tasks, seeds, logical budgets, controller, and Ollama runtime.</p>
 {study_snapshot}{conclusion}<section><div class="section-head"><div><div class="eyebrow">AGENT TRACK</div><h2>Success and cost</h2></div><div class="direction">Primary charts use the medium budget tier</div></div>
 {metric_cards}
-{uplift}
+{uplift}{inference}
 <div class="chart-title heat-title"><h3>Complete results</h3><span>Loop delta is relative to Direct within model</span></div>
 <div class="table-wrap"><table class="leaderboard comparison-leaderboard"><thead><tr><th>Model</th><th>Budget</th><th>Strategy</th><th>Success</th><th>vs Direct</th><th>Mean logical tokens</th><th>Mean wall</th></tr></thead><tbody>{''.join(leaderboard_rows)}</tbody></table></div>
 <div class="chart-title heat-title"><h3>Paired outcome transitions</h3><span>Same task, budget, and seed</span></div>
@@ -257,6 +258,11 @@ def _comparison_conclusion(
         tuple[ExperimentPlan, SummaryReport, tuple[RunRecord, ...]], ...
     ],
 ) -> str:
+    if all(
+        len(plan.tasks) == 30 and all(task.startswith("confirm-") for task in plan.tasks)
+        for plan, _report, _records in items
+    ):
+        return _v02_comparison_conclusion(items)
     budgets = tuple((items[0][0].budgets or {}).keys())
     budget = "medium" if "medium" in budgets else budgets[0]
     direct_candidates: list[tuple[float, str]] = []
@@ -311,6 +317,67 @@ def _comparison_conclusion(
 </div></section>'''
 
 
+def _v02_comparison_conclusion(
+    items: tuple[
+        tuple[ExperimentPlan, SummaryReport, tuple[RunRecord, ...]], ...
+    ],
+) -> str:
+    candidates = []
+    direct_candidates = []
+    verdicts = {"APPROVE": 0, "REJECT": 0, "ESCALATE": 0}
+    protocol_errors = fallbacks = revision_rescues = revision_regressions = 0
+    for plan, report, records in items:
+        model = _short_model_label(plan.model.id)
+        direct = next(
+            arm for arm in report.arms
+            if arm.strategy == "direct" and arm.budget_tier == "medium"
+        )
+        direct_candidates.append((100 * (direct.success_rate or 0), model))
+        for pair in report.pairs:
+            if pair.budget_tier != "medium" or pair.baseline_strategy != "direct":
+                continue
+            label = "Bounded Retry" if pair.candidate_strategy == "bounded_retry" else "Maker–Verifier"
+            candidates.append((pair.success_delta_pp, model, label, pair))
+        for record in records:
+            if record.strategy != "maker_verifier":
+                continue
+            if record.verifier_verdict is not None:
+                verdicts[record.verifier_verdict] += 1
+            protocol_errors += int(record.verifier_protocol_error)
+            fallbacks += int(record.fallback_used)
+            if record.candidate_a_success is False and record.candidate_b_success is True:
+                revision_rescues += 1
+            if record.candidate_a_success is True and record.candidate_b_success is False:
+                revision_regressions += 1
+    delta, model, label, pair = max(candidates, key=lambda item: item[0])
+    direct_rate, direct_model = max(direct_candidates)
+    practical = delta > 0 and pair.net_rescue >= 3
+    resolved = practical and pair.bootstrap_ci_low_pp > 0
+    if resolved:
+        finding = (
+            f"{model} {label} helped on this suite: {delta:+.1f} pp with a task-clustered "
+            f"95% CI of {pair.bootstrap_ci_low_pp:+.1f} to {pair.bootstrap_ci_high_pp:+.1f} pp."
+        )
+    elif practical:
+        finding = (
+            f"{model} {label} showed a practical measured benefit ({delta:+.1f} pp; net rescue "
+            f"{pair.net_rescue}), but its 95% interval overlaps zero, so the result is promising, not resolved."
+        )
+    else:
+        finding = (
+            "No loop met the preregistered practical-benefit rule of at least +10 pp and "
+            "three more rescues than regressions on this suite."
+        )
+    return f'''<section class="conclusion-section"><div class="section-head"><div><div class="eyebrow">BOTTOM LINE</div>
+<h2>What the evidence supports</h2></div><div class="direction">ConfirmatoryRepair-30 · task-level pairing</div></div>
+<div class="conclusion-lead"><strong>{_e(finding)}</strong><span>The strongest Direct baseline was {_e(direct_model)} at {direct_rate:.1f}% verified success.</span></div>
+<div class="conclusion-grid">
+<article><span>Decision rule</span><h3>Effect size before narrative</h3><p>Measured benefit requires positive uplift, net rescue of at least three tasks, and no accounting or isolation violation. Statistical resolution additionally requires the 95% task-bootstrap interval to exclude zero.</p></article>
+<article><span>Read-only verifier</span><h3>Verdicts and candidate transitions</h3><p>APPROVE {verdicts['APPROVE']}, REJECT {verdicts['REJECT']}, ESCALATE {verdicts['ESCALATE']}; protocol errors {protocol_errors}, fallbacks {fallbacks}, revision rescues {revision_rescues}, revision regressions {revision_regressions}.</p></article>
+<article><span>Inference boundary</span><h3>Useful local evidence, not a universal leaderboard</h3><p>These are 30 deterministic, generated Python repair mutations on one M3 Mac. They support within-model controller conclusions for this suite, not broad coding ability or serving-efficiency claims.</p></article>
+</div></section>'''
+
+
 def _baseline_uplift(
     items: tuple[
         tuple[ExperimentPlan, SummaryReport, tuple[RunRecord, ...]], ...
@@ -334,10 +401,17 @@ def _baseline_uplift(
         ):
             arm = arms[strategy]
             delta = 100 * (arm.success_rate or 0) - direct_rate
+            pair = next(
+                pair for pair in report.pairs
+                if pair.budget_tier == budget
+                and pair.baseline_strategy == "direct"
+                and pair.candidate_strategy == strategy
+            )
             delta_class = "positive" if delta > 0 else "negative" if delta < 0 else "neutral"
             rows.append(
                 f'<div class="uplift-row"><strong>{_e(label)}</strong>'
-                f'<span><small>Success Δ</small><b class="{delta_class}">{delta:+.1f} pp</b></span>'
+                f'<span><small>Success Δ · 95% CI</small><b class="{delta_class}">{delta:+.1f} pp</b>'
+                f'<em>{pair.bootstrap_ci_low_pp:+.1f}…{pair.bootstrap_ci_high_pp:+.1f}</em></span>'
                 f'<span><small>Token cost</small><b>{_ratio(arm.mean_total_tokens, direct.mean_total_tokens)}</b></span>'
                 f'<span><small>Wall time</small><b>{_ratio(arm.mean_wall_seconds, direct.mean_wall_seconds)}</b></span></div>'
             )
@@ -353,50 +427,128 @@ def _baseline_uplift(
     )
 
 
+def _comparison_inference(
+    items: tuple[
+        tuple[ExperimentPlan, SummaryReport, tuple[RunRecord, ...]], ...
+    ],
+) -> str:
+    rows = []
+    for plan, report, _records in items:
+        for pair in report.pairs:
+            if pair.budget_tier != "medium" or pair.baseline_strategy != "direct":
+                continue
+            label = "Bounded Retry" if pair.candidate_strategy == "bounded_retry" else "Maker–Verifier"
+            p_value = "—" if pair.exact_p_value is None else f"{pair.exact_p_value:.4f}"
+            rows.append(
+                f"<tr><td><strong>{_e(_short_model_label(plan.model.id))}</strong></td>"
+                f"<td>{_e(label)}</td><td>{pair.success_delta_pp:+.1f} pp</td>"
+                f"<td>{pair.bootstrap_ci_low_pp:+.1f} to {pair.bootstrap_ci_high_pp:+.1f} pp</td>"
+                f"<td class=\"positive\">{pair.rescued}</td><td class=\"negative\">{pair.regressed}</td>"
+                f"<td>{pair.net_rescue:+d}</td><td>{p_value}</td></tr>"
+            )
+    return (
+        '<div class="chart-title heat-title"><h3>Paired task-level inference</h3>'
+        '<span>Task-clustered 95% CI; exact paired p is a sensitivity analysis</span></div>'
+        '<div class="table-wrap"><table><thead><tr><th>Model</th><th>Loop</th><th>Δ success</th>'
+        '<th>Task-clustered 95% CI</th><th>Rescued</th><th>Regressed</th><th>Net</th>'
+        f'<th>Exact paired p</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+    )
+
+
 def _ratio(candidate: float | None, baseline: float | None) -> str:
     if candidate is None or baseline is None or baseline == 0:
         return "n/a"
     return f"{candidate / baseline:.2f}×"
 
 
-def _controller_flow() -> str:
-    lanes = (
-        (
-            "Direct baseline",
-            "One attempt; no controller retry",
+def _controller_flow(plan: ExperimentPlan) -> str:
+    is_v02 = any(task.startswith("confirm-") for task in plan.tasks)
+    if is_v02:
+        lanes = (
             (
-                "Reset clean task worktree",
-                "One model call returns replacement-edit JSON",
-                "Validate paths and apply candidate",
-                "Run public tests once",
-                "If public tests pass, run isolated hidden evaluation",
+                "Direct baseline",
+                "Identical first Maker call; no retry",
+                (
+                    "Reset the pinned clean task worktree",
+                    "Maker returns full-file edit JSON",
+                    "Validate paths, apply, and run public tests",
+                    "Stop after the first outcome",
+                    "Run isolated hidden evaluation after the episode",
+                ),
             ),
-        ),
-        (
-            "Bounded Retry",
-            "Repair loop within shared logical caps",
             (
-                "Build prompt from the current worktree",
-                "Model returns replacement-edit JSON",
-                "Validate, apply, and run public tests",
-                "On rejection or failure, add sanitized feedback",
-                "Repeat until pass or call/token/test budget ends",
-                "If public tests pass, run isolated hidden evaluation",
+                "Bounded Retry",
+                "Deterministic public-feedback repair loop",
+                (
+                    "Use the identical first Maker call",
+                    "Validate, apply, and run public tests",
+                    "On failure, build a sanitized retry packet",
+                    "Fresh Maker repairs the current visible worktree",
+                    "Stop on public pass or shared budget exhaustion",
+                    "Run isolated hidden evaluation after the episode",
+                ),
             ),
-        ),
-        (
-            "Maker–Verifier",
-            "Tested implementation is review-and-revise",
             (
-                "Maker returns replacement-edit JSON",
-                "Validate, apply, and run public tests",
-                "Request a second model call as verifier",
-                "Review and revise: verifier may replace source files",
-                "Apply revision and run public tests again",
-                "If public tests pass, run isolated hidden evaluation",
+                "Maker–Verifier",
+                "Read-only verdict with candidate preservation",
+                (
+                    "Maker produces a public-test-passing Candidate A",
+                    "Checkpoint Candidate A before verification",
+                    "Read-only verifier returns APPROVE / REJECT / ESCALATE",
+                    "Only REJECT permits one fresh Maker revision",
+                    "Keep Candidate B if public tests pass; otherwise restore A",
+                    "After the episode, evaluate A, B, and final candidate in isolation",
+                ),
             ),
-        ),
-    )
+        )
+        boundary = (
+            "The verifier receives no write schema and cannot alter files. Hidden evaluator "
+            "feedback is never returned to Maker or Verifier. Invalid verdict JSON becomes "
+            "ESCALATE and preserves Candidate A."
+        )
+    else:
+        lanes = (
+            (
+                "Direct baseline",
+                "One attempt; no controller retry",
+                (
+                    "Reset clean task worktree",
+                    "One model call returns replacement-edit JSON",
+                    "Validate paths and apply candidate",
+                    "Run public tests once",
+                    "If public tests pass, run isolated hidden evaluation",
+                ),
+            ),
+            (
+                "Bounded Retry",
+                "Repair loop within shared logical caps",
+                (
+                    "Build prompt from the current worktree",
+                    "Model returns replacement-edit JSON",
+                    "Validate, apply, and run public tests",
+                    "On rejection or failure, add sanitized feedback",
+                    "Repeat until pass or call/token/test budget ends",
+                    "If public tests pass, run isolated hidden evaluation",
+                ),
+            ),
+            (
+                "Maker–Verifier",
+                "Tested implementation is review-and-revise",
+                (
+                    "Maker returns replacement-edit JSON",
+                    "Validate, apply, and run public tests",
+                    "Request a second model call as verifier",
+                    "Review and revise: verifier may replace source files",
+                    "Apply revision and run public tests again",
+                    "If public tests pass, run isolated hidden evaluation",
+                ),
+            ),
+        )
+        boundary = (
+            "Hidden evaluator feedback is never returned to any model. Maker–Verifier here "
+            "is not an independent read-only APPROVE/REJECT judge; it is a second "
+            "review-and-revise edit call."
+        )
     rendered = []
     for title, subtitle, nodes in lanes:
         rendered.append(
@@ -407,8 +559,7 @@ def _controller_flow() -> str:
         '<section class="flow-section"><div class="section-head"><div><div class="eyebrow">LOOP DESIGN</div>'
         '<h2>Controller flow</h2></div><div class="direction">The nodes below match the tested controller</div></div>'
         f'<div class="flow-grid">{"".join(rendered)}</div>'
-        '<div class="boundary-note"><strong>Evaluation boundary</strong><span>Hidden evaluator feedback is never returned to any model. '
-        'Maker–Verifier here is not an independent read-only APPROVE/REJECT judge; it is a second review-and-revise edit call.</span></div></section>'
+        f'<div class="boundary-note"><strong>Evaluation boundary</strong><span>{_e(boundary)}</span></div></section>'
     )
 
 
@@ -451,11 +602,7 @@ def _task_suite(plan: ExperimentPlan) -> str:
     for task_id in plan.tasks:
         category, source, title, contract, capability = _TASK_SUMMARIES.get(
             task_id,
-            (
-                "Benchmark task", "Declared source", task_id,
-                "Configured deterministic repair task.",
-                "Objective repair under the declared task contract.",
-            ),
+            _confirmatory_task_summary(task_id),
         )
         cards.append(
             f'<article class="task-card"><div class="task-tags"><span>{_e(category)}</span><span>{_e(source)}</span></div>'
@@ -466,7 +613,12 @@ def _task_suite(plan: ExperimentPlan) -> str:
             '<dt>Hidden evaluation</dt><dd>Final objective pass/fail only; no feedback returns to the model.</dd></dl></article>'
         )
     observations = len(plan.tasks) * len(plan.seeds)
-    dataset_name = "MicroRepair-6 task catalog" if set(plan.tasks) == set(_TASK_SUMMARIES) else "Configured task catalog"
+    if set(plan.tasks) == set(_TASK_SUMMARIES):
+        dataset_name = "MicroRepair-6 task catalog"
+    elif len(plan.tasks) == 30 and all(task.startswith("confirm-") for task in plan.tasks):
+        dataset_name = "ConfirmatoryRepair-30"
+    else:
+        dataset_name = "Configured task catalog"
     return (
         '<section class="task-section"><div class="section-head"><div><div class="eyebrow">BENCH DATA</div>'
         f'<h2>What was tested: {_e(dataset_name)}</h2></div>'
@@ -474,6 +626,33 @@ def _task_suite(plan: ExperimentPlan) -> str:
         f'<div class="task-grid">{"".join(cards)}</div>'
         '<p class="task-boundary"><strong>Dataset boundary.</strong> This is an original, offline harness shakeout suite—not HumanEval, SWE-bench, or a broad coding benchmark. Agents see task source, instructions, and public tests. Hidden tests and gold patches stay outside the worktree.</p></section>'
     )
+
+
+def _confirmatory_task_summary(task_id: str) -> tuple[str, str, str, str, str]:
+    category = "Benchmark task"
+    capability = "Objective repair under the declared task contract."
+    for marker, label, description in (
+        ("-localized-", "Localized", "Single-file logic, bounds, parsing, or validation."),
+        ("-cross-file-", "Cross-file", "Contract and invariant reasoning across modules."),
+        ("-diagnosis-", "Diagnosis", "Extracting the required signal from noisy evidence."),
+        ("-adversarial-", "Adversarial", "Avoiding a visible-test-only shortcut."),
+    ):
+        if marker in task_id:
+            category, capability = label, description
+            break
+    contract = "Configured deterministic repair task."
+    readme = (
+        Path(__file__).resolve().parents[2]
+        / "tasks" / "confirmatory" / task_id / "public" / "README.md"
+    )
+    try:
+        paragraphs = [line.strip() for line in readme.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        pass
+    else:
+        if len(paragraphs) >= 2:
+            contract = paragraphs[1]
+    return category, "Generated mutation", task_id, contract, capability
 
 
 def _comparison_metric_cards(
