@@ -232,6 +232,13 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _helper_path(case: Case) -> str:
+    """Return the module imported by a cross-file service as a source path."""
+
+    module = case.gold.split("from ", 1)[1].split(" import", 1)[0].strip()
+    return module.replace(".", "/") + ".py"
+
+
 def build(case: Case) -> None:
     task_dir = TASK_ROOT / case.id
     evaluator_dir = EVALUATOR_ROOT / case.id
@@ -241,7 +248,7 @@ def build(case: Case) -> None:
     _write(public / "requirements.lock", "# Python standard library only.\n")
     _write(public / "src" / ("service.py" if case.extra_bug else "solution.py"), case.bug)
     if case.extra_bug is not None:
-        _write(public / "src" / case.gold.split("from ", 1)[1].split(" import", 1)[0].strip().replace(".", "/") .__add__(".py"), case.extra_bug)
+        _write(public / "src" / _helper_path(case), case.extra_bug)
     _write(public / "tests/public/test_behavior.py", _test_file(case, case.public))
     _write(task_dir / "provenance.md", "Generated seeded mutation created for EdgeLoopBench v0.2; MIT licensed; no network data.\n")
     _write(evaluator_dir / "tests/test_hidden.py", _test_file(case, case.hidden))
@@ -255,8 +262,7 @@ def build(case: Case) -> None:
         commit = _run_git(worktree, ["rev-parse", "HEAD"]).strip()
         _write(worktree / "src" / ("service.py" if case.extra_bug else "solution.py"), case.gold)
         if case.extra_gold is not None:
-            helper = case.gold.split("from ", 1)[1].split(" import", 1)[0].strip().replace(".", "/") + ".py"
-            _write(worktree / "src" / helper, case.extra_gold)
+            _write(worktree / "src" / _helper_path(case), case.extra_gold)
         patch = subprocess.run(
             ["git", "diff", "--binary", "--", "src"], cwd=worktree,
             check=True, capture_output=True, text=True,
