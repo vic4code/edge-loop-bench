@@ -39,9 +39,7 @@ MODELS = {
 
 def render(label: str, phase: str, tasks: tuple[str, ...]) -> str:
     model_id, digest, quantization = MODELS[label]
-    controller_revision = (
-        CALIBRATION_REVISION if phase == "calibration" else CONFIRMATORY_REVISION
-    )
+    controller_revision = CALIBRATION_REVISION if phase == "calibration" else CONFIRMATORY_REVISION
     task_lines = "\n".join(f'  "{task}",' for task in tasks)
     return f'''schema_version = 1
 id = "v02-{phase}-{label}"
@@ -109,7 +107,11 @@ def main() -> None:
             (OUTPUT / f"{phase}-{label}.toml").write_text(
                 render(label, phase, tasks), encoding="utf-8"
             )
-    print("generated 6 v0.2 manifests")
+    for label in ("qwen35-9b", "gemma4-12b"):
+        (OUTPUT / f"calibration-current-{label}.toml").write_text(
+            render(label, "calibration-current", CALIBRATION_TASKS), encoding="utf-8"
+        )
+    print("generated 8 v0.2 manifests")
 
 
 if __name__ == "__main__":
