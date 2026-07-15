@@ -18,7 +18,7 @@ from .interactive_environment import (
     InteractiveEnvironment,
     StrictEvaluator,
 )
-from .runner import append_event
+from .journal import append_journal_event, inspect_journal, seal_journal
 
 
 INTERACTIVE_STRATEGIES = (
@@ -226,7 +226,6 @@ def run_interactive_strategy(
         raise ValueError("replicate_seed must be an integer")
 
     counters = _Counters()
-    sequence = 0
     environment: InteractiveEnvironment | None = None
     independent_environments: list[InteractiveEnvironment] = []
     selected: _SelectedCheckpoint | None = None
@@ -236,13 +235,14 @@ def run_interactive_strategy(
     stop_reason = "attempt_budget_exhausted"
     signature_counts: dict[str, int] = {}
 
+    existing_journal = inspect_journal(event_log)
+    if existing_journal.record_count or existing_journal.partial_tail is not None:
+        raise ValueError("interactive event journal must be empty before an episode starts")
+
     def record(event_type: str, **fields: object) -> None:
-        nonlocal sequence
-        sequence += 1
-        append_event(
+        append_journal_event(
             event_log,
             {
-                "sequence": sequence,
                 "type": event_type,
                 "task_id": task.task_id,
                 "strategy": strategy,
@@ -250,6 +250,13 @@ def run_interactive_strategy(
                 **fields,
             },
         )
+
+    def close_environment(
+        target: InteractiveEnvironment, *, scope: str
+    ) -> None:
+        record("environment_close_requested", scope=scope)
+        target.close()
+        record("environment_closed", scope=scope)
 
     record("controller_started", controller_revision="interactive-controller-v1")
     try:
@@ -360,13 +367,18 @@ def run_interactive_strategy(
                 break
 
             if strategy == "independent_verified_sampling":
+                record("environment_create_requested", attempt=attempt, scope="attempt")
                 current_environment = environment_factory()
                 independent_environments.append(current_environment)
+                record("environment_created", attempt=attempt, scope="attempt")
             else:
                 if environment is None:
+                    record("environment_create_requested", attempt=attempt, scope="episode")
                     environment = environment_factory()
+                    record("environment_created", attempt=attempt, scope="episode")
                 current_environment = environment
 
+            record("action_requested", attempt=attempt, action_sha256=_text_digest(action))
             execution = current_environment.execute(action)
             counters.environment_actions += 1
             record(
@@ -379,10 +391,16 @@ def run_interactive_strategy(
                 admissible=execution.admissible,
                 state_changed=execution.state_changed,
             )
+            record("checkpoint_create_requested", attempt=attempt)
             checkpoint = current_environment.checkpoint()
             counters.checkpoint_creates += 1
             record(
                 "checkpoint_created",
+                attempt=attempt,
+                state_sha256=checkpoint.state_sha256,
+            )
+            record(
+                "attempt_evaluation_requested",
                 attempt=attempt,
                 state_sha256=checkpoint.state_sha256,
             )
@@ -395,7 +413,7 @@ def run_interactive_strategy(
                 official_success=evaluation.official_success,
             )
             if strategy == "independent_verified_sampling":
-                current_environment.close()
+                close_environment(current_environment, scope=f"attempt-{attempt}")
                 independent_environments.remove(current_environment)
             candidate = _SelectedCheckpoint(
                 checkpoint=checkpoint,
@@ -417,6 +435,11 @@ def run_interactive_strategy(
                         selected = best
                         stop_reason = "checkpoint_restore_budget_exhausted"
                         break
+                    record(
+                        "checkpoint_restore_requested",
+                        attempt=attempt,
+                        state_sha256=best.checkpoint.state_sha256,
+                    )
                     current_environment.restore(best.checkpoint)
                     counters.checkpoint_restores += 1
                     rollback_performed = True
@@ -472,13 +495,19 @@ def run_interactive_strategy(
             stop_reason = "attempt_budget_exhausted"
     finally:
         if environment is not None:
-            environment.close()
-        for independent_environment in independent_environments:
-            independent_environment.close()
+            close_environment(environment, scope="episode")
+        for index, independent_environment in enumerate(independent_environments, 1):
+            close_environment(independent_environment, scope=f"incomplete-attempt-{index}")
 
     if strategy == "engineered_loop" and best is not None:
         selected = best
     official_success = selected.official_success if selected is not None else False
+    if selected is not None:
+        record(
+            "strict_evaluation_planned",
+            selected_attempt=selected.attempt,
+            state_sha256=selected.checkpoint.state_sha256,
+        )
     record(
         "controller_stopped",
         stop_reason=stop_reason,
@@ -495,6 +524,7 @@ def run_interactive_strategy(
             strict_success=strict.strict_success,
             evaluator_sha256=strict.evaluator_sha256,
         )
+    seal_journal(event_log)
 
     run_status = (
         "budget_exhausted" if "budget_exhausted" in stop_reason else "completed"

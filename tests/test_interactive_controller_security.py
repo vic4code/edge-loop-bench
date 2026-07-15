@@ -201,6 +201,7 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
                             "model_completed",
                             "action_rejected",
                             "controller_stopped",
+                            "journal_sealed",
                         ],
                     )
                     event_log.unlink()
