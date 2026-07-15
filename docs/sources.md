@@ -31,6 +31,16 @@ Retrieved on **2026-07-14** unless noted otherwise. Runtime capabilities change 
 - [OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility) — supported compatibility surface.
 - [Official releases](https://github.com/ollama/ollama/releases) — versions and upstream performance claims.
 
+Prompt-boundary sources retrieved on **2026-07-15**:
+
+- [Ollama v0.31.1 source](https://github.com/ollama/ollama/tree/710292ff4f191d8da9f6a4230804fbc693338d4a) — the immutable runtime revision used for prompt rendering, raw generation, and usage accounting.
+- [Generate handler at v0.31.1](https://github.com/ollama/ollama/blob/710292ff4f191d8da9f6a4230804fbc693338d4a/server/routes.go#L434-L676) — raw-mode restrictions, template bypass, and the exact prompt passed to completion.
+- [Logical prompt telemetry at v0.31.1](https://github.com/ollama/ollama/blob/710292ff4f191d8da9f6a4230804fbc693338d4a/llm/llama_server.go#L1415-L1425) — `prompt_eval_count` is cached prompt tokens plus newly processed prompt tokens, preserving logical accounting under prefix-cache reuse.
+- [Qwen3.5 renderer](https://github.com/ollama/ollama/blob/710292ff4f191d8da9f6a4230804fbc693338d4a/model/renderers/qwen35.go#L85-L197) and [no-think renderer test](https://github.com/ollama/ollama/blob/710292ff4f191d8da9f6a4230804fbc693338d4a/model/renderers/qwen35_test.go#L77-L90) — role rendering and the explicit empty thinking prefill used by the restricted Qwen profile.
+- [Phi-4-mini template layer](https://ollama.com/library/phi4-mini:3.8b/blobs/813f53fdc6e5) — immutable 655-byte template source for the restricted Phi profile.
+- [Ollama llama.cpp pin](https://github.com/ollama/ollama/blob/710292ff4f191d8da9f6a4230804fbc693338d4a/LLAMA_CPP_VERSION) and [patched build path](https://github.com/ollama/ollama/blob/710292ff4f191d8da9f6a4230804fbc693338d4a/llama/server/CMakeLists.txt#L112-L219) — llama.cpp tag `b9840` plus Ollama compatibility-hook application.
+- [`llama-tokenize` at full commit `8c146a8`](https://github.com/ggml-org/llama.cpp/blob/8c146a8366304c871efc26057cc90370ccf58dad/tools/tokenize/tokenize.cpp#L340-L383) — vocab-only model loading and the add-special/parse-special tokenization path used by preflight.
+
 ## Gemma 4
 
 - [Google Gemma 4 model card](https://ai.google.dev/gemma/docs/core/model_card_4) — model architecture, capabilities, license, and intended use.
@@ -68,7 +78,7 @@ Retrieved on **2026-07-15**.
 - [InterCode source at the pinned commit](https://github.com/princeton-nlp/intercode/tree/c3e46d827cfc9d4c704ec078f7abf9f41e3191d8) — environment, experiment, data, Docker, and license source for v0.6 qualification.
 - [Pinned NL2Bash data description](https://github.com/princeton-nlp/intercode/blob/c3e46d827cfc9d4c704ec078f7abf9f41e3191d8/data/nl2bash/README.md) — the four filesystem strata and 200-row source population.
 - [Pinned Try Again experiment](https://github.com/princeton-nlp/intercode/blob/c3e46d827cfc9d4c704ec078f7abf9f41e3191d8/experiments/eval_n_turn.py) — action, submit, reward-feedback, and stopping implementation inspected for the adapted protocol.
-- [Pinned Bash reward](https://github.com/princeton-nlp/intercode/blob/c3e46d827cfc9d4c704ec078f7abf9f41e3191d8/intercode/envs/bash/bash_env.py) — gold-derived reward and evaluator-detail boundary.
+- [Pinned Bash environment and reward](https://github.com/princeton-nlp/intercode/blob/c3e46d827cfc9d4c704ec078f7abf9f41e3191d8/intercode/envs/bash/bash_env.py) — `self.workdir`/`simplify_path` behavior plus the gold-derived reward and evaluator-detail boundary.
 - [Google Research MBPP split](https://github.com/google-research/google-research/blob/master/mbpp/README.md) — canonical task-ID splits used to audit the unreconstructable InterCode-Python 117 count.
 - [NL2Bash dataset license](https://github.com/TellinaTool/nl2bash/blob/master/data/bash/LICENSE) — separate MIT license for the underlying dataset.
 

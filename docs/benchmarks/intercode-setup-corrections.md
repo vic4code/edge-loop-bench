@@ -33,31 +33,52 @@ evidence only and is never a measured-run input.
 Both derived Dockerfiles start from the native `linux/arm64` Ubuntu child
 manifest `sha256:2e05d3b43282818e548d97f7a7c4dd7cab14760603972353e5cecdac0839146b`.
 This is the current derived base, not the original InterCode image. Its digest
-pins the platform-specific base bytes; it is not a digest for either final
-EdgeLoop image. Final agent and evaluator image digests remain unset until a
-reviewed build and inspection are completed.
+pins the platform-specific base bytes; it is not a digest for a final EdgeLoop
+image. Final fs1..fs4 agent image digests remain unset until a reviewed build
+and inspection are completed. The evaluator identity is a source/policy digest,
+not an image digest.
 
-`Dockerfile.agent` and `Dockerfile.evaluator` contain byte-identical common
-package instructions so the four agent variants and evaluator can reuse that
-dependency layer. Apt uses `--no-install-recommends`. The layer includes the
+`Dockerfile.agent` and the retained non-scoring `Dockerfile.evaluator` scaffold
+contain byte-identical common package instructions. Apt uses
+`--no-install-recommends`. The agent layer includes the
 commands declared by the source tasks, including `md5deep`, `ncompress`,
 `rename`, `g++`, `dig`, `ping`, `pstree`, `tree`, `cpio`, `jq`, `column`, and
-`cal`, plus the standard GNU text/file utilities.
+`cal`, Git, plus the standard GNU text/file utilities.
 
-The derived image deliberately does not reproduce the upstream root-level
-Git baseline. Committing the complete installed operating system into `/.git`
-would duplicate package bytes, enlarge build cache, and give an agent a
-mutable evaluator mechanism. Baseline and candidate state are instead captured
-outside the model channel through Docker-layer checkpoints and the private
-evaluator. A root `.dockerignore` admits only `docker/intercode/**` to the
-build context, so local results, logs, Git history, and vendored gold data are
-never sent to the daemon during these builds.
+The agent image preserves the upstream root-level Git baseline for public
+environment fidelity. The byte-exact upstream `docker.gitignore` limits that
+baseline to the fixture surface instead of the installed operating system.
+After final fixture ownership is set, the build creates the initial commit at
+a fixed timestamp. It then rebuilds the Git index from `HEAD` so every index
+stat-cache field is zero, normalizes `/.git` and `/.gitignore` mtimes, and makes
+the metadata root-owned and read-only. Sticky-root semantics prevent UID 65532
+from replacing either path. Gold commands, evaluator code, private task
+references, and host paths never enter the agent image or daemon build context.
+Scoring invokes absolute system Git with fixed arguments and optional locks
+disabled, so candidate configuration or `PATH` cannot change the observation.
+
+The root `.dockerignore` still excludes the workspace by default. It admits
+`docker/intercode/**` plus exactly the parent chain and byte-pinned upstream
+`docker.gitignore`; source rows, gold data, local results, logs, and host Git
+history remain outside the daemon build context.
+
+The agent image also contains a root-owned mode-`0555` standard-library state
+collector. Its measured argv is fixed to `/usr/bin/python3 -I -S -B
+/opt/edgeloop/state_collector.py --profile fsN`; it never invokes a shell or
+consults `PATH`. A build-time audit fails closed unless `/` is UID 0 and mode
+`01777`, the model-writable surface is completely covered, captured state has
+no extended attributes, and POSIX ACLs are absent. Runtime collection also
+requires empty `/dev/shm` and `/dev/mqueue` plus header-only SysV IPC tables.
+Its output is bounded canonical JSON over sorted relative paths, content, type,
+mode, UID/GID, symlink targets, and complete path-derived hardlink groups.
+Inodes, devices, timestamps, gold data, and evaluator paths are not emitted or
+digested.
 
 Package installation is a build-time operation. The fixture scripts contain
 no download or package-install step. The image cannot itself enforce Docker
-network isolation, so the runtime adapter must create every measured agent and
-evaluator container with `NetworkMode=none`; inspection must fail closed if it
-does not. The installed `curl` binary exists because an upstream row declares
+network isolation, so the runtime adapter must create every measured agent,
+candidate-replica, and clean-gold container with `NetworkMode=none`; inspection
+must fail closed if it does not. The installed `curl` binary exists because an upstream row declares
 it, but that row must be excluded by offline qualification and the binary has
 no usable runtime network in an admitted container.
 
@@ -141,17 +162,30 @@ For pre-build review only, the remaining derived source hashes are:
 
 | Derived asset | SHA-256 |
 | --- | --- |
-| `docker/intercode/Dockerfile.agent` | `1b517c32b59548974d4cdc9005326e34088094d9ebe645493d0cae3e80dc5912` |
-| `docker/intercode/Dockerfile.evaluator` | `103107c2d9bdc906380f6862ca0775adab6bf4de354aff1c9a6a4b3773a434fc` |
+| `docker/intercode/Dockerfile.agent` | `6c2b440dc7ebe277355fb21664de2a94eb0644f86698c92bcb836b88667a214f` |
+| `docker/intercode/Dockerfile.evaluator` | `318fc5e51345036ada580f2552ae8fed61d37d31c9853eddcd3a893fd9c22ffa` |
 | `docker/intercode/evaluator_placeholder.py` | `de4642dd71f18a3b5f1bfcb7a73f99292129aa9e73a25034a49d76269cd32cad` |
-| `.dockerignore` | `effea9dab4a4907f298a1af85886ab8539a79a4b86c80f97c250aebd58952ca5` |
+| `docker/intercode/state_collector.py` | `513a0261fad1e52ce77479afd1c3196921ce558cc80e83632b68795e5639bba0` |
+| `.dockerignore` | `41f598c8c3bb3868c615a3e59c23b215a4ce3754c2127538427f43b5a3653983` |
 
-## Evaluator image scope
+The collector's semantic pins are independent of its source bytes:
 
-`Dockerfile.evaluator` currently contains only a non-scoring, standard-library
-placeholder. It emits `status=not_implemented` and exits with code 78. It does
-not inspect a candidate, expose diagnostics, or return a success value. This
-fail-closed placeholder prevents a source-only image scaffold from being
-mistaken for the frozen attempt-level or strict evaluator. No benchmark run may
-begin until the real evaluator is specified, tested adversarially, source- and
-image-pinned, and proven isolated from the model channel.
+| Collector semantic record | SHA-256 |
+| --- | --- |
+| root baseline names | `sha256:06dcf54e33c9412b1c0bb2cf7ddab33848169e640012209b9d05c81ee1da457f` |
+| collection and writable-surface policy | `sha256:70eeeda4091cb2da38aa8024af7c52dbacb464cf5b20a9f6bfdac5d66ecb67a9` |
+| fs1..fs4 profile set | `sha256:1c515db46e794a58c457ac5d906ad80cae2ecb696ce2f07932733087368b1990` |
+
+## Evaluator execution scope
+
+`Dockerfile.evaluator` remains a non-scoring, standard-library placeholder. It
+emits `status=not_implemented` and exits with code 78; it is not built, invoked,
+or pinned by a measured run. A real evaluation invocation instead starts one
+fresh candidate replica from the exact checkpoint image and one clean-gold
+replica from the matching fs1..fs4 agent image. The trusted adapter collects
+bounded evidence with image-pinned absolute tools, durably destroys both
+replicas, and only then issues it to the source-pinned host comparator. That
+comparator is a pure function over typed immutable values: it cannot run a
+command, open a path, follow a symlink, or emit diagnostics to the model.
+Measured scoring remains blocked until this complete boundary is tested
+adversarially and its source/policy digest is frozen.
