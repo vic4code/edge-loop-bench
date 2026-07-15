@@ -39,12 +39,19 @@ CONTAINER_USER = "65532:65532"
 CONTAINER_WORKDIR = "/"
 CONTAINER_OS = "linux"
 CONTAINER_ARCHITECTURE = "arm64"
+ACTION_START_MARKER = b"\x1eELB_ACTION_STARTED_V1\x1f\n"
+ACTION_WRAPPER_ARG0 = "edgeloop-action-v1"
+ACTION_WRAPPER_SCRIPT = (
+    "printf '\\036ELB_ACTION_STARTED_V1\\037\\n'\n"
+    "printf '\\036ELB_ACTION_STARTED_V1\\037\\n' >&2\n"
+    'exec /bin/bash --noprofile --norc -c "$1"'
+)
 IDLE_ENTRYPOINT = "/bin/bash"
 IDLE_COMMAND = (
     "--noprofile",
     "--norc",
     "-c",
-    "trap 'exit 0' TERM INT; while :; do sleep 3600; done",
+    "exec /usr/bin/tail -f /dev/null",
 )
 SECURITY_OPTIONS = frozenset(
     {"no-new-privileges=true", "seccomp=builtin"}
@@ -216,17 +223,22 @@ class DockerCli:
         *,
         expected_context: str,
         expected_endpoint: str,
+        docker_binary: str,
         env: Mapping[str, str] | None = None,
         runner: SubprocessRunner = subprocess.run,
-        docker_binary: str = "docker",
         nonce_factory: Callable[[], str] = lambda: secrets.token_hex(8),
         command_timeout_seconds: float = 30.0,
     ) -> None:
         if not _CONTEXT_PATTERN.fullmatch(expected_context):
             raise ValueError("expected Docker context has an invalid name")
         _require_local_endpoint(expected_endpoint)
-        if not docker_binary or "\x00" in docker_binary:
-            raise ValueError("Docker binary must be a non-empty executable path")
+        if (
+            not isinstance(docker_binary, str)
+            or not os.path.isabs(docker_binary)
+            or os.path.normpath(docker_binary) != docker_binary
+            or "\x00" in docker_binary
+        ):
+            raise ValueError("Docker binary must be a canonical absolute path")
         if (
             isinstance(command_timeout_seconds, bool)
             or not isinstance(command_timeout_seconds, (int, float))
@@ -398,9 +410,51 @@ class DockerCli:
             "--noprofile",
             "--norc",
             "-c",
+            ACTION_WRAPPER_SCRIPT,
+            ACTION_WRAPPER_ARG0,
             action,
         )
         return PreparedDockerExec(argv, container.identifier, cwd)
+
+    def inspect_container_running(self, *, container: DockerContainer) -> bool:
+        """Re-attest one exact action container and return its running state.
+
+        Only the frozen ``running`` and terminal ``exited`` lifecycle states
+        are accepted.  A created, paused, restarting, dead, mislabeled, or
+        otherwise drifted object is ambiguous and therefore rejected.
+        """
+
+        if not isinstance(container, DockerContainer):
+            raise ValueError("container must be a validated DockerContainer")
+        _require_container_id(container.identifier)
+        expected_labels = _runtime_labels(container.spec, container.name)
+        if container.labels != tuple(sorted(expected_labels.items())):
+            raise DockerSecurityError("container identity labels were modified")
+        self._verify_local_daemon()
+        inspected = self._inspect_one(container.identifier)
+        state = _mapping(inspected.get("State"), "State")
+        if state.get("Status") == "running" and state.get("Running") is True:
+            running = True
+            exited = False
+        elif state.get("Status") == "exited" and state.get("Running") is False:
+            running = False
+            exited = True
+        else:
+            raise DockerSecurityError(
+                "container lifecycle is neither attested running nor exited"
+            )
+        image_id = self._validate_security_profile(
+            inspected,
+            identifier=container.identifier,
+            name=container.name,
+            spec=container.spec,
+            labels=expected_labels,
+            running=running,
+            exited=exited,
+        )
+        if image_id != container.image_id:
+            raise DockerSecurityError("container image identity changed after validation")
+        return running
 
     def list_run_containers(self, run_id: str) -> tuple[str, ...]:
         """Discover stopped or running resources carrying the exact run labels."""
@@ -528,7 +582,7 @@ class DockerCli:
                 "DOCKER_HOST must be unset; daemon overrides are not admitted"
             )
         current_context = self._single_line(
-            self._invoke("context", "show", pinned_context=False).stdout,
+            self._invoke("context", "show", pinned_endpoint=False).stdout,
             "Docker context",
         )
         if current_context != self._expected_context:
@@ -543,7 +597,7 @@ class DockerCli:
             "--format",
             "{{json .Endpoints.docker.Host}}",
             self._expected_context,
-            pinned_context=False,
+            pinned_endpoint=False,
         )
         try:
             endpoint = json.loads(endpoint_result.stdout)
@@ -601,12 +655,12 @@ class DockerCli:
     def _invoke(
         self,
         *arguments: str,
-        pinned_context: bool = True,
+        pinned_endpoint: bool = True,
     ) -> DockerCommandResult:
         for argument in arguments:
             if not isinstance(argument, str) or "\x00" in argument:
                 raise ValueError("Docker argv entries must be NUL-free strings")
-        argv = list(self._build_argv(*arguments, pinned_context=pinned_context))
+        argv = list(self._build_argv(*arguments, pinned_endpoint=pinned_endpoint))
         try:
             completed = self._runner(
                 argv,
@@ -645,14 +699,18 @@ class DockerCli:
         return result
 
     def _build_argv(
-        self, *arguments: str, pinned_context: bool = True
+        self, *arguments: str, pinned_endpoint: bool = True
     ) -> tuple[str, ...]:
         for argument in arguments:
             if not isinstance(argument, str) or "\x00" in argument:
                 raise ValueError("Docker argv entries must be NUL-free strings")
         argv = [self._docker_binary]
-        if pinned_context:
-            argv.extend(("--context", self._expected_context))
+        if pinned_endpoint:
+            # Context identity is admitted separately, but every mutation and
+            # inspection targets the already-verified local socket directly.
+            # This prevents DOCKER_CONFIG/HOME drift between admission and a
+            # later streaming subprocess from remapping a context name.
+            argv.extend(("--host", self._expected_endpoint))
         argv.extend(arguments)
         return tuple(argv)
 
@@ -669,6 +727,7 @@ class DockerCli:
         spec: DockerContainerSpec,
         labels: Mapping[str, str],
         running: bool,
+        exited: bool = False,
     ) -> str:
         self._require_identity(item, identifier, name, labels)
         config = _mapping(item.get("Config"), "Config")
@@ -681,7 +740,7 @@ class DockerCli:
             raise DockerSecurityError("inspected image config id differs from the frozen pin")
         if item.get("Platform") != CONTAINER_OS:
             raise DockerSecurityError("container platform is not the frozen linux platform")
-        _validate_container_state(item.get("State"), running=running)
+        _validate_container_state(item.get("State"), running=running, exited=exited)
         if config.get("Hostname") != CONTAINER_HOSTNAME:
             raise DockerSecurityError("container hostname drift detected")
         if config.get("User") != CONTAINER_USER:
@@ -965,9 +1024,16 @@ def _decode_single_inspection(stdout: str, field: str) -> dict[str, object]:
     return cast(dict[str, object], item)
 
 
-def _validate_container_state(value: object, *, running: bool) -> None:
+def _validate_container_state(
+    value: object,
+    *,
+    running: bool,
+    exited: bool = False,
+) -> None:
     state = _mapping(value, "State")
-    expected_status = "running" if running else "created"
+    if running and exited:
+        raise DockerSecurityError("container lifecycle expectation is contradictory")
+    expected_status = "running" if running else "exited" if exited else "created"
     if state.get("Status") != expected_status or state.get("Running") is not running:
         raise DockerSecurityError(
             f"container lifecycle must be exactly {expected_status}"

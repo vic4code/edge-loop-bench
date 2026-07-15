@@ -71,14 +71,17 @@ def inspect_payload(
     name: str = NAME,
     run_id: str = RUN_ID,
     running: bool = False,
+    exited: bool = False,
 ) -> dict[str, object]:
+    if running and exited:
+        raise ValueError("inspection fixture cannot be running and exited")
     return {
         "Id": identifier,
         "Name": f"/{name}",
         "Image": IMAGE_ID,
         "Platform": "linux",
         "State": {
-            "Status": "running" if running else "created",
+            "Status": "running" if running else "exited" if exited else "created",
             "Running": running,
             "Paused": False,
             "Restarting": False,
@@ -94,7 +97,7 @@ def inspect_payload(
                 "--noprofile",
                 "--norc",
                 "-c",
-                "trap 'exit 0' TERM INT; while :; do sleep 3600; done",
+                "exec /usr/bin/tail -f /dev/null",
             ],
             "Labels": {
                 MANAGED_LABEL: "v0.6",
@@ -208,6 +211,7 @@ class DockerCliTests(unittest.TestCase):
         return DockerCli(
             expected_context="desktop-linux",
             expected_endpoint="unix:///Users/test/.docker/run/docker.sock",
+            docker_binary="/usr/local/bin/docker",
             env={} if env is None else env,
             runner=runner,
             nonce_factory=lambda: NONCE,
@@ -291,7 +295,15 @@ class DockerCliTests(unittest.TestCase):
         self.assertEqual(container.image_id, IMAGE_ID)
 
         argv = runner.calls[4][0]
-        self.assertEqual(argv[:4], ("docker", "--context", "desktop-linux", "container"))
+        self.assertEqual(
+            argv[:4],
+            (
+                "/usr/local/bin/docker",
+                "--host",
+                "unix:///Users/test/.docker/run/docker.sock",
+                "container",
+            ),
+        )
         self.assertEqual(argv[4], "create")
         required_pairs = (
             ("--name", NAME),
@@ -318,6 +330,16 @@ class DockerCliTests(unittest.TestCase):
             self.assertIn(pair, adjacent)
         self.assertIn(("--label", f"{RUN_LABEL}={RUN_ID}"), adjacent)
         self.assertIn(("--label", f"{MANAGED_LABEL}=v0.6"), adjacent)
+        self.assertEqual(
+            argv[-5:],
+            (
+                IMAGE,
+                "--noprofile",
+                "--norc",
+                "-c",
+                "exec /usr/bin/tail -f /dev/null",
+            ),
+        )
         self.assertIn(IMAGE, argv)
         forbidden = {
             "--mount",
@@ -361,8 +383,13 @@ class DockerCliTests(unittest.TestCase):
             cwd="/testbed/dir1",
         )
         argv = prepared.argv
+        wrapper = (
+            "printf '\\036ELB_ACTION_STARTED_V1\\037\\n'\n"
+            "printf '\\036ELB_ACTION_STARTED_V1\\037\\n' >&2\n"
+            "exec /bin/bash --noprofile --norc -c \"$1\""
+        )
         self.assertEqual(
-            argv[-10:],
+            argv[-12:],
             (
                 "--workdir",
                 "/testbed/dir1",
@@ -373,12 +400,44 @@ class DockerCliTests(unittest.TestCase):
                 "--noprofile",
                 "--norc",
                 "-c",
+                wrapper,
+                "edgeloop-action-v1",
                 action,
             ),
         )
         self.assertEqual(argv.count(action), 1)
         self.assertFalse(any(action in call for call, _ in runner.calls))
         self.assert_no_host_shell(runner)
+
+    def test_inspect_container_running_accepts_only_attested_running_or_exited_state(self) -> None:
+        for expected, payload in (
+            (True, inspect_payload(running=True)),
+            (False, inspect_payload(exited=True)),
+        ):
+            with self.subTest(expected=expected):
+                runner = FakeRunner(
+                    local_daemon_responses()
+                    + [(0, inspect_stdout(payload), "")]
+                )
+                self.assertIs(
+                    self.client(runner).inspect_container_running(
+                        container=trusted_container()
+                    ),
+                    expected,
+                )
+                self.assert_no_host_shell(runner)
+
+    def test_inspect_container_running_rejects_ambiguous_or_drifted_state(self) -> None:
+        ambiguous = inspect_payload(exited=True)
+        ambiguous["State"]["Dead"] = True  # type: ignore[index]
+        runner = FakeRunner(
+            local_daemon_responses()
+            + [(0, inspect_stdout(ambiguous), "")]
+        )
+        with self.assertRaisesRegex(DockerSecurityError, "lifecycle"):
+            self.client(runner).inspect_container_running(
+                container=trusted_container()
+            )
 
     def test_create_rechecks_context_before_mutating_the_daemon(self) -> None:
         runner = FakeRunner([(0, "default\n", "")])
@@ -442,6 +501,14 @@ class DockerCliTests(unittest.TestCase):
         self.assertFalse(any("create" in argv for argv, _ in runner.calls))
 
     def test_constructor_rejects_ambiguous_endpoint_and_timeout(self) -> None:
+        with self.assertRaisesRegex(ValueError, "absolute"):
+            DockerCli(
+                expected_context="desktop-linux",
+                expected_endpoint="unix:///var/run/docker.sock",
+                docker_binary="docker",
+                env={},
+                runner=FakeRunner([]),
+            )
         for endpoint in (
             "unix:///var/run/docker.sock?override=1",
             "unix:///var/run/docker.sock#fragment",
@@ -451,6 +518,7 @@ class DockerCliTests(unittest.TestCase):
                     DockerCli(
                         expected_context="desktop-linux",
                         expected_endpoint=endpoint,
+                        docker_binary="/usr/local/bin/docker",
                         env={},
                         runner=FakeRunner([]),
                     )
@@ -460,6 +528,7 @@ class DockerCliTests(unittest.TestCase):
                     DockerCli(
                         expected_context="desktop-linux",
                         expected_endpoint="unix:///var/run/docker.sock",
+                        docker_binary="/usr/local/bin/docker",
                         env={},
                         runner=FakeRunner([]),
                         command_timeout_seconds=timeout,
