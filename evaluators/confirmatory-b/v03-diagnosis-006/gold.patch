@@ -1,0 +1,16 @@
+diff --git a/src/solution.py b/src/solution.py
+index d296206..86b3773 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,5 +1,10 @@
+ def group_values(rows):
+     result = {}
+     for row in rows:
+-        result.setdefault(row['group'], []).append(row['value'])
++        if not isinstance(row, dict) or not isinstance(row.get('group'), str):
++            continue
++        group = row['group'].strip()
++        if not group or 'value' not in row:
++            continue
++        result.setdefault(group, []).append(row['value'])
+     return result

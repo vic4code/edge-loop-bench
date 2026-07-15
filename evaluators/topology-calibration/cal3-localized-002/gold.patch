@@ -1,0 +1,10 @@
+diff --git a/src/solution.py b/src/solution.py
+index 09d64de..f61036a 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -2,4 +2,4 @@ def compact_code(text):
+     value = text.strip().lower()
+     if not value:
+         raise ValueError('blank code')
+-    return value.replace(' ', '_')
++    return '_'.join(value.split())

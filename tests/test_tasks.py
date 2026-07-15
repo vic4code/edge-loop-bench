@@ -289,5 +289,69 @@ class ConfirmatorySuiteTests(unittest.TestCase):
                 self.assertEqual(hidden.returncode, 0, hidden.stderr)
 
 
+class V03SuiteTests(unittest.TestCase):
+    project_root = Path(__file__).parents[1]
+
+    def test_v03_suites_have_preregistered_category_counts(self) -> None:
+        expected = {
+            "topology-calibration": {
+                "localized": 2, "cross-file": 2, "diagnosis": 1, "adversarial": 1,
+            },
+            "confirmatory-b": {
+                "localized": 12, "cross-file": 8, "diagnosis": 6, "adversarial": 4,
+            },
+        }
+        for suite, category_counts in expected.items():
+            manifests = [
+                load_task_manifest(path)
+                for path in sorted((self.project_root / "tasks" / suite).glob("*/task.toml"))
+            ]
+            with self.subTest(suite=suite):
+                self.assertEqual(len(manifests), sum(category_counts.values()))
+                self.assertEqual(
+                    {
+                        category: sum(task.category == category for task in manifests)
+                        for category in category_counts
+                    },
+                    category_counts,
+                )
+
+    def test_v03_tasks_fail_initially_and_gold_passes_both_test_layers(self) -> None:
+        for suite in ("topology-calibration", "confirmatory-b"):
+            for manifest_path in sorted(
+                (self.project_root / "tasks" / suite).glob("*/task.toml")
+            ):
+                task_id = manifest_path.parent.name
+                with self.subTest(suite=suite, task_id=task_id), tempfile.TemporaryDirectory() as directory:
+                    task = prepare_task(manifest_path.parent, Path(directory) / "worktree")
+                    worktree = Path(directory) / "worktree"
+                    evaluator_root = self.project_root / "evaluators" / suite / task_id
+                    initial = subprocess.run(
+                        task.public_test.command, cwd=worktree, capture_output=True,
+                        text=True, timeout=task.public_test.timeout_seconds,
+                    )
+                    self.assertNotEqual(initial.returncode, 0)
+                    gold_patch = evaluator_root / "gold.patch"
+                    self.assertEqual(
+                        f"sha256:{sha256(gold_patch.read_bytes()).hexdigest()}",
+                        task.gold_patch_sha256,
+                    )
+                    subprocess.run(
+                        ["git", "apply", str(gold_patch)], cwd=worktree, check=True,
+                        capture_output=True, text=True,
+                    )
+                    public = subprocess.run(
+                        task.public_test.command, cwd=worktree, capture_output=True,
+                        text=True, timeout=task.public_test.timeout_seconds,
+                    )
+                    hidden = subprocess.run(
+                        ["python3", "-m", "unittest", "discover", "-s", str(evaluator_root / "tests"), "-v"],
+                        cwd=worktree, capture_output=True, text=True,
+                        timeout=task.hidden_evaluation.timeout_seconds,
+                    )
+                    self.assertEqual(public.returncode, 0, public.stderr)
+                    self.assertEqual(hidden.returncode, 0, hidden.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

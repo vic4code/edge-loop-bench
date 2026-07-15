@@ -1,0 +1,24 @@
+diff --git a/src/solution.py b/src/solution.py
+index b4f86ab..7b06ff2 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,8 +1,17 @@
+ def merge_ranges(ranges):
+-    ordered = sorted(ranges)
++    ordered = []
++    for item in ranges:
++        if (not isinstance(item, (tuple, list)) or len(item) != 2 or
++                any(not isinstance(v, int) or isinstance(v, bool) for v in item)):
++            raise ValueError('integer ranges required')
++        start, end = item
++        if start > end:
++            raise ValueError('reversed range')
++        ordered.append((start, end))
++    ordered.sort()
+     merged = []
+     for start, end in ordered:
+-        if merged and start <= merged[-1][1]:
++        if merged and start <= merged[-1][1] + 1:
+             merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+         else:
+             merged.append((start, end))

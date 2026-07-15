@@ -1,0 +1,17 @@
+diff --git a/src/solution.py b/src/solution.py
+index 60e58e7..04afe52 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,4 +1,11 @@
+ def parse_switch(value):
+     if isinstance(value, bool):
+         return value
+-    return value in {'yes', 'true', '1'}
++    if not isinstance(value, str):
++        raise ValueError('invalid switch')
++    normalized = value.strip().lower()
++    if normalized in {'yes', 'true', '1'}:
++        return True
++    if normalized in {'no', 'false', '0'}:
++        return False
++    raise ValueError('invalid switch')

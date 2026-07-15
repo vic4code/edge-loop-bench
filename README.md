@@ -50,14 +50,14 @@ Core vLLM does not provide a direct PyTorch MPS backend. On Apple Silicon, this 
 Start small enough to run a full experiment matrix before trying a headline model:
 
 1. **Qwen3.5 4B Q4** — small control and harness shakeout.
-2. **Gemma 4 E2B or E4B** — primary edge-model candidate.
-3. **GLM-4.7-Flash Q4** — 30B-A3B stretch candidate for a 32 GB machine, not a default for 8–16 GB systems.
+2. **Phi-4-mini Q4** — alternate small-model candidate after a separate calibration.
+3. **Gemma 4 E2B or E4B** — only with an explicitly compact artifact and measured headroom.
 
 Artifact size is not total runtime memory. Context length and KV cache can dominate the remaining headroom. See [the model matrix](docs/model-matrix.md) before downloading a model.
 
 ### Detected development machine
 
-The checked-in, privacy-scrubbed inventory is an **M4 MacBook Air with 16 GB unified memory and an 8-core GPU**. For this machine, the practical sequence is Qwen3.5 4B for harness shakeout, then Qwen3.5 9B or Gemma 4 12B for the main study. GLM-4.7-Flash's 19 GB Q4 artifact is outside the safe operating envelope and should be tested only on a 32 GB host. See [`configs/hardware.m4-air-16gb.json`](configs/hardware.m4-air-16gb.json).
+The checked-in, privacy-scrubbed inventory is an **M4 MacBook Air with 16 GB unified memory and an 8-core GPU**. The active 16 GB profile is small-model-only: Qwen3.5 4B first, then another 2–4 GB artifact only after calibration. Observed 9B memory pressure on a 16 GB M3 host is recorded in [ADR 010](docs/decisions/010-small-model-confirmatory-profile.md); 9B/12B artifacts are not default work for this profile. See [`configs/hardware.m4-air-16gb.json`](configs/hardware.m4-air-16gb.json).
 
 ## Repository status
 
@@ -76,6 +76,15 @@ Version `0.1.0` is a runnable Mac-native qualification harness. It provides:
 It deliberately does **not** edit arbitrary repositories or expose evaluator
 assets to the model. Energy collection, a measured serving report, and the
 confirmatory multi-seed study remain later milestones.
+
+## Current local result
+
+Open [`results/OPEN-ME/index.html`](results/OPEN-ME/index.html). It is the single
+results hub: the complete Qwen3.5 4B v0.2 confirmatory block plus clearly
+labeled historical reports for Phi-4-mini, Qwen3.5 4B/9B, and Gemma 4 12B.
+Generated reports and raw JSONL remain intentionally ignored by Git; the local
+[`results/README.md`](results/README.md) explains the archive, evidence, and
+scratch directories.
 
 ## Quick start
 
@@ -135,10 +144,10 @@ artifact to vary:
 
 ```bash
 PYTHONPATH=src python3 -m edgeloopbench compare \
-  --experiment configs/experiments/smoke.toml results/qwen35-4b-full-runs.jsonl \
-  --experiment configs/experiments/gemma4-12b-smoke.toml results/gemma4-12b-full-runs.jsonl \
-  --experiment configs/experiments/qwen35-9b-smoke.toml results/qwen35-9b-full-runs.jsonl \
-  --output results/three-model-loop-comparison
+  --experiment configs/experiments/smoke.toml results/archive/v0.1/raw/qwen35-4b-full-runs.jsonl \
+  --experiment configs/experiments/gemma4-12b-smoke.toml results/archive/v0.1/raw/gemma4-12b-full-runs.jsonl \
+  --experiment configs/experiments/qwen35-9b-smoke.toml results/archive/v0.1/raw/qwen35-9b-full-runs.jsonl \
+  --output results/archive/v0.1/reports/three-model-loop-comparison
 ```
 
 The completed three-model qualification and its interpretation boundary are

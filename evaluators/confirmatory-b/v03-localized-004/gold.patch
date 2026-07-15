@@ -1,0 +1,12 @@
+diff --git a/src/solution.py b/src/solution.py
+index f069544..f36c12a 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,2 +1,6 @@
+ def stable_unique(values):
+-    return list(set(values))
++    result = []
++    for value in values:
++        if value not in result:
++            result.append(value)
++    return result

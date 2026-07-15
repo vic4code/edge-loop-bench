@@ -1,0 +1,16 @@
+diff --git a/src/solution.py b/src/solution.py
+index b76f1c6..8ab1868 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,2 +1,10 @@
+ def normalize_address(value):
+-    return value.strip().lower()
++    if not isinstance(value, str):
++        raise ValueError('address must be text')
++    normalized = value.strip().lower()
++    if normalized.count('@') != 1:
++        raise ValueError('invalid address')
++    local, domain = normalized.split('@')
++    if not local or not domain or any(ch.isspace() for ch in normalized):
++        raise ValueError('invalid address')
++    return normalized

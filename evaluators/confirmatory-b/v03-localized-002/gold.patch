@@ -1,0 +1,12 @@
+diff --git a/src/solution.py b/src/solution.py
+index 001c78c..6bbb994 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,4 +1,6 @@
+ def batch_count(item_count, batch_size):
+     if batch_size <= 0:
+         raise ValueError('invalid size')
+-    return item_count // batch_size
++    if item_count < 0:
++        raise ValueError('negative count')
++    return (item_count + batch_size - 1) // batch_size

@@ -1,0 +1,11 @@
+diff --git a/src/solution.py b/src/solution.py
+index 14deb82..e66b1f9 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,5 +1,5 @@
+ def canonical_path(parts):
+-    usable = [part.strip() for part in parts if part]
++    usable = [part.strip() for part in parts if isinstance(part, str) and part.strip()]
+     if not usable:
+         raise ValueError('empty path')
+     return '/'.join(usable)

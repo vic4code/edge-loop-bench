@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .config import ExperimentPlan
 from .results import ArmSummary, RunRecord, SummaryReport
+from .tasks import TaskManifestError, load_task_manifest
 
 
 class ComparisonError(ValueError):
@@ -462,8 +463,51 @@ def _ratio(candidate: float | None, baseline: float | None) -> str:
 
 
 def _controller_flow(plan: ExperimentPlan) -> str:
+    is_v03 = "evidence_gated_loop" in plan.strategies
     is_v02 = any(task.startswith("confirm-") for task in plan.tasks)
-    if is_v02:
+    if is_v03:
+        lanes = (
+            (
+                "Direct baseline",
+                "Identical first Maker call; no retry",
+                (
+                    "Reset the pinned clean task worktree",
+                    "Maker returns full-file edit JSON",
+                    "Validate paths, apply, and run public tests",
+                    "Stop after the first outcome",
+                    "Run isolated hidden evaluation after the episode",
+                ),
+            ),
+            (
+                "Bounded Retry",
+                "At most three evidence-driven Maker attempts",
+                (
+                    "Use the identical first Maker call",
+                    "On public failure, build a sanitized retry packet",
+                    "Repair the current visible worktree",
+                    "Exit on public pass or attempt/budget exhaustion",
+                    "Run isolated hidden evaluation after the episode",
+                ),
+            ),
+            (
+                "Evidence-Gated Loop",
+                "Independent checklist, revision, and re-check",
+                (
+                    "Checkpoint public-test-passing Candidate A",
+                    "Fresh read-only checker completes a five-item checklist",
+                    "Controller derives APPROVE, REJECT, or ESCALATE",
+                    "Only actionable REJECT permits a Maker revision",
+                    "Select B only after public pass and fresh re-check",
+                    "On any failed gate, restore A before isolated evaluation",
+                ),
+            ),
+        )
+        boundary = (
+            "The checker has no edit schema and receives no Maker conversation, hidden "
+            "tests, gold patch, evaluator path, or evaluator outcome. A malformed or "
+            "uncertain check escalates and preserves Candidate A."
+        )
+    elif is_v02:
         lanes = (
             (
                 "Direct baseline",
@@ -615,6 +659,10 @@ def _task_suite(plan: ExperimentPlan) -> str:
     observations = len(plan.tasks) * len(plan.seeds)
     if set(plan.tasks) == set(_TASK_SUMMARIES):
         dataset_name = "MicroRepair-6 task catalog"
+    elif len(plan.tasks) == 6 and all(task.startswith("cal3-") for task in plan.tasks):
+        dataset_name = "TopologyCalibration-6"
+    elif len(plan.tasks) == 30 and all(task.startswith("v03-") for task in plan.tasks):
+        dataset_name = "ConfirmatoryRepair-B-30"
     elif len(plan.tasks) == 30 and all(task.startswith("confirm-") for task in plan.tasks):
         dataset_name = "ConfirmatoryRepair-30"
     else:
@@ -641,10 +689,26 @@ def _confirmatory_task_summary(task_id: str) -> tuple[str, str, str, str, str]:
             category, capability = label, description
             break
     contract = "Configured deterministic repair task."
+    suite = (
+        "topology-calibration" if task_id.startswith("cal3-")
+        else "confirmatory-b" if task_id.startswith("v03-")
+        else "confirmatory"
+    )
     readme = (
         Path(__file__).resolve().parents[2]
-        / "tasks" / "confirmatory" / task_id / "public" / "README.md"
+        / "tasks" / suite / task_id / "public" / "README.md"
     )
+    source = "Generated mutation"
+    try:
+        manifest = load_task_manifest(readme.parents[1] / "task.toml")
+    except (OSError, TaskManifestError):
+        pass
+    else:
+        source = {
+            "generated_mutation": "Generated mutation",
+            "reconstructed_bug": "Reconstructed bug",
+            "verifier_adversarial": "Verifier adversarial",
+        }[manifest.source_type]
     try:
         paragraphs = [line.strip() for line in readme.read_text(encoding="utf-8").splitlines() if line.strip()]
     except OSError:
@@ -652,7 +716,7 @@ def _confirmatory_task_summary(task_id: str) -> tuple[str, str, str, str, str]:
     else:
         if len(paragraphs) >= 2:
             contract = paragraphs[1]
-    return category, "Generated mutation", task_id, contract, capability
+    return category, source, task_id, contract, capability
 
 
 def _comparison_metric_cards(

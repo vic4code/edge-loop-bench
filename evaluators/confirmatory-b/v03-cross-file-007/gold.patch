@@ -1,0 +1,12 @@
+diff --git a/src/service.py b/src/service.py
+index eb07ea5..66f42f8 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -1,4 +1,6 @@
+ from tax import rate_for
+ 
+ def taxed_total(subtotal, region):
+-    return subtotal + rate_for(region)
++    if not isinstance(subtotal, (int, float)) or isinstance(subtotal, bool) or subtotal < 0:
++        raise ValueError('invalid subtotal')
++    return round(subtotal * (1 + rate_for(region)), 2)

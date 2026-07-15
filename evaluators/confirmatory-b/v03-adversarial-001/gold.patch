@@ -1,0 +1,10 @@
+diff --git a/src/solution.py b/src/solution.py
+index b1ba9b1..b73bbe3 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -2,4 +2,4 @@ def label_key(text):
+     value = text.strip().lower()
+     if not value:
+         raise ValueError('blank label')
+-    return value.replace('  ', '-').replace(' ', '-')
++    return '-'.join(value.split())

@@ -8,9 +8,10 @@ Do not start by making the largest model fit. Start by proving the full experime
 
 The first shortlist is:
 
-1. Qwen3.5 4B or Phi-4-mini as the low-cost control.
-2. Gemma 4 E2B, E4B, or 12B as the primary edge family.
-3. GLM-4.7-Flash only as a 32 GB stretch experiment.
+1. Qwen3.5 4B as the primary 16 GB confirmatory model.
+2. Phi-4-mini as a separately calibrated small-model replication candidate.
+3. Mid-tier artifacts only on a host with measured headroom; do not treat them
+   as pending work for the 16 GB profile.
 
 ## Candidate matrix
 
@@ -39,7 +40,10 @@ Use Phi-4-mini, Qwen3.5 4B, or an explicitly compact Gemma 4 E2B Q4 checkpoint s
 
 ### 16 GB
 
-Use Qwen3.5 9B, GLM-4-9B, or Gemma 4 E4B/12B. A model advertised as fitting in 16 GB can still leave too little room for macOS, KV cache, tools, and telemetry.
+Use Qwen3.5 4B, Phi-4-mini, or another 2–4 GB artifact that passes calibration.
+Observed 9B pressure on a 16 GB M3 host left insufficient headroom for dependable
+loop execution. Mid-tier models require a separately measured safe host; see
+[ADR 010](decisions/010-small-model-confirmatory-profile.md).
 
 ### 24 GB
 

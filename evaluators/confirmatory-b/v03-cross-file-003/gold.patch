@@ -1,0 +1,14 @@
+diff --git a/src/service.py b/src/service.py
+index 7ea60f0..08debec 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -1,5 +1,7 @@
+ from repository import lookup
+ 
+ def display_name(store, user_id):
+-    value, found = lookup(store, user_id)
+-    return value.strip().upper() if found else 'UNKNOWN'
++    found, value = lookup(store, user_id)
++    if not found or not isinstance(value, str) or not value.strip():
++        return 'UNKNOWN'
++    return value.strip().upper()

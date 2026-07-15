@@ -1,0 +1,16 @@
+diff --git a/src/solution.py b/src/solution.py
+index e3457df..5d1ce26 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,6 +1,9 @@
+ def accepted_total(rows):
+     total = 0
+     for row in rows:
+-        if row.get('status') == 'accepted':
+-            total += row.get('amount', 0)
++        if not isinstance(row, dict) or row.get('status') != 'accepted':
++            continue
++        amount = row.get('amount')
++        if isinstance(amount, (int, float)) and not isinstance(amount, bool):
++            total += amount
+     return total

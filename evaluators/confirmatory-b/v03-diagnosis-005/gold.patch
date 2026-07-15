@@ -1,0 +1,13 @@
+diff --git a/src/solution.py b/src/solution.py
+index 6f0a158..3b1497f 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,4 +1,6 @@
+ def reconcile(available, reserved):
+-    if available < 0:
+-        raise ValueError('negative')
++    if (not isinstance(available, int) or isinstance(available, bool) or
++            not isinstance(reserved, int) or isinstance(reserved, bool) or
++            available < 0 or reserved < 0):
++        raise ValueError('non-negative integers required')
+     return available + reserved

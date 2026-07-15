@@ -1,0 +1,10 @@
+diff --git a/src/solution.py b/src/solution.py
+index 7f6869b..e8d4287 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,2 +1,4 @@
+ def redact_secret(text, secret):
+-    return text.replace(secret.strip(), '[REDACTED]')
++    if not isinstance(secret, str) or not secret:
++        raise ValueError('secret required')
++    return text.replace(secret, '[REDACTED]')

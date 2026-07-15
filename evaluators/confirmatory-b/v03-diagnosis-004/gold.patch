@@ -1,0 +1,16 @@
+diff --git a/src/solution.py b/src/solution.py
+index c977af4..6077e04 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,6 +1,10 @@
+ def status_counts(rows):
+     counts = {}
+     for row in rows:
+-        status = row['status'].lower()
++        if not isinstance(row, dict) or not isinstance(row.get('status'), str):
++            continue
++        status = row['status'].strip().lower()
++        if not status:
++            continue
+         counts[status] = counts.get(status, 0) + 1
+     return counts

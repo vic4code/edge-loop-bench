@@ -1,0 +1,12 @@
+diff --git a/src/solution.py b/src/solution.py
+index d607fbe..13a4f6c 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -2,4 +2,6 @@ def chunk_at(values, index, size):
+     if size <= 0 or index < 0:
+         raise ValueError('invalid chunk')
+     start = index * size
+-    return values[start:start + size - 1]
++    if start >= len(values):
++        raise ValueError('chunk out of range')
++    return values[start:start + size]

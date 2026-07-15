@@ -14,7 +14,12 @@ from typing import Any, Iterable, Mapping
 from .config import MAX_PLANNED_RUNS, ExperimentPlan
 
 
-STRATEGY_ORDER = {"direct": 0, "bounded_retry": 1, "maker_verifier": 2}
+STRATEGY_ORDER = {
+    "direct": 0,
+    "bounded_retry": 1,
+    "maker_verifier": 2,
+    "evidence_gated_loop": 3,
+}
 RUN_STATUSES = frozenset(
     {"completed", "budget_exhausted", "timeout", "infrastructure_error", "invalid"}
 )

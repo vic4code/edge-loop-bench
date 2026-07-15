@@ -1,8 +1,20 @@
 # EdgeLoopBench v0.2 experiment design
 
-- Status: **proposed; implementation and confirmatory runs have not started**
+- Status: **amended; small-model confirmatory profile active**
 - Design date: **2026-07-14**
 - Target host: **M3 MacBook Pro (Mac15,3), 16 GB unified memory, 10-core GPU**
+
+## 2026-07-15 protocol amendment
+
+The 16 GB host now uses the small-model-only profile defined in
+[ADR 010](decisions/010-small-model-confirmatory-profile.md). Qwen3.5 4B is the
+primary v0.2 effectiveness model. The incomplete Qwen3.5 9B block is excluded,
+and Gemma 4 12B confirmatory execution is not opened on this host. This amendment
+was recorded before inspecting the completed Qwen3.5 4B aggregate.
+
+The task suite, controller, budgets, endpoints, contrasts, and decision rules
+below remain frozen. The amendment narrows model scope; it does not alter the
+criterion for calling a loop beneficial.
 
 ## 1. Executive summary
 
@@ -44,7 +56,7 @@ final objective success relative to Direct and Bounded Retry?
 When a loop changes an outcome, is the transition a rescue, a regression, a
 format recovery, a public-test recovery, or a verifier-guided semantic repair?
 
-### RQ4 — Model dependence
+### RQ4 — Model dependence (deferred on this host)
 
 Does the loop effect vary with the model's Direct baseline, especially when a
 stronger model approaches a task-suite ceiling?
@@ -362,16 +374,18 @@ active-versus-resident parameters differ.
 
 ### 9.3 Resource-tier comparison
 
-For the 16 GB Mac, compare models by deployable resource tier. Qwen3.5 9B and
-Gemma 4 12B are more naturally compared as similar Q4 artifact-size candidates
-than as equal-parameter models. Report peak unified memory, swap, wall time, and
-verified success; label this a deployment comparison.
+Compare models by deployable resource tier rather than parameter count. The
+active 16 GB profile is restricted to small artifacts after the mid-tier block
+exhibited unsafe memory headroom. Any later 9B/12B comparison must run on a safe
+host and remains a deployment comparison, not a loop-effect estimate.
 
-The initial model ladder is:
+The amended model scope is:
 
-- Qwen3.5 4B: low-resource control;
-- Qwen3.5 9B: mid-tier coding baseline;
-- Gemma 4 12B: mid-tier alternate-family candidate.
+- Qwen3.5 4B: primary small-model confirmatory result;
+- Phi-4-mini: archived qualification evidence and a possible future small-model
+  replication after a new calibration and manifest;
+- Qwen3.5 9B: incomplete host-safety evidence, excluded from aggregates;
+- Gemma 4 12B: not opened for confirmatory execution on the 16 GB host.
 
 Phi-4-mini remains archived qualification evidence unless it first passes a
 tool/edit-schema calibration gate. Zero-success arms are reported but do not

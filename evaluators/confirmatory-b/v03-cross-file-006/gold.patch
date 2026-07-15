@@ -1,0 +1,12 @@
+diff --git a/src/service.py b/src/service.py
+index 423f114..feb2bc5 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -2,4 +2,6 @@ from repository import fetch
+ 
+ def read_setting(store, key, default):
+     result = fetch(store, key)
+-    return result['value'] or default
++    if not result['found'] or result['value'] is None:
++        return default
++    return result['value']

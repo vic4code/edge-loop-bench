@@ -37,6 +37,24 @@ class StaticReportTests(unittest.TestCase):
         self.assertIn("clamp(value, low, high)", tasks)
         self.assertIn("30 paired observations per arm", tasks)
 
+    def test_v03_report_explains_evidence_gate_and_fresh_task_suite(self) -> None:
+        plan = load_experiment(
+            self.project_root / "configs/experiments/v0.3/calibration-qwen35-4b.toml"
+        )
+
+        flow = _controller_flow(plan)
+        tasks = _task_suite(plan)
+
+        self.assertIn("Evidence-Gated Loop", flow)
+        self.assertIn("five-item checklist", flow)
+        self.assertIn("re-check", flow)
+        self.assertIn("restore A", flow)
+        self.assertNotIn("review-and-revise", flow)
+        self.assertIn("TopologyCalibration-6", tasks)
+        self.assertEqual(tasks.count('<article class="task-card">'), 6)
+        self.assertIn("shipping_quote", tasks)
+        self.assertIn("Verifier adversarial", tasks)
+
     def test_renders_agent_visible_microrepair_task_catalog(self) -> None:
         plan = load_experiment(
             self.project_root / "configs/experiments/smoke.toml"

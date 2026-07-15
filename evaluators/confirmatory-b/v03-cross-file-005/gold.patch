@@ -1,0 +1,12 @@
+diff --git a/src/service.py b/src/service.py
+index 413301b..53b5edc 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -1,4 +1,6 @@
+ from tariff import rate_per_kg
+ 
+ def delivery_cost(weight, express):
+-    return round(weight + rate_per_kg(express), 2)
++    if not isinstance(weight, (int, float)) or isinstance(weight, bool) or weight < 0:
++        raise ValueError('invalid weight')
++    return round(weight * rate_per_kg(express), 2)

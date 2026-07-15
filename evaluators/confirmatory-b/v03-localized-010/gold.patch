@@ -1,0 +1,15 @@
+diff --git a/src/solution.py b/src/solution.py
+index 9d2d8ad..2a35119 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,2 +1,9 @@
+ def file_extension(name):
+-    return name.split('.', 1)[-1].lower() if '.' in name else ''
++    if not isinstance(name, str):
++        raise ValueError('name must be text')
++    base = name.rsplit('/', 1)[-1]
++    if base.startswith('.') and base.count('.') == 1:
++        return ''
++    if '.' not in base or base.endswith('.'):
++        return ''
++    return base.rsplit('.', 1)[1].lower()

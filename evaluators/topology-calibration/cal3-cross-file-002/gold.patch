@@ -1,0 +1,19 @@
+diff --git a/src/service.py b/src/service.py
+index 3bfa6fa..e46347a 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -1,7 +1,10 @@
+ from repository import available
+ 
+ def consume_quota(store, name, units):
+-    if units <= available(store, name):
+-        store[name] = available(store, name) - units
+-        return True
+-    return False
++    if not isinstance(units, int) or isinstance(units, bool) or units <= 0:
++        return False
++    current = available(store, name)
++    if units > current:
++        return False
++    store[name] = current - units
++    return True

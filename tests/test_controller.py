@@ -43,6 +43,25 @@ def clamp_page(page: int, total_pages: int) -> int:
             public_test_runs=3, per_call_context_tokens=4096,
         )
 
+    def checker_output(self, *, failing: str | None = None) -> str:
+        checks = {}
+        for name in (
+            "requirement_coverage",
+            "boundary_conditions",
+            "state_and_side_effects",
+            "cross_file_contract",
+            "regression_risk",
+        ):
+            checks[name] = {
+                "status": "FAIL" if name == failing else "PASS",
+                "location": "src/pagination.py:clamp_page",
+                "evidence": (
+                    "The requested checker revision is still missing."
+                    if name == failing else "No blocking issue found in visible evidence."
+                ),
+            }
+        return json.dumps({"checks": checks})
+
     def test_direct_records_one_successful_model_call(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             worktree = Path(directory) / "worktree"
@@ -222,6 +241,97 @@ def canonical_key(label: str) -> str:
             self.assertNotIn("Allowed edit patterns", prompts[1].prompt)
             self.assertEqual(result.verifier_verdict, "REJECT")
             self.assertEqual((result.candidate_a_success, result.candidate_b_success), (False, True))
+
+    def test_evidence_gated_loop_rechecks_revision_before_selecting_candidate_b(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "worktree"
+            task = prepare_task(self.task_root, worktree)
+            revised = self.fixed_source + "\n# checker-guided revision\n"
+            outputs = [
+                ModelOutput(
+                    json.dumps({"edits": [{"path": "src/pagination.py", "content": self.fixed_source}]}),
+                    "", 300, 100, 1,
+                ),
+                ModelOutput(self.checker_output(failing="boundary_conditions"), "", 250, 100, 1),
+                ModelOutput(
+                    json.dumps({"edits": [{"path": "src/pagination.py", "content": revised}]}),
+                    "", 350, 100, 1,
+                ),
+                ModelOutput(self.checker_output(), "", 250, 100, 1),
+            ]
+            requests: list[ModelRequest] = []
+
+            def model(request: ModelRequest) -> ModelOutput:
+                requests.append(request)
+                return outputs.pop(0)
+
+            result = run_strategy(
+                "evidence_gated_loop", worktree, task, model, self.budget(5), seed=11,
+                event_log=Path(directory) / "events.jsonl",
+                evaluate=lambda root, _task: "checker-guided" in root.joinpath("src/pagination.py").read_text(),
+                context=self.context(),
+            )
+
+            self.assertTrue(result.objective_success)
+            self.assertEqual([request.role for request in requests], ["maker", "verifier", "maker", "verifier"])
+            self.assertEqual((result.model_calls, result.public_test_runs), (4, 2))
+            checker_schema = requests[1].response_schema["properties"]["checks"]["properties"]
+            self.assertEqual(checker_schema["regression_risk"]["properties"]["location"]["minLength"], 1)
+            self.assertEqual(checker_schema["regression_risk"]["properties"]["evidence"]["maxLength"], 180)
+            self.assertIn("Missing public tests alone is not UNKNOWN", requests[1].prompt)
+            self.assertEqual(result.verifier_verdict, "APPROVE")
+            self.assertEqual((result.candidate_a_success, result.candidate_b_success), (False, True))
+
+    def test_evidence_checker_protocol_error_preserves_candidate_a(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "worktree"
+            events = Path(directory) / "events.jsonl"
+            task = prepare_task(self.task_root, worktree)
+            outputs = [
+                ModelOutput(
+                    json.dumps({"edits": [{"path": "src/pagination.py", "content": self.fixed_source}]}),
+                    "", 300, 100, 1,
+                ),
+                ModelOutput(json.dumps({"verdict": "APPROVE", "findings": []}), "", 200, 50, 1),
+            ]
+
+            result = run_strategy(
+                "evidence_gated_loop", worktree, task,
+                lambda _request: outputs.pop(0), self.budget(5), seed=11,
+                event_log=events, evaluate=lambda _root, _task: True,
+                context=self.context(),
+            )
+
+            self.assertTrue(result.objective_success)
+            self.assertTrue(result.verifier_protocol_error)
+            self.assertTrue(result.fallback_used)
+            records = [json.loads(line) for line in events.read_text().splitlines()]
+            self.assertIn("checker_protocol_error", [record["type"] for record in records])
+
+    def test_evidence_recheck_rejection_restores_a_but_evaluates_b(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = Path(directory) / "worktree"
+            task = prepare_task(self.task_root, worktree)
+            regressed = self.fixed_source + "\n# regressed candidate\n"
+            outputs = [
+                ModelOutput(json.dumps({"edits": [{"path": "src/pagination.py", "content": self.fixed_source}]}), "", 300, 100, 1),
+                ModelOutput(self.checker_output(failing="regression_risk"), "", 200, 80, 1),
+                ModelOutput(json.dumps({"edits": [{"path": "src/pagination.py", "content": regressed}]}), "", 300, 100, 1),
+                ModelOutput(self.checker_output(failing="regression_risk"), "", 200, 80, 1),
+            ]
+
+            result = run_strategy(
+                "evidence_gated_loop", worktree, task,
+                lambda _request: outputs.pop(0), self.budget(5), seed=11,
+                event_log=Path(directory) / "events.jsonl",
+                evaluate=lambda root, _task: "regressed candidate" not in root.joinpath("src/pagination.py").read_text(),
+                context=self.context(),
+            )
+
+            self.assertTrue(result.objective_success)
+            self.assertTrue(result.fallback_used)
+            self.assertEqual((result.candidate_a_success, result.candidate_b_success), (True, False))
+            self.assertNotIn("regressed candidate", (worktree / "src/pagination.py").read_text())
 
     def test_maker_verifier_restores_candidate_a_after_invalid_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

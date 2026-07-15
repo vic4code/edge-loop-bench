@@ -1,0 +1,19 @@
+schema_version = 1
+id = "v03-adversarial-004"
+language = "python"
+category = "adversarial"
+source_type = "verifier_adversarial"
+license = "MIT"
+initial_commit = "6c950cc0d0a3efecf67bd8f39cbecd3a7ead0291"
+gold_patch_sha256 = "sha256:adfe212d7cec86240ca8a573e94a606918cc506ca22ae0d7c1fb328803c0c15a"
+
+allowed_paths = ["src/**"]
+prohibited_paths = ["tests/**", ".edgeloop/**"]
+
+[public_test]
+command = ["python3", "-m", "unittest", "discover", "-s", "tests/public"]
+timeout_seconds = 30
+
+[hidden_evaluation]
+evaluator_id = "external-v03-adversarial-004"
+timeout_seconds = 30

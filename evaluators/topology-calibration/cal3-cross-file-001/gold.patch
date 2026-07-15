@@ -1,0 +1,10 @@
+diff --git a/src/service.py b/src/service.py
+index 02e449e..4a7cbf6 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -1,4 +1,4 @@
+ from policy import shipping_rate
+ 
+ def shipping_quote(subtotal, priority):
+-    return subtotal + shipping_rate(subtotal, priority)
++    return round(subtotal * (1 + shipping_rate(subtotal, priority)), 2)

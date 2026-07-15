@@ -45,6 +45,40 @@ VERIFIER_RESPONSE_SCHEMA: dict[str, object] = {
     "additionalProperties": False,
 }
 
+CHECKER_NAMES = (
+    "requirement_coverage",
+    "boundary_conditions",
+    "state_and_side_effects",
+    "cross_file_contract",
+    "regression_risk",
+)
+
+CHECKER_RESPONSE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "checks": {
+            "type": "object",
+            "properties": {
+                name: {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string", "enum": ["PASS", "FAIL", "UNKNOWN"]},
+                        "location": {"type": "string", "minLength": 1, "maxLength": 96},
+                        "evidence": {"type": "string", "minLength": 1, "maxLength": 180},
+                    },
+                    "required": ["status", "location", "evidence"],
+                    "additionalProperties": False,
+                }
+                for name in CHECKER_NAMES
+            },
+            "required": list(CHECKER_NAMES),
+            "additionalProperties": False,
+        },
+    },
+    "required": ["checks"],
+    "additionalProperties": False,
+}
+
 
 @dataclass(frozen=True)
 class ModelOutput:
@@ -124,6 +158,12 @@ class _Verdict:
     findings: tuple[dict[str, str], ...]
 
 
+@dataclass(frozen=True)
+class _ChecklistVerdict:
+    verdict: str
+    checks: tuple[dict[str, str], ...]
+
+
 Snapshot = dict[str, bytes]
 
 
@@ -141,7 +181,7 @@ def run_strategy(
 ) -> StrategyResult:
     """Run one v0.2 strategy without returning private evaluation feedback."""
 
-    if strategy not in {"direct", "bounded_retry", "maker_verifier"}:
+    if strategy not in {"direct", "bounded_retry", "maker_verifier", "evidence_gated_loop"}:
         raise ValueError(f"unsupported runnable strategy: {strategy}")
     root = Path(worktree).resolve()
     started_ns = time.monotonic_ns()
@@ -188,12 +228,20 @@ def run_strategy(
         remaining_total = budget.completion_tokens - counters.completion_tokens
         if role == "verifier":
             remaining_role = verifier_cap - verifier_used
-            schema = VERIFIER_RESPONSE_SCHEMA
-            per_call_cap = verifier_cap
+            schema = (
+                CHECKER_RESPONSE_SCHEMA
+                if strategy == "evidence_gated_loop"
+                else VERIFIER_RESPONSE_SCHEMA
+            )
+            per_call_cap = (
+                max(1, verifier_cap // 2)
+                if strategy == "evidence_gated_loop"
+                else verifier_cap
+            )
         else:
             remaining_role = (
                 maker_call_cap - maker_used
-                if strategy == "maker_verifier"
+                if strategy in {"maker_verifier", "evidence_gated_loop"}
                 else remaining_total
             )
             schema = EDIT_RESPONSE_SCHEMA
@@ -265,7 +313,15 @@ def run_strategy(
         failure_reason = None if public.passed else "public_tests_failed"
         return public.passed, public.output
 
-    record("run_started", initial_commit=task.initial_commit, controller="read-only-verifier-v2")
+    record(
+        "run_started",
+        initial_commit=task.initial_commit,
+        controller=(
+            "evidence-gated-checker-v5"
+            if strategy == "evidence_gated_loop"
+            else "read-only-verifier-v2"
+        ),
+    )
     base_prompt = build_agent_prompt(root, task)
     attempt = 0
     public_passed = False
@@ -285,7 +341,7 @@ def run_strategy(
         if public_passed:
             final_candidate = _snapshot(root)
             break
-        if strategy == "direct" or counters.model_calls >= budget.model_calls:
+        if strategy == "direct" or attempt >= 3 or counters.model_calls >= budget.model_calls:
             break
 
     if strategy == "maker_verifier" and public_passed and final_candidate is not None:
@@ -336,6 +392,63 @@ def run_strategy(
                 elif verdict.verdict == "ESCALATE":
                     fallback_used = True
                     record("candidate_fallback", candidate="A", reason="verifier_escalated")
+
+    if strategy == "evidence_gated_loop" and public_passed and final_candidate is not None:
+        candidate_a = final_candidate
+        record("candidate_checkpointed", candidate="A", sha256=_snapshot_digest(candidate_a))
+        checker_output = call("verifier", _checker_prompt(root, task, feedback))
+        checklist = _parse_or_escalate_checklist(checker_output)
+        if checklist is None:
+            verifier_protocol_error = checker_output is not None
+            verifier_verdict = "ESCALATE"
+            fallback_used = True
+            failure_reason = None
+            if verifier_protocol_error:
+                record("checker_protocol_error", phase="initial")
+            record("candidate_fallback", candidate="A", reason="checker_unavailable")
+        else:
+            verifier_verdict = checklist.verdict
+            record("checker_completed", verdict=checklist.verdict, checks=list(checklist.checks))
+            if checklist.verdict == "REJECT" and attempt < 3:
+                attempt += 1
+                revision = call("maker", _checklist_revision_prompt(root, task, checklist))
+                if revision is not None:
+                    revision_passed, revision_feedback = apply_and_test(revision)
+                    if revision_passed:
+                        candidate_b = _snapshot(root)
+                        record(
+                            "candidate_checkpointed",
+                            candidate="B",
+                            sha256=_snapshot_digest(candidate_b),
+                            selected=False,
+                        )
+                        recheck_output = call("verifier", _checker_prompt(root, task, revision_feedback))
+                        recheck = _parse_or_escalate_checklist(recheck_output)
+                        if recheck is None and recheck_output is not None:
+                            verifier_protocol_error = True
+                            record("checker_protocol_error", phase="revision")
+                        if recheck is not None:
+                            verifier_verdict = recheck.verdict
+                            record("checker_completed", verdict=recheck.verdict, checks=list(recheck.checks))
+                        if recheck is not None and recheck.verdict == "APPROVE":
+                            final_candidate = candidate_b
+                            record("candidate_selected", candidate="B")
+                        else:
+                            fallback_used = True
+                            final_candidate = candidate_a
+                            _restore(root, candidate_a)
+                            record("candidate_fallback", candidate="A", reason="revision_not_approved")
+                    else:
+                        fallback_used = True
+                        final_candidate = candidate_a
+                        _restore(root, candidate_a)
+                        record("candidate_fallback", candidate="A", reason=failure_reason)
+                else:
+                    fallback_used = True
+                    record("candidate_fallback", candidate="A", reason=failure_reason)
+            elif checklist.verdict != "APPROVE":
+                fallback_used = True
+                record("candidate_fallback", candidate="A", reason="checker_escalated_or_attempt_cap")
 
     objective_success = False
     candidate_a_success: bool | None = None
@@ -409,6 +522,35 @@ def _verifier_prompt(root: Path, task: TaskManifest) -> str:
     )
 
 
+def _checker_prompt(root: Path, task: TaskManifest, public_feedback: str) -> str:
+    maker_prompt = build_agent_prompt(root, task)
+    public_snapshot = "\n".join(maker_prompt.splitlines()[4:])
+    return (
+        "Act as a fresh read-only checker. Do not return edits and do not assume the maker is correct.\n\n"
+        + public_snapshot
+        + "\n\nSanitized public-test evidence:\n"
+        + public_feedback
+        + "\nEvaluate every required checklist item using only visible evidence. "
+        "The checks object has exactly five fixed keys: requirement_coverage, "
+        "boundary_conditions, state_and_side_effects, cross_file_contract, and regression_risk. "
+        "Fill each key exactly once. Keep location under 96 characters and evidence under 180 characters. "
+        "Missing public tests alone is not UNKNOWN: inspect the stated requirements and visible source. "
+        "Return FAIL only for a concrete visible defect with an actionable location; use UNKNOWN only "
+        "when the requirement or visible source is genuinely ambiguous."
+    )
+
+
+def _checklist_revision_prompt(
+    root: Path, task: TaskManifest, checklist: _ChecklistVerdict,
+) -> str:
+    failures = [check for check in checklist.checks if check["status"] == "FAIL"]
+    return build_agent_prompt(root, task) + (
+        "\n\nA read-only checker found these blocking issues in the current candidate:\n"
+        + json.dumps(failures, sort_keys=True)
+        + "\nReturn a complete corrected edit JSON only."
+    )
+
+
 def _revision_prompt(root: Path, task: TaskManifest, verdict: _Verdict) -> str:
     return build_agent_prompt(root, task) + (
         "\n\nA read-only verifier rejected Candidate A with these agent-visible findings:\n"
@@ -440,6 +582,33 @@ def _parse_verdict(text: str) -> _Verdict:
     if verdict == "REJECT" and not parsed:
         raise ValueError("REJECT requires at least one actionable finding")
     return _Verdict(verdict, tuple(parsed))
+
+
+def _parse_or_escalate_checklist(output: ModelOutput | None) -> _ChecklistVerdict | None:
+    if output is None:
+        return None
+    try:
+        raw = json.loads(output.text)
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        return None
+    if not isinstance(raw, dict) or set(raw) != {"checks"} or not isinstance(raw["checks"], dict):
+        return None
+    if set(raw["checks"]) != set(CHECKER_NAMES):
+        return None
+    parsed: list[dict[str, str]] = []
+    for name in CHECKER_NAMES:
+        check = raw["checks"][name]
+        if not isinstance(check, dict) or set(check) != {"status", "location", "evidence"}:
+            return None
+        if check["status"] not in {"PASS", "FAIL", "UNKNOWN"}:
+            return None
+        if not all(isinstance(check[key], str) and check[key].strip() for key in ("location", "evidence")):
+            return None
+        parsed.append({"name": name, **check})
+    verdict = "REJECT" if any(check["status"] == "FAIL" for check in parsed) else (
+        "ESCALATE" if any(check["status"] == "UNKNOWN" for check in parsed) else "APPROVE"
+    )
+    return _ChecklistVerdict(verdict, tuple(parsed))
 
 
 def _snapshot(root: Path) -> Snapshot:

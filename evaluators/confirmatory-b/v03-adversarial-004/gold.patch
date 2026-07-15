@@ -1,0 +1,16 @@
+diff --git a/src/solution.py b/src/solution.py
+index 202e8a6..add16e8 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,3 +1,10 @@
+ def relative_key(path):
++    if not isinstance(path, str) or not path or path.startswith(('/', '\\')):
++        raise ValueError('relative path required')
+     parts = path.replace('\\', '/').split('/')
+-    return '/'.join(part for part in parts if part not in {'', '.'})
++    if any(part == '..' for part in parts):
++        raise ValueError('traversal is forbidden')
++    usable = [part for part in parts if part not in {'', '.'}]
++    if not usable:
++        raise ValueError('empty key')
++    return '/'.join(usable)

@@ -1,0 +1,19 @@
+schema_version = 1
+id = "v03-localized-010"
+language = "python"
+category = "localized"
+source_type = "verifier_adversarial"
+license = "MIT"
+initial_commit = "72cdaa918935e2dd1e53c4646d0ed81a7761ee51"
+gold_patch_sha256 = "sha256:0927279962e0c9847e6aac529a318e7e0ed21fc479810117ba5a33f53be117bd"
+
+allowed_paths = ["src/**"]
+prohibited_paths = ["tests/**", ".edgeloop/**"]
+
+[public_test]
+command = ["python3", "-m", "unittest", "discover", "-s", "tests/public"]
+timeout_seconds = 30
+
+[hidden_evaluation]
+evaluator_id = "external-v03-localized-010"
+timeout_seconds = 30

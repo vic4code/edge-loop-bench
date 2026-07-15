@@ -1,0 +1,17 @@
+diff --git a/src/solution.py b/src/solution.py
+index e15940e..59df886 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,7 +1,9 @@
+ def sum_kind(rows, kind):
+     total = 0
+     for row in rows:
+-        print('processing', row)
+-        if row['kind'] == kind:
+-            total += row['amount']
++        if not isinstance(row, dict) or row.get('kind') != kind:
++            continue
++        amount = row.get('amount')
++        if isinstance(amount, (int, float)) and not isinstance(amount, bool):
++            total += amount
+     return total

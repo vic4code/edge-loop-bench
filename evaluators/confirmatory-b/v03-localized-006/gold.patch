@@ -1,0 +1,11 @@
+diff --git a/src/solution.py b/src/solution.py
+index e721dca..d41e2cd 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,4 +1,4 @@
+ def inclusive_window(values, start, end):
+-    if start < 0 or end < start:
++    if start < 0 or end < start or end >= len(values):
+         raise ValueError('invalid window')
+-    return values[start:end]
++    return values[start:end + 1]

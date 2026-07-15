@@ -1,0 +1,17 @@
+diff --git a/src/service.py b/src/service.py
+index 3ef0336..c7e24bc 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -1,7 +1,11 @@
+ from repository import counts
+ 
+ def reserve_units(state, sku, units):
++    if not isinstance(units, int) or isinstance(units, bool) or units <= 0:
++        return False
+     record = counts(state, sku)
++    if units > record['available']:
++        return False
+     record['available'] -= units
+     record['reserved'] += units
+-    return record['available'] >= 0
++    return True

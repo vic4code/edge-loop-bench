@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%23087b35%22/><path d=%22M8 10h16v4H12v4h10v4H8z%22 fill=%22white%22/></svg>">
+  <title>EdgeLoopBench results hub</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172019;
+      --muted: #5d685f;
+      --line: #dfe5df;
+      --paper: #f5f7f3;
+      --surface: #ffffff;
+      --green: #087b35;
+      --green-soft: #e8f5eb;
+      --amber: #925f00;
+      --amber-soft: #fff4d6;
+      --radius: 10px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: inherit; }
+    .shell { width: min(1120px, calc(100% - 32px)); margin: 0 auto; }
+    header {
+      padding: 56px 0 40px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+    .eyebrow {
+      margin: 0 0 12px;
+      color: var(--green);
+      font-size: 12px;
+      font-weight: 750;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    h1 { max-width: 800px; margin: 0; font: 700 clamp(38px, 6vw, 68px)/1.03 Georgia, serif; }
+    .lede { max-width: 760px; margin: 20px 0 0; color: var(--muted); font-size: 18px; }
+    main { padding: 40px 0 64px; }
+    section + section { margin-top: 48px; }
+    .section-head { display: flex; gap: 24px; align-items: end; justify-content: space-between; margin-bottom: 18px; }
+    h2 { margin: 0; font-size: 25px; line-height: 1.2; }
+    .section-note { max-width: 600px; margin: 0; color: var(--muted); font-size: 14px; }
+    .primary {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(250px, .7fr);
+      gap: 0;
+      overflow: hidden;
+      border: 1px solid #aed5b7;
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+    .primary-copy { padding: 30px; }
+    .badge {
+      display: inline-flex;
+      padding: 5px 9px;
+      border-radius: 999px;
+      color: var(--green);
+      background: var(--green-soft);
+      font-size: 11px;
+      font-weight: 750;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    h3 { margin: 14px 0 8px; font-size: 23px; }
+    .meta { margin: 0; color: var(--muted); }
+    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 24px 0; }
+    .metric { padding: 14px; border-left: 3px solid var(--green); background: #f7faf7; }
+    .metric strong { display: block; font-size: 22px; }
+    .metric span { color: var(--muted); font-size: 12px; }
+    .action {
+      display: inline-block;
+      padding: 11px 16px;
+      border-radius: 6px;
+      color: #fff;
+      background: var(--green);
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .action:focus-visible, .card a:focus-visible { outline: 3px solid #8ac89a; outline-offset: 3px; }
+    .primary-aside { padding: 30px; border-left: 1px solid #cfe4d4; background: var(--green-soft); }
+    .primary-aside strong { display: block; margin-bottom: 8px; }
+    .primary-aside p { margin: 0; color: #344a39; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .card { padding: 22px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+    .card h3 { margin-top: 8px; font-size: 19px; }
+    .card p { margin: 8px 0 16px; color: var(--muted); }
+    .card a { color: var(--green); font-weight: 700; text-underline-offset: 3px; }
+    .comparison { border-color: #e5cc92; background: #fffdf7; }
+    .historical { color: var(--amber); background: var(--amber-soft); }
+    .boundary { padding: 22px; border-left: 4px solid var(--amber); background: var(--amber-soft); }
+    .boundary strong { display: block; margin-bottom: 6px; }
+    .boundary p { margin: 0; }
+    footer { padding: 24px 0 40px; color: var(--muted); font-size: 13px; }
+    @media (max-width: 760px) {
+      header { padding-top: 36px; }
+      .primary, .grid { grid-template-columns: 1fr; }
+      .primary-aside { border-top: 1px solid #cfe4d4; border-left: 0; }
+      .metrics { grid-template-columns: 1fr; }
+      .section-head { display: block; }
+      .section-note { margin-top: 8px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="shell">
+      <p class="eyebrow">EdgeLoopBench · Results hub</p>
+      <h1>Every model result, with the boundaries intact.</h1>
+      <p class="lede">One current evidence-gated confirmatory result, one earlier controller result, and four historical model qualifications. They answer different questions, so this page keeps them visible without pooling them.</p>
+    </div>
+  </header>
+  <main class="shell">
+    <section aria-labelledby="current-title">
+      <div class="section-head">
+        <h2 id="current-title">Current formal result</h2>
+        <p class="section-note">v0.3 · fixed-key evidence checker · ConfirmatoryRepair-B-30 · complete coverage</p>
+      </div>
+      <article class="primary">
+        <div class="primary-copy">
+          <span class="badge">Current · 90/90 runs</span>
+          <h3>Qwen3.5 4B evidence-gated confirmatory</h3>
+          <p class="meta">The completed frozen v0.3 result: 30 fresh tasks across direct, retry, and evidence-gated loop arms.</p>
+          <div class="metrics" aria-label="Qwen3.5 4B headline results">
+            <div class="metric"><strong>33.3%</strong><span>Direct · 10/30</span></div>
+            <div class="metric"><strong>43.3%</strong><span>Bounded Retry · 13/30</span></div>
+            <div class="metric"><strong>43.3%</strong><span>Evidence Loop · 13/30</span></div>
+          </div>
+          <a class="action" href="current/index.html">Open the current detailed report</a>
+        </div>
+        <aside class="primary-aside">
+          <strong>What it says</strong>
+          <p>Retry rescued three tasks with no regressions. Evidence Loop matched Retry exactly, but used 2,002 more logical tokens and 30.9 more seconds per task. Its checker rejected all 38 reviews, including 13 correct incumbents, and selected no Candidate B.</p>
+        </aside>
+      </article>
+    </section>
+
+    <section aria-labelledby="history-title">
+      <div class="section-head">
+        <h2 id="history-title">Earlier and historical results</h2>
+        <p class="section-note">Kept for provenance; different suites and controller semantics are never pooled with v0.3</p>
+      </div>
+      <div class="grid">
+        <article class="card comparison">
+          <span class="badge historical">v0.2 · 90/90</span>
+          <h3>Earlier Qwen3.5 4B confirmatory</h3>
+          <p>Direct 10/30, Retry 14/30, and read-only Maker–Verifier 14/30 on the earlier ConfirmatoryRepair-30 suite.</p>
+          <a href="../v0.2/report/index.html">Open v0.2 report</a>
+        </article>
+        <article class="card comparison">
+          <span class="badge historical">Best historical overview</span>
+          <h3>Three-model comparison</h3>
+          <p>Qwen3.5 4B, Qwen3.5 9B, and Gemma 4 12B across 216/216 qualification runs.</p>
+          <a href="../archive/v0.1/reports/three-model-loop-comparison/index.html">Open comparison</a>
+        </article>
+        <article class="card">
+          <span class="badge historical">v0.1 · 72/72</span>
+          <h3>Qwen3.5 4B</h3>
+          <p>Direct 8/12, Retry 10/12, and review-and-revise 6/12 in each budget tier.</p>
+          <a href="../archive/v0.1/reports/qwen35-4b-full-report/index.html">Open historical report</a>
+        </article>
+        <article class="card">
+          <span class="badge historical">v0.1 · 72/72</span>
+          <h3>Qwen3.5 9B</h3>
+          <p>Direct 12/12, Retry 12/12, and review-and-revise 10/12 in each budget tier.</p>
+          <a href="../archive/v0.1/reports/qwen35-9b-full-report/index.html">Open historical report</a>
+        </article>
+        <article class="card">
+          <span class="badge historical">v0.1 · 72/72</span>
+          <h3>Gemma 4 12B</h3>
+          <p>Direct 10/12, Retry 10/12, and review-and-revise 8/12 in each budget tier.</p>
+          <a href="../archive/v0.1/reports/gemma4-12b-report/index.html">Open historical report</a>
+        </article>
+        <article class="card">
+          <span class="badge historical">v0.1 · 72/72</span>
+          <h3>Phi-4-mini</h3>
+          <p>Zero verified successes in every arm. Retained as a qualification failure, not silently discarded.</p>
+          <a href="../archive/v0.1/reports/phi4-mini-full-report/index.html">Open historical report</a>
+        </article>
+        <article class="card">
+          <span class="badge historical">Diagnostic · 2/72</span>
+          <h3>Early CLI qualification</h3>
+          <p>A deliberately incomplete Qwen3.5 4B smoke slice. Useful for harness history only.</p>
+          <a href="../archive/v0.1/reports/cli-qualification-report/index.html">Open diagnostic report</a>
+        </article>
+      </div>
+    </section>
+
+    <section class="boundary" aria-label="Interpretation boundary">
+      <strong>Do not compare the percentages across sections as one leaderboard.</strong>
+      <p>v0.1, v0.2, and v0.3 use different task suites and controller semantics. Cross-model results are historical qualification; only the top Qwen3.5 4B card is the current evidence-gated confirmatory result.</p>
+    </section>
+  </main>
+  <footer class="shell">Current raw JSONL remains append-only under <code>results/v0.3/raw/</code>; earlier artifacts remain under <code>results/v0.2/</code> and <code>results/archive/v0.1/</code>.</footer>
+</body>
+</html>

@@ -1,0 +1,16 @@
+diff --git a/src/solution.py b/src/solution.py
+index 9112dfd..65f2b53 100644
+--- a/src/solution.py
++++ b/src/solution.py
+@@ -1,5 +1,8 @@
+ def numeric_median(values):
++    if not values or any(not isinstance(v, (int, float)) or isinstance(v, bool) for v in values):
++        raise ValueError('numeric values required')
+     ordered = sorted(values)
+-    if not ordered:
+-        raise ValueError('empty')
+-    return float(ordered[len(ordered) // 2])
++    middle = len(ordered) // 2
++    if len(ordered) % 2:
++        return float(ordered[middle])
++    return (ordered[middle - 1] + ordered[middle]) / 2.0

@@ -1,0 +1,10 @@
+diff --git a/src/service.py b/src/service.py
+index 7ba9fbb..279587f 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -1,4 +1,4 @@
+ from policy import rebate_rate
+ 
+ def invoice_total(subtotal, member):
+-    return subtotal - rebate_rate(subtotal, member)
++    return round(subtotal * (1 - rebate_rate(subtotal, member)), 2)

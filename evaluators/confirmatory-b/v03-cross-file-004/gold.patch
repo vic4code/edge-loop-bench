@@ -1,0 +1,12 @@
+diff --git a/src/service.py b/src/service.py
+index 187b88c..e087aee 100644
+--- a/src/service.py
++++ b/src/service.py
+@@ -1,4 +1,6 @@
+ from policy import has_role
+ 
+ def can_publish(user, document):
+-    return has_role(user, 'editor') or document['status'] == 'draft'
++    if not isinstance(user, dict) or not isinstance(document, dict):
++        return False
++    return has_role(user, 'editor') and document.get('status') == 'draft'
