@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1
+FROM --platform=linux/arm64 ubuntu@sha256:2e05d3b43282818e548d97f7a7c4dd7cab14760603972353e5cecdac0839146b AS intercode-tools
+
+# BEGIN SHARED INTERCODE TOOL LAYER
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        bash \
+        bsdextrautils \
+        ca-certificates \
+        coreutils \
+        cpio \
+        curl \
+        debianutils \
+        diffutils \
+        dnsutils \
+        file \
+        findutils \
+        g++ \
+        gawk \
+        grep \
+        gzip \
+        hostname \
+        iproute2 \
+        iputils-ping \
+        jq \
+        less \
+        md5deep \
+        mount \
+        ncal \
+        ncompress \
+        net-tools \
+        procps \
+        psmisc \
+        python-is-python3 \
+        python3 \
+        rename \
+        sed \
+        tar \
+        tree \
+        util-linux \
+    && rm -rf /var/lib/apt/lists/*
+# END SHARED INTERCODE TOOL LAYER
+
+LABEL org.opencontainers.image.source="https://github.com/princeton-nlp/intercode" \
+      org.opencontainers.image.revision="c3e46d827cfc9d4c704ec078f7abf9f41e3191d8" \
+      org.edgeloopbench.role="non-scoring-evaluator-placeholder" \
+      org.edgeloopbench.runtime-network="none-required"
+
+COPY docker/intercode/evaluator_placeholder.py /opt/edgeloop/evaluator_placeholder.py
+RUN chmod 0555 /opt/edgeloop/evaluator_placeholder.py
+USER 65532:65532
+ENTRYPOINT ["python3", "/opt/edgeloop/evaluator_placeholder.py"]

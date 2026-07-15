@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1
+FROM --platform=linux/arm64 ubuntu@sha256:2e05d3b43282818e548d97f7a7c4dd7cab14760603972353e5cecdac0839146b AS intercode-tools
+
+# BEGIN SHARED INTERCODE TOOL LAYER
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        bash \
+        bsdextrautils \
+        ca-certificates \
+        coreutils \
+        cpio \
+        curl \
+        debianutils \
+        diffutils \
+        dnsutils \
+        file \
+        findutils \
+        g++ \
+        gawk \
+        grep \
+        gzip \
+        hostname \
+        iproute2 \
+        iputils-ping \
+        jq \
+        less \
+        md5deep \
+        mount \
+        ncal \
+        ncompress \
+        net-tools \
+        procps \
+        psmisc \
+        python-is-python3 \
+        python3 \
+        rename \
+        sed \
+        tar \
+        tree \
+        util-linux \
+    && rm -rf /var/lib/apt/lists/*
+# END SHARED INTERCODE TOOL LAYER
+
+LABEL org.opencontainers.image.source="https://github.com/princeton-nlp/intercode" \
+      org.opencontainers.image.revision="c3e46d827cfc9d4c704ec078f7abf9f41e3191d8" \
+      org.edgeloopbench.role="agent" \
+      org.edgeloopbench.runtime-network="none-required"
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ENV SOURCE_DATE_EPOCH=1685577598 TZ=UTC
+
+# Keep the dependency layer independent of the selected filesystem so fs1..fs4
+# share it. The build caller must select one explicit filesystem version.
+COPY docker/intercode/setup/ /opt/edgeloop/setup/
+ARG FILE_SYSTEM_VERSION=invalid
+RUN case "${FILE_SYSTEM_VERSION}" in 1|2|3|4) ;; *) exit 64 ;; esac \
+    && bash "/opt/edgeloop/setup/setup_nl2b_fs_${FILE_SYSTEM_VERSION}.sh" \
+    && rm -rf /opt/edgeloop/setup
+
+# Setup is the only root phase. Keep the upstream cwd while sticky-root mode
+# permits new top-level outputs without permitting deletion of root-owned paths.
+RUN chmod 1777 / \
+    && mkdir -p /home/agent /usr/workspace \
+    && chown 65532:65532 /home/agent /usr/workspace \
+    && for path in /testbed /system /workspace /backup; do \
+         if [[ -e "${path}" ]]; then chown -R 65532:65532 "${path}"; fi; \
+       done
+USER 65532:65532
+ENV HOME=/home/agent
+WORKDIR /
