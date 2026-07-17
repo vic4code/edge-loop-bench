@@ -42,6 +42,7 @@ INTERACTIVE_ARMS = (
 _STRATA = ("fs1", "fs2", "fs3", "fs4")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _REVISION = re.compile(r"^[a-z0-9][a-z0-9._/-]*-v[1-9][0-9]*$")
+_RUNTIME_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
 _LLAMA_CPP_COMMIT = "8c146a8366304c871efc26057cc90370ccf58dad"
 _CONSTRUCTION_SEAL = object()
 
@@ -235,12 +236,57 @@ class HostSafetyPins:
     calibration_and_pilot_max_requests: int = 304
     host_load_max_requests: int = 128
     confirmatory_max_requests: int = 3_800
+    docker_binary_sha256: str | None = None
+    docker_endpoint_sha256: str | None = None
+    docker_client_version: str | None = None
+    docker_server_version: str | None = None
+    ollama_runtime_binary_sha256: str | None = None
+    ollama_server_version: str | None = None
+    ollama_launch_environment_sha256: str | None = None
+    ollama_generation_endpoint_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _require_sha256(self.policy_sha256, "host safety policy")
         _require_sha256(
             self.telemetry_collector_sha256, "telemetry collector"
         )
+        docker_identity = (
+            self.docker_binary_sha256,
+            self.docker_endpoint_sha256,
+            self.docker_client_version,
+            self.docker_server_version,
+        )
+        if any(value is not None for value in docker_identity):
+            if any(value is None for value in docker_identity):
+                raise ValueError("Docker identity pins must be supplied together")
+            _require_sha256(self.docker_binary_sha256, "docker_binary_sha256")
+            _require_sha256(self.docker_endpoint_sha256, "docker_endpoint_sha256")
+            for field in ("docker_client_version", "docker_server_version"):
+                value = getattr(self, field)
+                if not isinstance(value, str) or _RUNTIME_VERSION.fullmatch(value) is None:
+                    raise ValueError(f"{field} must be an exact runtime version pin")
+        ollama_identity = (
+            self.ollama_runtime_binary_sha256,
+            self.ollama_server_version,
+            self.ollama_launch_environment_sha256,
+            self.ollama_generation_endpoint_sha256,
+        )
+        if any(value is not None for value in ollama_identity):
+            if any(value is None for value in ollama_identity):
+                raise ValueError("Ollama identity pins must be supplied together")
+            for field in (
+                "ollama_runtime_binary_sha256",
+                "ollama_launch_environment_sha256",
+                "ollama_generation_endpoint_sha256",
+            ):
+                _require_sha256(getattr(self, field), field)
+            if (
+                not isinstance(self.ollama_server_version, str)
+                or _RUNTIME_VERSION.fullmatch(self.ollama_server_version) is None
+            ):
+                raise ValueError(
+                    "ollama_server_version must be an exact runtime version pin"
+                )
         exact = {
             "require_ac_power": True,
             "require_low_power_mode_off": True,
@@ -467,6 +513,14 @@ def _core_record_from_components(
             for field in (
                 "policy_sha256",
                 "telemetry_collector_sha256",
+                "docker_binary_sha256",
+                "docker_endpoint_sha256",
+                "docker_client_version",
+                "docker_server_version",
+                "ollama_runtime_binary_sha256",
+                "ollama_server_version",
+                "ollama_launch_environment_sha256",
+                "ollama_generation_endpoint_sha256",
                 "require_ac_power",
                 "require_low_power_mode_off",
                 "require_no_thermal_warnings",

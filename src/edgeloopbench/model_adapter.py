@@ -9,12 +9,18 @@ import math
 import os
 import stat
 import subprocess
+from copy import deepcopy
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
+
+from .ollama_loopback_http import (
+    OllamaLoopbackHttpError,
+    parse_strict_json_object,
+)
 
 
 _SHA256_PREFIX = "sha256:"
@@ -739,7 +745,7 @@ class OllamaGenerationConfig:
     @property
     def canonical_definition(self) -> dict[str, object]:
         return {
-            "action_schema": _ACTION_JSON_SCHEMA,
+            "action_schema": deepcopy(_ACTION_JSON_SCHEMA),
             "draft_num_predict": self.draft_num_predict,
             "endpoint": self.endpoint,
             "frequency_penalty": self.frequency_penalty,
@@ -861,11 +867,9 @@ class OllamaRawModel:
         if not isinstance(response_bytes, bytes) or len(response_bytes) > _MAX_OLLAMA_RESPONSE_BYTES:
             raise RuntimeError("Ollama response is not bounded bytes")
         try:
-            response = json.loads(response_bytes.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            response = parse_strict_json_object(response_bytes)
+        except OllamaLoopbackHttpError as error:
             raise RuntimeError("Ollama returned invalid response JSON") from error
-        if not isinstance(response, Mapping):
-            raise RuntimeError("Ollama response must be an object")
         if (
             response.get("model") != self.config.model
             or response.get("done") is not True

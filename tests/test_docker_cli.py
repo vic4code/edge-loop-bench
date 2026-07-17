@@ -15,6 +15,7 @@ from edgeloopbench.docker_cli import (
     DockerLimits,
     DockerOrphanedResourceError,
     DockerSecurityError,
+    DockerTrustedState,
     MANAGED_LABEL,
     RUN_LABEL,
 )
@@ -105,6 +106,22 @@ def inspect_payload(
                 "org.edgeloopbench.role": "agent",
                 "org.edgeloopbench.instance": name,
                 "org.edgeloopbench.runtime-network": "none-required",
+                "org.edgeloopbench.filesystem-version": "1",
+                "org.edgeloopbench.state-collector.argv": (
+                    "/usr/bin/python3 -I -S -B /opt/edgeloop/state_collector.py "
+                    "--profile fsN"
+                ),
+                "org.edgeloopbench.state-collector.policy-sha256": (
+                    "sha256:" + "1" * 64
+                ),
+                "org.edgeloopbench.state-collector.profile": "fs1",
+                "org.edgeloopbench.state-collector.profile-set-sha256": (
+                    "sha256:" + "2" * 64
+                ),
+                "org.edgeloopbench.state-collector.root-baseline-sha256": (
+                    "sha256:" + "3" * 64
+                ),
+                "org.edgeloopbench.state-collector.sha256": "sha256:" + "4" * 64,
                 "org.opencontainers.image.revision": "c3e46d8",
             },
             "Volumes": None,
@@ -171,6 +188,24 @@ def image_inspect_stdout() -> str:
                     "Labels": {
                         "org.edgeloopbench.role": "agent",
                         "org.edgeloopbench.runtime-network": "none-required",
+                        "org.edgeloopbench.filesystem-version": "1",
+                        "org.edgeloopbench.state-collector.argv": (
+                            "/usr/bin/python3 -I -S -B "
+                            "/opt/edgeloop/state_collector.py --profile fsN"
+                        ),
+                        "org.edgeloopbench.state-collector.policy-sha256": (
+                            "sha256:" + "1" * 64
+                        ),
+                        "org.edgeloopbench.state-collector.profile": "fs1",
+                        "org.edgeloopbench.state-collector.profile-set-sha256": (
+                            "sha256:" + "2" * 64
+                        ),
+                        "org.edgeloopbench.state-collector.root-baseline-sha256": (
+                            "sha256:" + "3" * 64
+                        ),
+                        "org.edgeloopbench.state-collector.sha256": (
+                            "sha256:" + "4" * 64
+                        ),
                     }
                 },
             }
@@ -199,6 +234,36 @@ def trusted_container() -> DockerContainer:
         labels=tuple(sorted(labels.items())),
         spec=spec(),
     )
+
+
+def canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+
+
+def trusted_state_stdout(profile: str = "fs1") -> str:
+    payload = {
+        "common_roots": ["home/agent", "usr/workspace", "tmp", "var/tmp", "run/lock"],
+        "dynamic_root_policy": "non_baseline_top_level",
+        "entries": [],
+        "entry_count": 0,
+        "policy_sha256": "sha256:" + "1" * 64,
+        "profile": profile,
+        "profile_sha256": "sha256:" + "5" * 64,
+        "root_baseline_sha256": "sha256:" + "3" * 64,
+        "schema": "edgeloopbench.filesystem-state.v1",
+        "state_sha256": "sha256:" + "6" * 64,
+        "strict_surface": {"failures": [], "status": "representable"},
+        "task_roots": ["testbed"],
+        "total_file_bytes": 0,
+        "writable_surface_audit_sha256": "sha256:" + "7" * 64,
+    }
+    return canonical_json(payload) + "\n"
 
 
 class DockerCliTests(unittest.TestCase):
@@ -408,6 +473,134 @@ class DockerCliTests(unittest.TestCase):
         self.assertEqual(argv.count(action), 1)
         self.assertFalse(any(action in call for call, _ in runner.calls))
         self.assert_no_host_shell(runner)
+
+    def test_start_attests_exact_created_and_running_container(self) -> None:
+        runner = FakeRunner(
+            local_daemon_responses()
+            + [
+                (0, inspect_stdout(inspect_payload()), ""),
+                (0, CONTAINER_ID + "\n", ""),
+                (0, inspect_stdout(inspect_payload(running=True)), ""),
+            ]
+        )
+        container = trusted_container()
+
+        result = self.client(runner).start_container(container)
+
+        self.assertIs(result, container)
+        self.assertEqual(
+            runner.calls[3][0][-3:],
+            ("start", "--", CONTAINER_ID),
+        )
+        self.assertNotIn(NAME, runner.calls[3][0])
+        self.assert_no_host_shell(runner)
+
+    def test_start_rejects_wrong_post_state_after_exact_mutation(self) -> None:
+        runner = FakeRunner(
+            local_daemon_responses()
+            + [
+                (0, inspect_stdout(inspect_payload()), ""),
+                (0, CONTAINER_ID + "\n", ""),
+                (0, inspect_stdout(inspect_payload()), ""),
+            ]
+        )
+
+        with self.assertRaisesRegex(DockerSecurityError, "running"):
+            self.client(runner).start_container(trusted_container())
+
+    def test_trusted_state_uses_fixed_root_argv_and_validates_pins(self) -> None:
+        runner = FakeRunner(
+            local_daemon_responses()
+            + [
+                (0, inspect_stdout(inspect_payload(running=True)), ""),
+                (0, trusted_state_stdout(), ""),
+                (0, inspect_stdout(inspect_payload(running=True)), ""),
+            ]
+        )
+
+        result = self.client(runner).collect_trusted_state(
+            trusted_container(), profile="fs1"
+        )
+
+        self.assertIsInstance(result, DockerTrustedState)
+        self.assertEqual(result.state_sha256, "sha256:" + "6" * 64)
+        self.assertEqual(result.policy_sha256, "sha256:" + "1" * 64)
+        self.assertEqual(result.collector_source_sha256, "sha256:" + "4" * 64)
+        self.assertEqual(result.canonical_json + "\n", trusted_state_stdout())
+        self.assertEqual(
+            runner.calls[3][0][-11:],
+            (
+                "exec",
+                "--user",
+                "0:0",
+                CONTAINER_ID,
+                "/usr/bin/python3",
+                "-I",
+                "-S",
+                "-B",
+                "/opt/edgeloop/state_collector.py",
+                "--profile",
+                "fs1",
+            ),
+        )
+        self.assertNotIn("/bin/sh", runner.calls[3][0])
+        self.assertNotIn("/bin/bash", runner.calls[3][0])
+        self.assert_no_host_shell(runner)
+
+    def test_trusted_state_rejects_label_digest_and_payload_drift(self) -> None:
+        malformed_label = inspect_payload(running=True)
+        malformed_label["Config"]["Labels"][  # type: ignore[index]
+            "org.edgeloopbench.state-collector.sha256"
+        ] = "sha256:not-a-digest"
+        cases = (
+            (
+                malformed_label,
+                trusted_state_stdout(),
+                "digest labels",
+            ),
+            (
+                inspect_payload(running=True),
+                trusted_state_stdout().replace('"profile":"fs1"', '"profile":"fs2"'),
+                "profile",
+            ),
+            (
+                inspect_payload(running=True),
+                trusted_state_stdout().replace(
+                    '"policy_sha256":"sha256:' + "1" * 64 + '"',
+                    '"policy_sha256":"sha256:' + "9" * 64 + '"',
+                ),
+                "policy pin",
+            ),
+            (
+                inspect_payload(running=True),
+                trusted_state_stdout()[:-1] + " \n",
+                "canonical",
+            ),
+        )
+        for inspected, stdout, message in cases:
+            with self.subTest(message=message):
+                runner = FakeRunner(
+                    local_daemon_responses()
+                    + [
+                        (0, inspect_stdout(inspected), ""),
+                        (0, stdout, ""),
+                        (0, inspect_stdout(inspect_payload(running=True)), ""),
+                    ]
+                )
+                with self.assertRaisesRegex(DockerSecurityError, message):
+                    self.client(runner).collect_trusted_state(
+                        trusted_container(), profile="fs1"
+                    )
+
+    def test_trusted_state_rejects_profile_command_injection_before_docker(self) -> None:
+        runner = FakeRunner([])
+
+        with self.assertRaisesRegex(ValueError, "fs1 through fs4"):
+            self.client(runner).collect_trusted_state(
+                trusted_container(), profile="fs1; touch /host-marker"
+            )
+
+        self.assertEqual(runner.calls, [])
 
     def test_inspect_container_running_accepts_only_attested_running_or_exited_state(self) -> None:
         for expected, payload in (

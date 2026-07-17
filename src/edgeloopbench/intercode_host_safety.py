@@ -12,20 +12,29 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import time
+import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from .intercode_gate_manifest import HostSafetyPins
+from .ollama_loopback_http import (
+    OLLAMA_PS_URL,
+    OllamaLoopbackHttpError,
+    open_ollama_http,
+    parse_strict_json_object,
+    require_exact_ollama_response,
+)
 
 
-OLLAMA_PS_URL = "http://127.0.0.1:11434/api/ps"
 PMSET_BATTERY_ARGV = ("/usr/bin/pmset", "-g", "batt")
 PMSET_CUSTOM_ARGV = ("/usr/bin/pmset", "-g", "custom")
 VM_PRESSURE_ARGV = (
@@ -50,8 +59,10 @@ _MAX_PROBE_OUTPUT_BYTES = 65_536
 _MAX_OLLAMA_OUTPUT_BYTES = 1_048_576
 _PROBE_TIMEOUT_SECONDS = 5.0
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_TAGGED_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CONTAINER_ID = re.compile(r"^[0-9a-f]{64}$")
 _MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
+_DOCKER_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
 _BOOT_TIME = re.compile(
     rb"^\{ sec = ([0-9]+), usec = ([0-9]+) \}(?: .*)?\n?$"
 )
@@ -82,6 +93,60 @@ class StatVfs(Protocol):
 
 class HostTelemetryError(RuntimeError):
     """A required probe failed, exceeded its bound, or was unparseable."""
+
+
+@dataclass(frozen=True, slots=True)
+class DockerTelemetryPins:
+    """Exact local Docker identities accepted by the telemetry boundary."""
+
+    endpoint: str
+    client_version: str
+    server_version: str
+    binary_sha256: str
+
+    def __post_init__(self) -> None:
+        _require_local_docker_endpoint(self.endpoint)
+        for name in ("client_version", "server_version"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or _DOCKER_VERSION.fullmatch(value) is None:
+                raise ValueError(f"Docker {name} pin is invalid")
+        if (
+            not isinstance(self.binary_sha256, str)
+            or _TAGGED_DIGEST.fullmatch(self.binary_sha256) is None
+        ):
+            raise ValueError("Docker binary SHA-256 pin is invalid")
+
+    @property
+    def endpoint_sha256(self) -> str:
+        return "sha256:" + hashlib.sha256(self.endpoint.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class DockerDaemonIdentity:
+    """Path-free Docker client/endpoint/daemon identity for one sample."""
+
+    binary_sha256: str
+    endpoint_sha256: str
+    client_version: str
+    server_version: str
+
+    def __post_init__(self) -> None:
+        for name in ("binary_sha256", "endpoint_sha256"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or _TAGGED_DIGEST.fullmatch(value) is None:
+                raise ValueError(f"Docker identity {name} is invalid")
+        for name in ("client_version", "server_version"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or _DOCKER_VERSION.fullmatch(value) is None:
+                raise ValueError(f"Docker identity {name} is invalid")
+
+    def to_record(self) -> dict[str, str]:
+        return {
+            "binary_sha256": self.binary_sha256,
+            "endpoint_sha256": self.endpoint_sha256,
+            "client_version": self.client_version,
+            "server_version": self.server_version,
+        }
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -128,6 +193,7 @@ class HostSafetySample:
     disk_free_bytes: int
     resident_models: tuple[ResidentModel, ...]
     running_container_ids: tuple[str, ...]
+    docker_daemon: DockerDaemonIdentity | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -155,11 +221,17 @@ class HostSafetySample:
             or not 0 <= self.free_memory_percent <= 100
         ):
             raise ValueError("free_memory_percent must be an integer percentage")
+        if self.docker_daemon is not None and not isinstance(
+            self.docker_daemon, DockerDaemonIdentity
+        ):
+            raise ValueError(
+                "docker_daemon must be a DockerDaemonIdentity value or None"
+            )
         _require_models(self.resident_models, "resident models")
         _require_container_ids(self.running_container_ids, "running containers")
 
     def _content_record(self) -> dict[str, object]:
-        return {
+        record: dict[str, object] = {
             "schema": "edgeloopbench.host-safety-sample.v1",
             "captured_unix_ns": self.captured_unix_ns,
             "captured_monotonic_ns": self.captured_monotonic_ns,
@@ -175,6 +247,10 @@ class HostSafetySample:
             "resident_models": [model.to_record() for model in self.resident_models],
             "running_container_ids": list(self.running_container_ids),
         }
+        if self.docker_daemon is not None:
+            record["schema"] = "edgeloopbench.host-safety-sample.v2"
+            record["docker_daemon"] = self.docker_daemon.to_record()
+        return record
 
     @property
     def sha256(self) -> str:
@@ -186,6 +262,85 @@ class HostSafetySample:
         record = self._content_record()
         record["sample_sha256"] = self.sha256
         return record
+
+
+def parse_host_safety_sample(record: object) -> HostSafetySample:
+    """Reconstruct one exact path-free sample and verify its content digest."""
+
+    if not isinstance(record, Mapping):
+        raise ValueError("host safety sample record must be a mapping")
+    values = dict(record)
+    schema = values.get("schema")
+    base_fields = {
+        "schema",
+        "sample_sha256",
+        "captured_unix_ns",
+        "captured_monotonic_ns",
+        "boot_time_unix_microseconds",
+        "on_ac_power",
+        "low_power_mode_enabled",
+        "vm_pressure_level",
+        "free_memory_percent",
+        "swap_used_bytes",
+        "thermal_warning",
+        "performance_warning",
+        "disk_free_bytes",
+        "resident_models",
+        "running_container_ids",
+    }
+    if schema == "edgeloopbench.host-safety-sample.v1":
+        expected_fields = base_fields
+        daemon = None
+    elif schema == "edgeloopbench.host-safety-sample.v2":
+        expected_fields = base_fields | {"docker_daemon"}
+        raw_daemon = values.get("docker_daemon")
+        if not isinstance(raw_daemon, Mapping) or set(raw_daemon) != {
+            "binary_sha256",
+            "endpoint_sha256",
+            "client_version",
+            "server_version",
+        }:
+            raise ValueError("host safety Docker identity record is invalid")
+        daemon = DockerDaemonIdentity(**dict(raw_daemon))  # type: ignore[arg-type]
+    else:
+        raise ValueError("host safety sample schema is invalid")
+    if set(values) != expected_fields:
+        raise ValueError("host safety sample fields differ from the schema")
+
+    raw_models = values.get("resident_models")
+    if not isinstance(raw_models, list):
+        raise ValueError("host safety resident models record is invalid")
+    models: list[ResidentModel] = []
+    for raw_model in raw_models:
+        if not isinstance(raw_model, Mapping) or set(raw_model) != {"model", "digest"}:
+            raise ValueError("host safety resident model record is invalid")
+        models.append(ResidentModel(**dict(raw_model)))  # type: ignore[arg-type]
+    raw_containers = values.get("running_container_ids")
+    if not isinstance(raw_containers, list):
+        raise ValueError("host safety running containers record is invalid")
+
+    sample = HostSafetySample(
+        captured_unix_ns=values.get("captured_unix_ns"),  # type: ignore[arg-type]
+        captured_monotonic_ns=values.get("captured_monotonic_ns"),  # type: ignore[arg-type]
+        boot_time_unix_microseconds=values.get("boot_time_unix_microseconds"),  # type: ignore[arg-type]
+        on_ac_power=values.get("on_ac_power"),  # type: ignore[arg-type]
+        low_power_mode_enabled=values.get("low_power_mode_enabled"),  # type: ignore[arg-type]
+        vm_pressure_level=values.get("vm_pressure_level"),  # type: ignore[arg-type]
+        free_memory_percent=values.get("free_memory_percent"),  # type: ignore[arg-type]
+        swap_used_bytes=values.get("swap_used_bytes"),  # type: ignore[arg-type]
+        thermal_warning=values.get("thermal_warning"),  # type: ignore[arg-type]
+        performance_warning=values.get("performance_warning"),  # type: ignore[arg-type]
+        disk_free_bytes=values.get("disk_free_bytes"),  # type: ignore[arg-type]
+        resident_models=tuple(models),
+        running_container_ids=tuple(raw_containers),
+        docker_daemon=daemon,
+    )
+    digest = values.get("sample_sha256")
+    if type(digest) is not str or _TAGGED_DIGEST.fullmatch(digest) is None:
+        raise ValueError("host safety sample digest is invalid")
+    if sample.sha256 != digest:
+        raise ValueError("host safety sample digest differs from its content")
+    return sample
 
 
 class HostSafetyAction(str, Enum):
@@ -211,6 +366,7 @@ class HostSafetyReason(str, Enum):
     SAMPLE_ORDER = "sample_order"
     COOLDOWN_TIMEOUT = "cooldown_timeout"
     BOOT_IDENTITY = "boot_identity"
+    DOCKER_IDENTITY = "docker_identity"
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,18 +387,59 @@ class HostTelemetryCollector:
         *,
         docker_binary: Path,
         docker_data_path: Path,
+        docker_pins: DockerTelemetryPins | None = None,
+        environment: Mapping[str, str] | None = None,
+        docker_binary_sha256: Callable[[Path], str] | None = None,
         runner: CommandRunner = subprocess.run,
-        urlopen: UrlOpen = urllib.request.urlopen,
+        urlopen: UrlOpen = open_ollama_http,
         statvfs: StatVfs = os.statvfs,
         time_ns: Callable[[], int] = time.time_ns,
         monotonic_ns: Callable[[], int] = time.monotonic_ns,
     ) -> None:
-        if not isinstance(docker_binary, Path) or not docker_binary.is_absolute():
-            raise ValueError("docker_binary must be an absolute Path")
-        if not isinstance(docker_data_path, Path) or not docker_data_path.is_absolute():
-            raise ValueError("docker_data_path must be an absolute Path")
+        if (
+            not isinstance(docker_binary, Path)
+            or not docker_binary.is_absolute()
+            or Path(os.path.normpath(os.fspath(docker_binary))) != docker_binary
+            or "\x00" in os.fspath(docker_binary)
+        ):
+            raise ValueError("docker_binary must be a canonical absolute Path")
+        if (
+            not isinstance(docker_data_path, Path)
+            or not docker_data_path.is_absolute()
+            or Path(os.path.normpath(os.fspath(docker_data_path))) != docker_data_path
+            or "\x00" in os.fspath(docker_data_path)
+        ):
+            raise ValueError("docker_data_path must be a canonical absolute Path")
+        if docker_pins is not None and not isinstance(
+            docker_pins, DockerTelemetryPins
+        ):
+            raise ValueError("docker_pins must be a DockerTelemetryPins value or None")
+        inherited: dict[str, str] | None = None
+        if docker_pins is not None or environment is not None:
+            inherited = dict(os.environ if environment is None else environment)
+            if "DOCKER_HOST" in inherited or "DOCKER_CONTEXT" in inherited:
+                raise HostTelemetryError(
+                    "inherited DOCKER_HOST or DOCKER_CONTEXT is not admitted"
+                )
+            if any(
+                not isinstance(key, str)
+                or not isinstance(value, str)
+                or not key
+                or "=" in key
+                or "\x00" in key
+                or "\x00" in value
+                for key, value in inherited.items()
+            ):
+                raise ValueError("telemetry subprocess environment is invalid")
+        if docker_binary_sha256 is not None and not callable(docker_binary_sha256):
+            raise ValueError("docker_binary_sha256 must be callable")
         self._docker_binary = docker_binary
+        self._docker_pins = docker_pins
         self._docker_data_path = docker_data_path
+        self._environment = inherited
+        self._docker_binary_sha256 = (
+            docker_binary_sha256 or attest_docker_executable
+        )
         self._runner = runner
         self._urlopen = urlopen
         self._statvfs = statvfs
@@ -250,16 +447,44 @@ class HostTelemetryCollector:
         self._monotonic_ns = monotonic_ns
 
     def collect(self) -> HostSafetySample:
+        docker_binary_sha256: str | None = None
+        if self._docker_pins is not None:
+            docker_binary_sha256 = self._read_docker_binary_sha256()
         outputs = {argv: self._run_probe(argv) for argv in _FIXED_PROBE_ARGV}
-        docker_argv = (
-            str(self._docker_binary),
-            "ps",
-            "--quiet",
-            "--no-trunc",
-        )
+        docker_daemon: DockerDaemonIdentity | None = None
+        if self._docker_pins is None:
+            docker_argv = (
+                str(self._docker_binary),
+                "ps",
+                "--quiet",
+                "--no-trunc",
+            )
+        else:
+            assert docker_binary_sha256 is not None
+            docker_daemon = self._read_docker_daemon_identity(
+                docker_binary_sha256
+            )
+            docker_argv = (
+                str(self._docker_binary),
+                "--host",
+                self._docker_pins.endpoint,
+                "container",
+                "ls",
+                "--quiet",
+                "--no-trunc",
+                "--filter",
+                "status=running",
+            )
         docker_output = self._run_probe(docker_argv)
         models = self._read_ollama_models()
         disk_free = self._read_disk_free_bytes()
+        if (
+            docker_binary_sha256 is not None
+            and self._read_docker_binary_sha256() != docker_binary_sha256
+        ):
+            raise HostTelemetryError(
+                "Docker binary changed during telemetry collection"
+            )
         on_ac_power = _parse_ac_power(outputs[PMSET_BATTERY_ARGV])
         low_power = _parse_low_power_mode(
             outputs[PMSET_CUSTOM_ARGV], on_ac_power=on_ac_power
@@ -283,17 +508,20 @@ class HostTelemetryCollector:
             disk_free_bytes=disk_free,
             resident_models=models,
             running_container_ids=_parse_container_ids(docker_output),
+            docker_daemon=docker_daemon,
         )
 
     def _run_probe(self, argv: tuple[str, ...]) -> bytes:
+        kwargs: dict[str, object] = {
+            "shell": False,
+            "capture_output": True,
+            "check": False,
+            "timeout": _PROBE_TIMEOUT_SECONDS,
+        }
+        if self._environment is not None:
+            kwargs["env"] = dict(self._environment)
         try:
-            completed = self._runner(
-                list(argv),
-                shell=False,
-                capture_output=True,
-                check=False,
-                timeout=_PROBE_TIMEOUT_SECONDS,
-            )
+            completed = self._runner(list(argv), **kwargs)
         except (OSError, subprocess.SubprocessError) as error:
             raise HostTelemetryError("required host telemetry probe failed") from error
         if type(completed.returncode) is not int or completed.returncode != 0:
@@ -311,24 +539,74 @@ class HostTelemetryCollector:
             raise HostTelemetryError("host telemetry probe wrote unexpected stderr")
         return completed.stdout
 
+    def _read_docker_binary_sha256(self) -> str:
+        assert self._docker_pins is not None
+        try:
+            value = self._docker_binary_sha256(self._docker_binary)
+        except (OSError, ValueError) as error:
+            raise HostTelemetryError("Docker binary identity probe failed") from error
+        if not isinstance(value, str) or _TAGGED_DIGEST.fullmatch(value) is None:
+            raise HostTelemetryError("Docker binary identity probe is invalid")
+        if value != self._docker_pins.binary_sha256:
+            raise HostTelemetryError("Docker binary identity differs from its pin")
+        return value
+
+    def _read_docker_daemon_identity(
+        self, binary_sha256: str
+    ) -> DockerDaemonIdentity:
+        assert self._docker_pins is not None
+        payload = self._run_probe(
+            (
+                str(self._docker_binary),
+                "--host",
+                self._docker_pins.endpoint,
+                "version",
+                "--format",
+                "{{json .}}",
+            )
+        )
+        client_version, server_version = _parse_docker_versions(payload)
+        if (
+            client_version != self._docker_pins.client_version
+            or server_version != self._docker_pins.server_version
+        ):
+            raise HostTelemetryError(
+                "Docker client or server version differs from its pin"
+            )
+        return DockerDaemonIdentity(
+            binary_sha256=binary_sha256,
+            endpoint_sha256=self._docker_pins.endpoint_sha256,
+            client_version=client_version,
+            server_version=server_version,
+        )
+
     def _read_ollama_models(self) -> tuple[ResidentModel, ...]:
         request = urllib.request.Request(
             OLLAMA_PS_URL,
             method="GET",
             headers={"Accept": "application/json"},
         )
+        if request.full_url != OLLAMA_PS_URL:
+            raise HostTelemetryError("Ollama residency probe URL is invalid")
         try:
             with self._urlopen(request, _PROBE_TIMEOUT_SECONDS) as response:
+                require_exact_ollama_response(response, expected_url=OLLAMA_PS_URL)
                 payload = response.read(_MAX_OLLAMA_OUTPUT_BYTES + 1)
-        except (OSError, TimeoutError, ValueError) as error:
+        except (
+            OllamaLoopbackHttpError,
+            OSError,
+            TimeoutError,
+            ValueError,
+            urllib.error.URLError,
+        ) as error:
             raise HostTelemetryError("Ollama residency probe failed") from error
         if not isinstance(payload, bytes):
             raise HostTelemetryError("Ollama residency probe returned non-byte output")
         if len(payload) > _MAX_OLLAMA_OUTPUT_BYTES:
             raise HostTelemetryError("Ollama residency output exceeded its bound")
         try:
-            parsed = json.loads(payload)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            parsed = parse_strict_json_object(payload)
+        except OllamaLoopbackHttpError as error:
             raise HostTelemetryError("Ollama residency output is invalid JSON") from error
         if not isinstance(parsed, dict) or set(parsed) != {"models"}:
             raise HostTelemetryError("Ollama residency response shape is invalid")
@@ -380,8 +658,10 @@ class HostSafetyPolicy:
     def evaluate_admission(
         self,
         sample: HostSafetySample,
-        expected: ExpectedHostResources,
+        expected: ExpectedHostResources | None = None,
     ) -> HostSafetyDecision:
+        if expected is None:
+            expected = ExpectedHostResources()
         _require_policy_inputs(sample, expected)
         reasons: list[HostSafetyReason] = []
         if self._pins.require_ac_power and not sample.on_ac_power:
@@ -398,6 +678,7 @@ class HostSafetyPolicy:
         if sample.disk_free_bytes < self._pins.admission_disk_free_bytes_minimum:
             reasons.append(HostSafetyReason.DISK_SPACE)
         _append_warning_reasons(sample, reasons)
+        _append_docker_identity_reason(sample, self._pins, reasons)
         _append_resource_reasons(sample, expected, reasons)
         return _decision(reasons)
 
@@ -453,6 +734,7 @@ class HostSafetyPolicy:
         ):
             reasons.append(HostSafetyReason.BLOCK_SWAP_GROWTH)
         _append_warning_reasons(sample, reasons)
+        _append_docker_identity_reason(sample, self._pins, reasons)
         _append_resource_reasons(sample, expected, reasons)
         return _decision(reasons)
 
@@ -504,6 +786,12 @@ class HostSafetyPolicy:
             if value.free_memory_percent < self._pins.cooldown_free_percent_minimum:
                 _append_once(reasons, HostSafetyReason.FREE_MEMORY)
             _append_warning_reasons(value, reasons, unique=True)
+            _append_docker_identity_reason(
+                value,
+                self._pins,
+                reasons,
+                unique=True,
+            )
             _append_resource_reasons(value, expected, reasons, unique=True)
         if (
             second.swap_used_bytes - first.swap_used_bytes
@@ -623,6 +911,102 @@ def _parse_container_ids(output: bytes) -> tuple[str, ...]:
     return values
 
 
+def _parse_docker_versions(output: bytes) -> tuple[str, str]:
+    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate Docker version field")
+            value[key] = item
+        return value
+
+    try:
+        parsed = json.loads(output, object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise HostTelemetryError("Docker version output is invalid JSON") from error
+    if not isinstance(parsed, dict):
+        raise HostTelemetryError("Docker version output shape is invalid")
+    client = parsed.get("Client")
+    server = parsed.get("Server")
+    if not isinstance(client, dict) or not isinstance(server, dict):
+        raise HostTelemetryError("Docker version output shape is invalid")
+    client_version = client.get("Version")
+    server_version = server.get("Version")
+    if (
+        not isinstance(client_version, str)
+        or _DOCKER_VERSION.fullmatch(client_version) is None
+        or not isinstance(server_version, str)
+        or _DOCKER_VERSION.fullmatch(server_version) is None
+    ):
+        raise HostTelemetryError("Docker version identity is invalid")
+    return client_version, server_version
+
+
+def _require_local_docker_endpoint(endpoint: object) -> None:
+    if not isinstance(endpoint, str) or "\x00" in endpoint or "%" in endpoint:
+        raise ValueError("Docker endpoint must be an absolute local Unix socket")
+    parsed = urlsplit(endpoint)
+    if (
+        parsed.scheme != "unix"
+        or parsed.netloc
+        or not parsed.path.startswith("/")
+        or parsed.query
+        or parsed.fragment
+        or os.path.normpath(parsed.path) != parsed.path
+        or endpoint != "unix://" + parsed.path
+    ):
+        raise ValueError("Docker endpoint must be an absolute local Unix socket")
+
+
+def attest_docker_executable(path: Path) -> str:
+    """Hash one safe executable through the telemetry boundary's exact policy."""
+
+    if type(path) is not type(Path()) or not path.is_absolute():
+        raise ValueError("Docker binary attestation path is invalid")
+    if path.is_symlink():
+        raise ValueError("Docker binary path is a symlink")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise HostTelemetryError("Docker binary identity probe failed") from error
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > 256 << 20
+            or not before.st_mode & stat.S_IXUSR
+            or before.st_mode & stat.S_IWOTH
+        ):
+            raise HostTelemetryError("Docker binary identity is unsafe")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1 << 20)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        identity_fields = (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_nlink",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        if any(getattr(before, field) != getattr(after, field) for field in identity_fields):
+            raise HostTelemetryError("Docker binary changed while hashing")
+        link = os.stat(path, follow_symlinks=False)
+        if (link.st_dev, link.st_ino) != (after.st_dev, after.st_ino):
+            raise HostTelemetryError("Docker binary path identity changed")
+        return "sha256:" + digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
 def _require_models(models: object, label: str) -> None:
     if not isinstance(models, tuple) or any(
         not isinstance(model, ResidentModel) for model in models
@@ -680,6 +1064,34 @@ def _append_resource_reasons(
         append(reasons, HostSafetyReason.RESIDENT_MODELS)
     if sample.running_container_ids != expected.running_container_ids:
         append(reasons, HostSafetyReason.RUNNING_CONTAINERS)
+
+
+def _append_docker_identity_reason(
+    sample: HostSafetySample,
+    pins: HostSafetyPins,
+    reasons: list[HostSafetyReason],
+    *,
+    unique: bool = False,
+) -> None:
+    expected = (
+        pins.docker_binary_sha256,
+        pins.docker_endpoint_sha256,
+        pins.docker_client_version,
+        pins.docker_server_version,
+    )
+    if expected == (None, None, None, None):
+        return
+    daemon = sample.docker_daemon
+    if daemon is None or (
+        daemon.binary_sha256,
+        daemon.endpoint_sha256,
+        daemon.client_version,
+        daemon.server_version,
+    ) != expected:
+        (_append_once if unique else list.append)(
+            reasons,
+            HostSafetyReason.DOCKER_IDENTITY,
+        )
 
 
 def _append_once(

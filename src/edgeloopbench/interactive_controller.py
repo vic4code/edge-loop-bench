@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import unicodedata
 from dataclasses import dataclass
 from hashlib import sha256
@@ -40,8 +41,9 @@ INTERACTIVE_STRATEGIES = (
     "raw_feedback_loop",
     "engineered_loop",
 )
-INTERACTIVE_CONTROLLER_REVISION = "interactive-controller-v3-terminal-finalization"
+INTERACTIVE_CONTROLLER_REVISION = "interactive-controller-v4-v07-preregistered-topology"
 MAX_ACTION_BYTES = 8 * 1024
+_SHA256_REFERENCE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 PARSER_RETRY_OBSERVATION = (
     "Invalid response. Return exactly one JSON object with one non-empty "
     'single-line string field named "command".'
@@ -206,6 +208,7 @@ def run_interactive_strategy(
     budget: InteractiveBudget,
     replicate_seed: int,
     event_log: str | Path,
+    execution_authority_sha256: str | None = None,
 ) -> InteractiveResult:
     """Execute one preregistered interactive arm and select one checkpoint."""
 
@@ -213,6 +216,11 @@ def run_interactive_strategy(
         raise ValueError(f"unsupported interactive strategy: {strategy}")
     if isinstance(replicate_seed, bool) or not isinstance(replicate_seed, int):
         raise ValueError("replicate_seed must be an integer")
+    if execution_authority_sha256 is not None and (
+        type(execution_authority_sha256) is not str
+        or _SHA256_REFERENCE.fullmatch(execution_authority_sha256) is None
+    ):
+        raise ValueError("execution authority must be a lowercase SHA-256")
 
     counters = _Counters()
     environment: InteractiveEnvironment | None = None
@@ -224,6 +232,8 @@ def run_interactive_strategy(
     context_id = _context_id(task, strategy, replicate_seed, 1)
     stop_reason = "attempt_budget_exhausted"
     infrastructure_reason: str | None = None
+    action_counts: dict[str, int] = {}
+    state_counts: dict[str, int] = {}
     signature_counts: dict[str, int] = {}
     episode_error: BaseException | None = None
 
@@ -231,14 +241,22 @@ def run_interactive_strategy(
     if existing_journal.record_count or existing_journal.partial_tail is not None:
         raise ValueError("interactive event journal must be empty before an episode starts")
 
+    event_identity: dict[str, object] = {
+        "task_id": task.task_id,
+        "strategy": strategy,
+        "replicate_seed": replicate_seed,
+    }
+    if execution_authority_sha256 is not None:
+        event_identity["execution_authority_sha256"] = (
+            execution_authority_sha256
+        )
+
     def record(event_type: str, **fields: object) -> None:
         append_journal_event(
             event_log,
             {
                 "type": event_type,
-                "task_id": task.task_id,
-                "strategy": strategy,
-                "replicate_seed": replicate_seed,
+                **event_identity,
                 **fields,
             },
         )
@@ -428,6 +446,8 @@ def run_interactive_strategy(
                             best_reward=best.reward if best is not None else 0.0,
                             score_delta=-(best.reward) if best is not None else 0.0,
                             rollback_performed=False,
+                            repeated_action_count=0,
+                            repeated_state_count=0,
                             repeated_signature_count=0,
                             restored_state_sha256=None,
                         )
@@ -436,6 +456,7 @@ def run_interactive_strategy(
                         output.text,
                         PARSER_RETRY_OBSERVATION,
                         0.0,
+                        exit_code=None,
                         controller_packet=controller_packet,
                     )
                 continue
@@ -510,11 +531,22 @@ def run_interactive_strategy(
                     close_environment(current_environment, scope=f"attempt-{attempt}")
                     independent_environments.remove(current_environment)
 
+                repeated_action_count = 0
+                repeated_state_count = 0
                 repeated_signature_count = 0
                 if strategy == "engineered_loop":
-                    signature = _progress_signature(action, execution, 0.0)
-                    signature_counts[signature] = signature_counts.get(signature, 0) + 1
-                    repeated_signature_count = signature_counts[signature]
+                    (
+                        repeated_action_count,
+                        repeated_state_count,
+                        repeated_signature_count,
+                    ) = _increment_repeat_counts(
+                        action_counts=action_counts,
+                        state_counts=state_counts,
+                        signature_counts=signature_counts,
+                        action=action,
+                        execution=execution,
+                        reward=0.0,
+                    )
 
                 if strategy == "direct":
                     stop_reason = "direct_action_policy_failure"
@@ -533,6 +565,8 @@ def run_interactive_strategy(
                             best_reward=best_reward,
                             score_delta=-best_reward,
                             rollback_performed=False,
+                            repeated_action_count=repeated_action_count,
+                            repeated_state_count=repeated_state_count,
                             repeated_signature_count=repeated_signature_count,
                             restored_state_sha256=execution.state_sha256,
                         )
@@ -541,6 +575,7 @@ def run_interactive_strategy(
                         output.text,
                         execution.observation,
                         0.0,
+                        exit_code=execution.exit_code,
                         controller_packet=controller_packet,
                     )
                     if strategy == "engineered_loop" and repeated_signature_count >= 3:
@@ -580,10 +615,16 @@ def run_interactive_strategy(
                 evaluation_kind=evaluation.evaluation_kind,
                 attempt=attempt,
             )
-            selected = candidate
+            if strategy == "independent_verified_sampling":
+                if selected is None or candidate.reward > selected.reward:
+                    selected = candidate
+            else:
+                selected = candidate
 
             rollback_performed = False
             restored_state_sha256: str | None = None
+            repeated_action_count = 0
+            repeated_state_count = 0
             repeated_signature_count = 0
             if strategy == "engineered_loop":
                 prior_best_reward = best.reward if best is not None else 0.0
@@ -609,9 +650,18 @@ def run_interactive_strategy(
                         attempt=attempt,
                         state_sha256=best.checkpoint.state_sha256,
                     )
-                signature = _progress_signature(action, execution, candidate.reward)
-                signature_counts[signature] = signature_counts.get(signature, 0) + 1
-                repeated_signature_count = signature_counts[signature]
+                (
+                    repeated_action_count,
+                    repeated_state_count,
+                    repeated_signature_count,
+                ) = _increment_repeat_counts(
+                    action_counts=action_counts,
+                    state_counts=state_counts,
+                    signature_counts=signature_counts,
+                    action=action,
+                    execution=execution,
+                    reward=candidate.reward,
+                )
 
             if evaluation.official_success:
                 selected = candidate
@@ -637,6 +687,8 @@ def run_interactive_strategy(
                         best_reward=best.reward,
                         score_delta=float(evaluation.reward) - prior_best_reward,
                         rollback_performed=rollback_performed,
+                        repeated_action_count=repeated_action_count,
+                        repeated_state_count=repeated_state_count,
                         repeated_signature_count=repeated_signature_count,
                         restored_state_sha256=restored_state_sha256,
                     )
@@ -645,6 +697,7 @@ def run_interactive_strategy(
                     output.text,
                     execution.observation,
                     float(evaluation.reward),
+                    exit_code=execution.exit_code,
                     controller_packet=controller_packet,
                 )
                 if strategy == "engineered_loop":
@@ -827,10 +880,16 @@ def _append_feedback(
     observation: str,
     reward: float,
     *,
+    exit_code: int | None,
     controller_packet: str | None = None,
 ) -> None:
     rendered_reward = _render_reward(reward)
-    feedback = f"Output: {observation}\nReward: {rendered_reward}"
+    rendered_exit_code = "null" if exit_code is None else str(exit_code)
+    feedback = (
+        f"Output: {observation}\n"
+        f"Exit status: {rendered_exit_code}\n"
+        f"Reward: {rendered_reward}"
+    )
     if controller_packet is not None:
         feedback += "\n" + controller_packet
     transcript.extend(
@@ -852,6 +911,8 @@ def _engineered_packet(
     best_reward: float,
     score_delta: float,
     rollback_performed: bool,
+    repeated_action_count: int,
+    repeated_state_count: int,
     repeated_signature_count: int,
     restored_state_sha256: str | None,
 ) -> str:
@@ -871,6 +932,7 @@ def _engineered_packet(
         "last_command": action,
         "last_command_sha256": _text_digest(action) if action is not None else None,
         "last_output": execution.observation if execution is not None else None,
+        "exit_status": execution.exit_code if execution is not None else None,
         "output_sha256": execution.output_sha256 if execution is not None else None,
         "admissible": execution.admissible if execution is not None else False,
         "state_changed": execution.state_changed if execution is not None else False,
@@ -881,6 +943,8 @@ def _engineered_packet(
         "reward": reward,
         "best_reward": best_reward,
         "score_delta": score_delta,
+        "repeated_action_count": repeated_action_count,
+        "repeated_state_count": repeated_state_count,
         "repeated_signature_count": repeated_signature_count,
         "rollback_performed": rollback_performed,
         "restored_state_sha256": restored_state_sha256,
@@ -903,7 +967,7 @@ def _progress_signature(
     execution: ActionExecution,
     reward: float,
 ) -> str:
-    normalized_action = " ".join(action.split())
+    normalized_action = _normalized_action(action)
     payload = json.dumps(
         {
             "action": normalized_action,
@@ -914,6 +978,33 @@ def _progress_signature(
         separators=(",", ":"),
     )
     return _text_digest(payload)
+
+
+def _increment_repeat_counts(
+    *,
+    action_counts: dict[str, int],
+    state_counts: dict[str, int],
+    signature_counts: dict[str, int],
+    action: str,
+    execution: ActionExecution,
+    reward: float,
+) -> tuple[int, int, int]:
+    normalized_action = _normalized_action(action)
+    action_counts[normalized_action] = action_counts.get(normalized_action, 0) + 1
+    state_counts[execution.state_sha256] = (
+        state_counts.get(execution.state_sha256, 0) + 1
+    )
+    signature = _progress_signature(action, execution, reward)
+    signature_counts[signature] = signature_counts.get(signature, 0) + 1
+    return (
+        action_counts[normalized_action],
+        state_counts[execution.state_sha256],
+        signature_counts[signature],
+    )
+
+
+def _normalized_action(action: str) -> str:
+    return " ".join(action.split())
 
 
 def _context_id(

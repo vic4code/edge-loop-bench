@@ -12,7 +12,7 @@ import stat
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import InitVar, asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Protocol, Sequence
 
@@ -36,6 +36,7 @@ _REVISION = "c3e46d827cfc9d4c704ec078f7abf9f41e3191d8"
 _TAGGED_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MANIFEST_SCHEMA = "edgeloopbench.intercode-image-build-manifest.v2"
+_VERIFIED_BUILD_SCHEMA = "edgeloopbench.intercode-image-build-verification.v1"
 _MAX_MANIFEST_BYTES = 1 << 20
 _MAX_DOCKER_STDOUT_BYTES = 8 << 20
 _MAX_DOCKER_STDERR_BYTES = 1 << 20
@@ -86,6 +87,7 @@ _CONTEXT_ASSETS = {
         "sha256:5479a1cafa260c77e836e8601ba9a345d39df777dc9cb07d6a93f0ac29b69166"
     ),
 }
+_VERIFIED_BUILD_SEAL = object()
 
 
 class InterCodeImageBuildError(RuntimeError):
@@ -128,6 +130,51 @@ class InterCodeImageBuildResult:
     resumed_profiles: tuple[str, ...]
     built_profiles: tuple[str, ...]
     image_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class VerifiedInterCodeImageBuild:
+    """Path-free proof that one complete build result was securely reopened."""
+
+    plan_sha256: str
+    manifest_sha256: str
+    profiles: tuple[str, ...]
+    image_ids: tuple[str, ...]
+    verification_sha256: str
+    _construction_seal: InitVar[object | None] = None
+
+    def __post_init__(self, _construction_seal: object | None) -> None:
+        if _construction_seal is not _VERIFIED_BUILD_SEAL:
+            raise InterCodeImageBuildError(
+                "verified image builds are verifier-sealed"
+            )
+        _validate_verified_build(self)
+
+    @property
+    def image_id_by_profile(self) -> dict[str, str]:
+        _validate_verified_build(self)
+        return dict(zip(self.profiles, self.image_ids, strict=True))
+
+    def canonical_record(self) -> dict[str, object]:
+        _validate_verified_build(self)
+        return {
+            **_verified_build_core(
+                plan_sha256=self.plan_sha256,
+                manifest_sha256=self.manifest_sha256,
+                profiles=self.profiles,
+                image_ids=self.image_ids,
+            ),
+            "verification_sha256": self.verification_sha256,
+        }
+
+    def require_admitted(self) -> None:
+        _validate_verified_build(self)
+
+    def __repr__(self) -> str:
+        return (
+            "<VerifiedInterCodeImageBuild "
+            f"plan={self.plan_sha256} images={len(self.image_ids)}>"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -666,6 +713,144 @@ def execute_intercode_image_build(
         )
     finally:
         lock.close()
+
+
+def verify_intercode_image_build_result(
+    plan: InterCodeImageBuildPlan,
+    *,
+    manifest_path: Path,
+    result: InterCodeImageBuildResult,
+    runner: DockerBuildRunner = subprocess.run,
+    environment: Mapping[str, str] | None = None,
+) -> VerifiedInterCodeImageBuild:
+    """Securely reopen and re-attest one exact complete four-image result."""
+
+    if type(plan) is not InterCodeImageBuildPlan:
+        raise InterCodeImageBuildError("image-build plan must be typed")
+    if type(result) is not InterCodeImageBuildResult:
+        raise InterCodeImageBuildError("image-build result must be typed")
+    plan.canonical_record()
+    _require_manifest_location(manifest_path)
+    inherited = dict(os.environ if environment is None else environment)
+    if "DOCKER_HOST" in inherited or "DOCKER_CONTEXT" in inherited:
+        raise InterCodeImageBuildError(
+            "inherited DOCKER_HOST or DOCKER_CONTEXT is not admitted"
+        )
+    if any(
+        not isinstance(key, str)
+        or not isinstance(value, str)
+        or not key
+        or "=" in key
+        or "\x00" in key
+        or "\x00" in value
+        for key, value in inherited.items()
+    ):
+        raise InterCodeImageBuildError("Docker subprocess environment is invalid")
+
+    lock = _RepositoryBuildLock(plan._repo_root)
+    journal: _ManifestJournal | None = None
+    try:
+        _assert_plan_inputs_unchanged(plan)
+        _require_private_parent(manifest_path.parent, create=False)
+        journal = _ManifestJournal(manifest_path, create=False)
+        payload = journal.read()
+        _header, records = _parse_manifest(payload, plan)
+        expected_profiles = tuple(entry.profile for entry in plan.entries)
+        expected_images = tuple(record.image_id for record in records)
+        if (
+            len(records) != len(plan.entries)
+            or result.plan_sha256 != plan.plan_sha256
+            or result.manifest_sha256
+            != "sha256:" + hashlib.sha256(payload).hexdigest()
+            or result.image_ids != expected_images
+            or result.resumed_profiles + result.built_profiles
+            != expected_profiles
+        ):
+            raise InterCodeImageBuildError(
+                "image-build result differs from the reopened manifest"
+            )
+        for entry, record in zip(plan.entries, records, strict=True):
+            evidence = _inspect_exact_image(
+                plan,
+                entry,
+                image_id=record.image_id,
+                runner=runner,
+                environment=inherited,
+            )
+            if _digest(evidence) != record.inspection_sha256:
+                raise InterCodeImageBuildError(
+                    "verified image inspection differs from build evidence"
+                )
+        _assert_plan_inputs_unchanged(plan)
+        if journal.read() != payload:
+            raise InterCodeImageBuildError(
+                "private image manifest changed during verification"
+            )
+        journal.revalidate()
+        core = _verified_build_core(
+            plan_sha256=plan.plan_sha256,
+            manifest_sha256=result.manifest_sha256,
+            profiles=expected_profiles,
+            image_ids=expected_images,
+        )
+        return VerifiedInterCodeImageBuild(
+            plan_sha256=plan.plan_sha256,
+            manifest_sha256=result.manifest_sha256,
+            profiles=expected_profiles,
+            image_ids=expected_images,
+            verification_sha256=_digest(core),
+            _construction_seal=_VERIFIED_BUILD_SEAL,
+        )
+    finally:
+        if journal is not None:
+            journal.close()
+        lock.close()
+
+
+def _verified_build_core(
+    *,
+    plan_sha256: str,
+    manifest_sha256: str,
+    profiles: tuple[str, ...],
+    image_ids: tuple[str, ...],
+) -> dict[str, object]:
+    return {
+        "schema": _VERIFIED_BUILD_SCHEMA,
+        "plan_sha256": plan_sha256,
+        "manifest_sha256": manifest_sha256,
+        "images": [
+            {"profile": profile, "image_id": image_id}
+            for profile, image_id in zip(profiles, image_ids, strict=True)
+        ],
+    }
+
+
+def _validate_verified_build(value: VerifiedInterCodeImageBuild) -> None:
+    if (
+        type(value.plan_sha256) is not str
+        or _TAGGED_DIGEST.fullmatch(value.plan_sha256) is None
+        or type(value.manifest_sha256) is not str
+        or _TAGGED_DIGEST.fullmatch(value.manifest_sha256) is None
+        or value.profiles != ("fs1", "fs2", "fs3", "fs4")
+        or type(value.image_ids) is not tuple
+        or len(value.image_ids) != 4
+        or any(
+            type(image_id) is not str or _IMAGE_ID.fullmatch(image_id) is None
+            for image_id in value.image_ids
+        )
+        or len(set(value.image_ids)) != 4
+    ):
+        raise InterCodeImageBuildError("verified image-build fields are invalid")
+    expected = _digest(
+        _verified_build_core(
+            plan_sha256=value.plan_sha256,
+            manifest_sha256=value.manifest_sha256,
+            profiles=value.profiles,
+            image_ids=value.image_ids,
+        )
+    )
+    if value.verification_sha256 != expected:
+        raise InterCodeImageBuildError("verified image-build root is invalid")
 
 
 def _execute_intercode_image_build_locked(

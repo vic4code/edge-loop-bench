@@ -23,7 +23,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from enum import Enum
 from hashlib import sha256
 from typing import Protocol, cast
@@ -50,6 +50,7 @@ _PROCESS_LINE = re.compile(
     rb"[ \t]+([A-Za-z0-9_.-]+)"
 )
 _HEALTHY_IDLE_STATE = re.compile(r"^S[<NLsl+]*$")
+_BOUNDARY_IDENTITY_SEAL = object()
 
 
 class ActionDisposition(str, Enum):
@@ -144,6 +145,36 @@ class DockerActionLimits:
             "io_queue_chunks",
             maximum=_MAX_IO_QUEUE_CHUNKS,
         )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class DockerActionExecutorBoundaryIdentity:
+    """Read-only binding of one executor to its exact Docker CLI object."""
+
+    boundary: object = field(repr=False, compare=False)
+    expected_docker_binary: str
+    expected_endpoint: str
+    _seal: InitVar[object | None] = None
+
+    def __post_init__(self, _seal: object | None) -> None:
+        if _seal is not _BOUNDARY_IDENTITY_SEAL:
+            raise ValueError(
+                "Docker action boundary identities must be executor-issued"
+            )
+        if not callable(getattr(self.boundary, "prepare_exec_action", None)):
+            raise ValueError("Docker action boundary identity is invalid")
+        if (
+            not isinstance(self.expected_docker_binary, str)
+            or not os.path.isabs(self.expected_docker_binary)
+            or os.path.normpath(self.expected_docker_binary)
+            != self.expected_docker_binary
+            or "\x00" in self.expected_docker_binary
+        ):
+            raise ValueError("Docker action boundary binary path is invalid")
+        _require_local_endpoint(self.expected_endpoint)
+
+    def __repr__(self) -> str:
+        return "<DockerActionExecutorBoundaryIdentity>"
 
 
 @dataclass(frozen=True)
@@ -449,6 +480,17 @@ class DockerActionExecutor:
         self._expected_docker_binary = expected_docker_binary
         self._expected_endpoint = expected_endpoint
         self._env = {"LANG": "C", "LC_ALL": "C"}
+
+    @property
+    def boundary_identity(self) -> DockerActionExecutorBoundaryIdentity:
+        """Return the immutable executor-to-Docker boundary binding."""
+
+        return DockerActionExecutorBoundaryIdentity(
+            boundary=self._boundary,
+            expected_docker_binary=self._expected_docker_binary,
+            expected_endpoint=self._expected_endpoint,
+            _seal=_BOUNDARY_IDENTITY_SEAL,
+        )
 
     def execute(
         self,

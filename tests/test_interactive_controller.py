@@ -344,7 +344,7 @@ class InteractiveControllerTests(unittest.TestCase):
             digest("recovery-1-hang"),
         )
         self.assertIn(
-            f"Output: {frozen_observation}\nReward: 0.0",
+            f"Output: {frozen_observation}\nExit status: null\nReward: 0.0",
             requests[1].prompt,
         )
         self.assertEqual(
@@ -515,6 +515,87 @@ class InteractiveControllerTests(unittest.TestCase):
         self.assertNotIn("Reward:", requests[1].prompt)
         self.assertNotIn("wrong", requests[1].prompt)
 
+    def test_independent_sampling_selects_highest_progress_with_earliest_tie(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            factory = FakeEnvironmentFactory(
+                effects={
+                    "early-best": ("early", digest("early-best-state"), True),
+                    "equal-later": ("equal", digest("equal-later-state"), True),
+                    "regress": ("regress", digest("regress-state"), True),
+                },
+                rewards={
+                    "early-best": 0.75,
+                    "equal-later": 0.75,
+                    "regress": 0.25,
+                },
+            )
+            selected: list[EnvironmentCheckpoint] = []
+
+            def strict(checkpoint: EnvironmentCheckpoint) -> StrictEvaluation:
+                selected.append(checkpoint)
+                return StrictEvaluation(False, digest("strict-false"))
+
+            result, _requests = self.execute_strategy(
+                directory,
+                strategy="independent_verified_sampling",
+                outputs=[
+                    self.output("early-best"),
+                    self.output("equal-later"),
+                    self.output("regress"),
+                ],
+                factory=factory,
+                strict_evaluate=strict,
+                attempts=3,
+            )
+
+        self.assertEqual(result.model_calls, 3)
+        self.assertEqual(selected[0].state_sha256, digest("early-best-state"))
+        selection, _limit = factory.terminal_calls[0]
+        self.assertEqual(selection.selected_attempt, 1)
+
+    def test_raw_and_engineered_feedback_include_exit_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            for strategy in ("raw_feedback_loop", "engineered_loop"):
+                with self.subTest(strategy=strategy):
+                    factory = FakeEnvironmentFactory(
+                        rewards={"inspect": 0.25, "finish": 1.0}
+                    )
+                    _result, requests = self.execute_strategy(
+                        directory,
+                        strategy=strategy,
+                        outputs=[self.output("inspect"), self.output("finish")],
+                        factory=factory,
+                    )
+                    self.assertIn("Exit status: 0", requests[1].prompt)
+
+    def test_engineered_packet_separates_repeated_action_and_state_counts(self) -> None:
+        shared_state = digest("shared-state")
+        with tempfile.TemporaryDirectory() as directory:
+            factory = FakeEnvironmentFactory(
+                effects={
+                    "inspect-a": ("first", shared_state, True),
+                    "inspect-b": ("second", shared_state, True),
+                    "finish": ("done", digest("done"), True),
+                },
+                rewards={"inspect-a": 0.25, "inspect-b": 0.25, "finish": 1.0},
+            )
+            _result, requests = self.execute_strategy(
+                directory,
+                strategy="engineered_loop",
+                outputs=[
+                    self.output("inspect-a"),
+                    self.output("inspect-b"),
+                    self.output("finish"),
+                ],
+                factory=factory,
+                attempts=3,
+            )
+
+        third_prompt = requests[2].prompt
+        self.assertIn('"repeated_action_count": 1', third_prompt)
+        self.assertIn('"repeated_state_count": 2', third_prompt)
+        self.assertIn('"repeated_signature_count": 1', third_prompt)
+
     def test_raw_loop_appends_exact_observation_and_reward_in_one_context(self) -> None:
         observation = "line one\nline two"
         with tempfile.TemporaryDirectory() as directory:
@@ -535,7 +616,10 @@ class InteractiveControllerTests(unittest.TestCase):
         self.assertTrue(result.official_success)
         self.assertEqual(len(factory.environments), 1)
         self.assertEqual(requests[0].context_id, requests[1].context_id)
-        self.assertIn(f"Output: {observation}\nReward: 0.25", requests[1].prompt)
+        self.assertIn(
+            f"Output: {observation}\nExit status: 0\nReward: 0.25",
+            requests[1].prompt,
+        )
         self.assertTrue(requests[1].prompt.endswith("<|assistant|>"))
         self.assertNotIn("Controller state:", requests[0].prompt)
         self.assertNotIn("Controller state:", requests[1].prompt)

@@ -13,7 +13,17 @@ from edgeloopbench.intercode_local_model import (
     LocalModelAttestationError,
     attest_local_ollama_model,
 )
+from edgeloopbench.intercode_managed_ollama import (
+    OllamaEndpointObservation,
+    launch_managed_v07_ollama,
+)
 from edgeloopbench.model_adapter import QWEN35_RAW_PROFILE
+
+
+NO_SERVER_VERSION_OUTPUT = (
+    b"Warning: could not connect to a running Ollama instance\n"
+    b"Warning: client version is 0.31.1\n"
+)
 
 
 def tagged(payload: bytes) -> str:
@@ -34,6 +44,47 @@ class FakeRunner:
             self.before_return()
         returncode, stdout, stderr = self.response
         return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+
+class FakeProcess:
+    pid = 4242
+
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.returncode = 0
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+    def wait(self, timeout: float) -> int:
+        del timeout
+        assert self.returncode is not None
+        return self.returncode
+
+
+class FakeLauncher:
+    def __init__(self) -> None:
+        self.process = FakeProcess()
+
+    def __call__(self, argv: list[str], **kwargs: object) -> FakeProcess:
+        del argv, kwargs
+        return self.process
+
+
+class FakeEndpointInspector:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> OllamaEndpointObservation:
+        self.calls += 1
+        if self.calls == 1:
+            return OllamaEndpointObservation(False, None, ())
+        return OllamaEndpointObservation(True, "0.31.1", (4242,))
 
 
 class LocalModelFixture:
@@ -108,15 +159,24 @@ class LocalModelFixture:
             model_artifact_sha256=self.model_digest,
         )
 
-    def attest(self, runner: FakeRunner):
+    def launch_runtime(self, runner: FakeRunner | None = None):  # type: ignore[no-untyped-def]
+        return launch_managed_v07_ollama(
+            runtime_binary=self.binary,
+            expected_runtime_binary_sha256=tagged(self.binary.read_bytes()),
+            inherited_environment={"HOME": "/Users/tester"},
+            version_runner=runner
+            or FakeRunner((0, NO_SERVER_VERSION_OUTPUT, b"")),
+            process_launcher=FakeLauncher(),
+            endpoint_inspector=FakeEndpointInspector(),
+            sleeper=lambda _seconds: None,
+        )
+
+    def attest(self, runtime):  # type: ignore[no-untyped-def]
         return attest_local_ollama_model(
             profile=self.profile,
             models_root=self.models,
             runtime_binary=self.binary,
-            runtime_version="0.31.1",
-            runtime_binary_sha256=tagged(self.binary.read_bytes()),
-            kv_cache_quantization="q8_0",
-            runner=runner,
+            runtime_receipt=runtime.receipt,
         )
 
 
@@ -124,8 +184,10 @@ class LocalModelAttestationTests(unittest.TestCase):
     def test_attests_manifest_config_blob_runtime_and_separate_quantization(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = LocalModelFixture(Path(directory))
-            runner = FakeRunner((0, b"ollama version is 0.31.1\n", b""))
-            attestation = fixture.attest(runner)
+            runner = FakeRunner((0, NO_SERVER_VERSION_OUTPUT, b""))
+            runtime = fixture.launch_runtime(runner)
+            attestation = fixture.attest(runtime)
+            runtime.close()
 
         self.assertEqual(attestation.model, "qwen3.5:4b")
         self.assertEqual(attestation.model_manifest_sha256, tagged(fixture.manifest_bytes))
@@ -160,71 +222,57 @@ class LocalModelAttestationTests(unittest.TestCase):
                 else:
                     path = fixture.blobs / fixture.model_digest.replace(":", "-")
                     path.write_bytes(fixture.model_bytes + b"x")
+                runtime = fixture.launch_runtime()
                 with self.assertRaises(LocalModelAttestationError):
-                    fixture.attest(FakeRunner((0, b"ollama version is 0.31.1\n", b"")))
+                    fixture.attest(runtime)
+                runtime.close()
 
     def test_symlinked_manifest_blob_or_runtime_is_rejected(self) -> None:
-        for target in ("manifest", "model", "runtime"):
+        for target in ("manifest", "model"):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
                 fixture = LocalModelFixture(Path(directory))
                 if target == "manifest":
                     path = fixture.manifest
                 elif target == "model":
                     path = fixture.blobs / fixture.model_digest.replace(":", "-")
-                else:
-                    path = fixture.binary
                 replacement = path.with_name(path.name + ".real")
                 path.rename(replacement)
                 path.symlink_to(replacement)
+                runtime = fixture.launch_runtime()
                 with self.assertRaises(LocalModelAttestationError):
-                    fixture.attest(FakeRunner((0, b"ollama version is 0.31.1\n", b"")))
+                    fixture.attest(runtime)
+                runtime.close()
 
-    def test_runtime_is_rechecked_after_the_version_probe(self) -> None:
+    def test_runtime_is_rechecked_against_the_live_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = LocalModelFixture(Path(directory))
-            runner = FakeRunner((0, b"ollama version is 0.31.1\n", b""))
-            runner.before_return = lambda: fixture.binary.write_bytes(b"changed runtime")
+            runtime = fixture.launch_runtime()
+            fixture.binary.write_bytes(b"changed runtime")
             with self.assertRaises(LocalModelAttestationError):
-                fixture.attest(runner)
+                fixture.attest(runtime)
+            runtime.close()
 
-    def test_runtime_probe_is_bounded_exact_and_fail_closed(self) -> None:
-        responses = (
-            (1, b"", b"failed"),
-            (0, b"ollama version is 0.31.2\n", b""),
-            (0, b"x" * 65_537, b""),
-            (0, b"ollama version is 0.31.1\n", b"warning"),
-        )
-        for response in responses:
-            with self.subTest(response=response), tempfile.TemporaryDirectory() as directory:
-                fixture = LocalModelFixture(Path(directory))
-                with self.assertRaises(LocalModelAttestationError):
-                    fixture.attest(FakeRunner(response))
+    def test_closed_runtime_receipt_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = LocalModelFixture(Path(directory))
+            runtime = fixture.launch_runtime()
+            runtime.close()
+            with self.assertRaises(LocalModelAttestationError):
+                fixture.attest(runtime)
 
     def test_only_safe_registry_tags_and_quantization_labels_are_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = LocalModelFixture(Path(directory))
-            runner = FakeRunner((0, b"ollama version is 0.31.1\n", b""))
+            runtime = fixture.launch_runtime()
             unsafe = dataclasses.replace(fixture.profile, model="../escape:4b")
             with self.assertRaises(LocalModelAttestationError):
                 attest_local_ollama_model(
                     profile=unsafe,
                     models_root=fixture.models,
                     runtime_binary=fixture.binary,
-                    runtime_version="0.31.1",
-                    runtime_binary_sha256=tagged(fixture.binary.read_bytes()),
-                    kv_cache_quantization="q8_0",
-                    runner=runner,
+                    runtime_receipt=runtime.receipt,
                 )
-            with self.assertRaises(LocalModelAttestationError):
-                attest_local_ollama_model(
-                    profile=fixture.profile,
-                    models_root=fixture.models,
-                    runtime_binary=fixture.binary,
-                    runtime_version="0.31.1",
-                    runtime_binary_sha256=tagged(fixture.binary.read_bytes()),
-                    kv_cache_quantization="q8 0",
-                    runner=runner,
-                )
+            runtime.close()
 
 
 if __name__ == "__main__":

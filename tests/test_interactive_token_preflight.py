@@ -204,7 +204,7 @@ class InteractiveTokenPreflightTests(unittest.TestCase):
         )
         self.assertEqual(
             records[0]["controller_revision"],
-            "interactive-controller-v3-terminal-finalization",
+            "interactive-controller-v4-v07-preregistered-topology",
         )
         self.assertEqual(records[2]["reason"], "prompt_budget")
         self.assertEqual(records[2]["prompt_tokens"], 21)
@@ -406,7 +406,7 @@ class InteractiveTokenPreflightTests(unittest.TestCase):
         )
         self.assertEqual(
             preparer.messages[1][2].content,
-            "Output: ok\nReward: 0.25",
+            "Output: ok\nExit status: 0\nReward: 0.25",
         )
 
 

@@ -8,6 +8,7 @@ Streaming, lifecycle orchestration, and checkpointing belong to later slices.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -16,7 +17,7 @@ import secrets
 import subprocess
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass, field
 from decimal import Decimal
 from pathlib import PurePosixPath
 from typing import Never, Protocol, cast
@@ -28,11 +29,34 @@ RUN_LABEL = "org.edgeloopbench.run"
 ROLE_LABEL = "org.edgeloopbench.role"
 INSTANCE_LABEL = "org.edgeloopbench.instance"
 RUNTIME_NETWORK_LABEL = "org.edgeloopbench.runtime-network"
+FILESYSTEM_VERSION_LABEL = "org.edgeloopbench.filesystem-version"
+STATE_COLLECTOR_ARGV_LABEL = "org.edgeloopbench.state-collector.argv"
+STATE_COLLECTOR_POLICY_LABEL = "org.edgeloopbench.state-collector.policy-sha256"
+STATE_COLLECTOR_PROFILE_LABEL = "org.edgeloopbench.state-collector.profile"
+STATE_COLLECTOR_PROFILE_SET_LABEL = (
+    "org.edgeloopbench.state-collector.profile-set-sha256"
+)
+STATE_COLLECTOR_ROOT_LABEL = (
+    "org.edgeloopbench.state-collector.root-baseline-sha256"
+)
+STATE_COLLECTOR_SOURCE_LABEL = "org.edgeloopbench.state-collector.sha256"
 MANAGED_VALUE = "v0.6"
 _RUNTIME_LABEL_KEYS = frozenset(
     {MANAGED_LABEL, RUN_LABEL, ROLE_LABEL, INSTANCE_LABEL}
 )
-_ALLOWED_PROJECT_LABEL_KEYS = _RUNTIME_LABEL_KEYS | {RUNTIME_NETWORK_LABEL}
+_IMAGE_METADATA_LABEL_KEYS = frozenset(
+    {
+        FILESYSTEM_VERSION_LABEL,
+        RUNTIME_NETWORK_LABEL,
+        STATE_COLLECTOR_ARGV_LABEL,
+        STATE_COLLECTOR_POLICY_LABEL,
+        STATE_COLLECTOR_PROFILE_LABEL,
+        STATE_COLLECTOR_PROFILE_SET_LABEL,
+        STATE_COLLECTOR_ROOT_LABEL,
+        STATE_COLLECTOR_SOURCE_LABEL,
+    }
+)
+_ALLOWED_PROJECT_LABEL_KEYS = _RUNTIME_LABEL_KEYS | _IMAGE_METADATA_LABEL_KEYS
 
 CONTAINER_HOSTNAME = "edgeloop-agent"
 CONTAINER_USER = "65532:65532"
@@ -66,8 +90,14 @@ _RUN_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?$")
 _ROLE_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,10}[a-z0-9])?$")
 _CONTEXT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _NONCE_PATTERN = re.compile(r"^[0-9a-f]{16}$")
+_STATE_PROFILE_PATTERN = re.compile(r"^fs[1-4]$")
 _MAX_ACTION_BYTES = 8 * 1024
 _MAX_CWD_BYTES = 4 * 1024
+_MAX_TRUSTED_STATE_BYTES = 4 * 1024 * 1024
+_STATE_COLLECTOR_ARGV = (
+    "/usr/bin/python3 -I -S -B /opt/edgeloop/state_collector.py --profile fsN"
+)
+_BOUNDARY_IDENTITY_SEAL = object()
 
 
 class SubprocessRunner(Protocol):
@@ -199,6 +229,22 @@ class DockerContainer:
     spec: DockerContainerSpec
 
 
+@dataclass(frozen=True, slots=True)
+class DockerTrustedState:
+    """Validated canonical output from the image-pinned state collector."""
+
+    canonical_json: str = field(repr=False)
+    state_sha256: str
+    profile: str
+    profile_sha256: str
+    policy_sha256: str
+    root_baseline_sha256: str
+    writable_surface_audit_sha256: str
+    collector_source_sha256: str
+    strict_representable: bool
+    strict_failures: tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class PreparedDockerExec:
     """Validated argv for the later bounded streaming action executor."""
@@ -213,6 +259,50 @@ class DockerAdmission:
     context: str
     endpoint: str
     running_container_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class DockerCliBoundaryIdentity:
+    """Read-only identity of the exact pathful Docker CLI boundary.
+
+    The local binary path remains out of journals and manifests.  Production
+    composition may attest that path against the path-free host pin without
+    reading ``DockerCli`` implementation attributes.
+    """
+
+    expected_context: str
+    expected_endpoint: str
+    docker_binary: str
+    endpoint_sha256: str
+    _seal: InitVar[object | None] = None
+
+    def __post_init__(self, _seal: object | None) -> None:
+        if _seal is not _BOUNDARY_IDENTITY_SEAL:
+            raise DockerSecurityError(
+                "Docker CLI boundary identities must be DockerCli-issued"
+            )
+        if not _CONTEXT_PATTERN.fullmatch(self.expected_context):
+            raise DockerSecurityError("Docker CLI boundary context is invalid")
+        _require_local_endpoint(self.expected_endpoint)
+        if (
+            not isinstance(self.docker_binary, str)
+            or not os.path.isabs(self.docker_binary)
+            or os.path.normpath(self.docker_binary) != self.docker_binary
+            or "\x00" in self.docker_binary
+        ):
+            raise DockerSecurityError("Docker CLI boundary binary path is invalid")
+        expected_sha256 = "sha256:" + hashlib.sha256(
+            self.expected_endpoint.encode("utf-8")
+        ).hexdigest()
+        if self.endpoint_sha256 != expected_sha256:
+            raise DockerSecurityError("Docker CLI boundary endpoint root is invalid")
+
+    def __repr__(self) -> str:
+        return (
+            "<DockerCliBoundaryIdentity "
+            f"context={self.expected_context!r} "
+            f"endpoint_sha256={self.endpoint_sha256}>"
+        )
 
 
 class DockerCli:
@@ -253,6 +343,19 @@ class DockerCli:
         self._docker_binary = docker_binary
         self._nonce_factory = nonce_factory
         self._command_timeout_seconds = float(command_timeout_seconds)
+
+    @property
+    def boundary_identity(self) -> DockerCliBoundaryIdentity:
+        """Return the immutable context, endpoint, and binary path binding."""
+
+        return DockerCliBoundaryIdentity(
+            expected_context=self._expected_context,
+            expected_endpoint=self._expected_endpoint,
+            docker_binary=self._docker_binary,
+            endpoint_sha256="sha256:"
+            + hashlib.sha256(self._expected_endpoint.encode("utf-8")).hexdigest(),
+            _seal=_BOUNDARY_IDENTITY_SEAL,
+        )
 
     def admit(self, *, require_no_running: bool = True) -> DockerAdmission:
         """Verify the local daemon identity and list running containers.
@@ -362,6 +465,69 @@ class DockerCli:
         raise DockerSecurityError(
             "container creation became ambiguous; exact-label resource was removed"
         ) from cause
+
+    def start_container(self, container: DockerContainer) -> DockerContainer:
+        """Start one exact created container and attest the running result."""
+
+        self._require_container_handle(container)
+        self._verify_local_daemon()
+        self._attest_container_lifecycle(container, lifecycle="created")
+        result = self._invoke("container", "start", "--", container.identifier)
+        self._attest_container_lifecycle(container, lifecycle="running")
+        reported = self._single_line(result.stdout, "Docker container start result")
+        if reported != container.identifier:
+            raise DockerSecurityError(
+                "Docker container start did not report the exact full id"
+            )
+        return container
+
+    def collect_trusted_state(
+        self,
+        container: DockerContainer,
+        *,
+        profile: str,
+    ) -> DockerTrustedState:
+        """Run only the image-pinned, root-owned logical-state collector."""
+
+        self._require_container_handle(container)
+        _require_state_profile(profile)
+        self._verify_local_daemon()
+        inspected = self._attest_container_lifecycle(
+            container, lifecycle="running"
+        )
+        collector_labels = self._validate_collector_labels(
+            inspected, profile=profile
+        )
+        result = self._invoke(
+            "container",
+            "exec",
+            "--user",
+            "0:0",
+            container.identifier,
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            "-B",
+            "/opt/edgeloop/state_collector.py",
+            "--profile",
+            profile,
+        )
+        # Collection is logically read-only. Re-attest before accepting any
+        # evidence so plausible JSON cannot hide lifecycle or identity drift.
+        self._attest_container_lifecycle(container, lifecycle="running")
+        if result.stderr:
+            raise DockerSecurityError("trusted state collector wrote to stderr")
+        return _decode_trusted_state(
+            result.stdout,
+            profile=profile,
+            collector_source_sha256=collector_labels[
+                STATE_COLLECTOR_SOURCE_LABEL
+            ],
+            expected_policy_sha256=collector_labels[
+                STATE_COLLECTOR_POLICY_LABEL
+            ],
+            expected_root_sha256=collector_labels[STATE_COLLECTOR_ROOT_LABEL],
+        )
 
     def prepare_exec_action(
         self,
@@ -718,6 +884,70 @@ class DockerCli:
         result = self._invoke("container", "inspect", "--", identifier)
         return _decode_single_inspection(result.stdout, "Docker container inspection")
 
+    def _require_container_handle(self, container: DockerContainer) -> None:
+        if not isinstance(container, DockerContainer):
+            raise ValueError("container must be a validated DockerContainer")
+        _require_container_id(container.identifier)
+        expected_labels = _runtime_labels(container.spec, container.name)
+        if container.labels != tuple(sorted(expected_labels.items())):
+            raise DockerSecurityError("container identity labels were modified")
+        if container.image_id != container.spec.image_id:
+            raise DockerSecurityError("container image handle contradicts its spec")
+
+    def _attest_container_lifecycle(
+        self,
+        container: DockerContainer,
+        *,
+        lifecycle: str,
+    ) -> dict[str, object]:
+        self._require_container_handle(container)
+        expected_labels = _runtime_labels(container.spec, container.name)
+        inspected = self._inspect_one(container.identifier)
+        if lifecycle == "created":
+            running = False
+        elif lifecycle == "running":
+            running = True
+        else:  # pragma: no cover - private call invariant
+            raise ValueError("unsupported container lifecycle attestation")
+        image_id = self._validate_security_profile(
+            inspected,
+            identifier=container.identifier,
+            name=container.name,
+            spec=container.spec,
+            labels=expected_labels,
+            running=running,
+        )
+        if image_id != container.image_id:
+            raise DockerSecurityError("container image identity changed after validation")
+        return inspected
+
+    def _validate_collector_labels(
+        self,
+        item: Mapping[str, object],
+        *,
+        profile: str,
+    ) -> Mapping[str, str]:
+        labels = _labels(item)
+        if labels.get(STATE_COLLECTOR_ARGV_LABEL) != _STATE_COLLECTOR_ARGV:
+            raise DockerSecurityError("state collector fixed argv label differs")
+        if labels.get(STATE_COLLECTOR_PROFILE_LABEL) != profile:
+            raise DockerSecurityError("state collector profile label differs")
+        if labels.get(FILESYSTEM_VERSION_LABEL) != profile.removeprefix("fs"):
+            raise DockerSecurityError("state collector filesystem version differs")
+        for key in (
+            STATE_COLLECTOR_POLICY_LABEL,
+            STATE_COLLECTOR_PROFILE_SET_LABEL,
+            STATE_COLLECTOR_ROOT_LABEL,
+            STATE_COLLECTOR_SOURCE_LABEL,
+        ):
+            try:
+                _require_image_digest(labels.get(key), key)
+            except ValueError as error:
+                raise DockerSecurityError(
+                    "state collector digest labels are unavailable"
+                ) from error
+        return labels
+
     def _validate_security_profile(
         self,
         item: Mapping[str, object],
@@ -937,6 +1167,16 @@ def _require_container_id(value: str) -> None:
         raise ValueError("Docker container identifier must be exactly 64 lowercase hex")
 
 
+def _require_image_digest(value: object, field: str) -> None:
+    if not isinstance(value, str) or not _IMAGE_ID_PATTERN.fullmatch(value):
+        raise ValueError(f"{field} must be a lowercase SHA-256 image identity")
+
+
+def _require_state_profile(value: object) -> None:
+    if not isinstance(value, str) or not _STATE_PROFILE_PATTERN.fullmatch(value):
+        raise ValueError("state collector profile must be one of fs1 through fs4")
+
+
 def _require_local_endpoint(endpoint: str) -> None:
     if not isinstance(endpoint, str) or not endpoint.startswith("unix://"):
         raise ValueError("Docker endpoint must use a local Unix socket")
@@ -1022,6 +1262,142 @@ def _decode_single_inspection(stdout: str, field: str) -> dict[str, object]:
     if not isinstance(item, dict):
         raise DockerSecurityError(f"{field} item must be an object")
     return cast(dict[str, object], item)
+
+
+def _canonical_json_text(value: object) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+
+
+def _reject_json_constant(value: str) -> Never:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def _decode_trusted_state(
+    stdout: str,
+    *,
+    profile: str,
+    collector_source_sha256: str,
+    expected_policy_sha256: str,
+    expected_root_sha256: str,
+) -> DockerTrustedState:
+    try:
+        encoded = stdout.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise DockerSecurityError(
+            "trusted state collector output is not UTF-8"
+        ) from error
+    if (
+        not encoded.endswith(b"\n")
+        or encoded.endswith(b"\n\n")
+        or len(encoded) > _MAX_TRUSTED_STATE_BYTES + 1
+    ):
+        raise DockerSecurityError(
+            "trusted state collector output lacks its exact bounded framing"
+        )
+    canonical = stdout[:-1]
+    try:
+        decoded = json.loads(
+            canonical,
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (json.JSONDecodeError, ValueError, RecursionError) as error:
+        raise DockerSecurityError(
+            "trusted state collector output is not unambiguous JSON"
+        ) from error
+    if not isinstance(decoded, dict) or _canonical_json_text(decoded) != canonical:
+        raise DockerSecurityError("trusted state collector output is not canonical")
+    expected_keys = {
+        "common_roots",
+        "dynamic_root_policy",
+        "entries",
+        "entry_count",
+        "policy_sha256",
+        "profile",
+        "profile_sha256",
+        "root_baseline_sha256",
+        "schema",
+        "state_sha256",
+        "strict_surface",
+        "task_roots",
+        "total_file_bytes",
+        "writable_surface_audit_sha256",
+    }
+    if set(decoded) != expected_keys:
+        raise DockerSecurityError("trusted state collector schema fields differ")
+    if decoded.get("schema") != "edgeloopbench.filesystem-state.v1":
+        raise DockerSecurityError("trusted state collector schema differs")
+    if decoded.get("profile") != profile:
+        raise DockerSecurityError("trusted state collector profile differs")
+    if decoded.get("policy_sha256") != expected_policy_sha256:
+        raise DockerSecurityError("trusted state collector policy pin differs")
+    if decoded.get("root_baseline_sha256") != expected_root_sha256:
+        raise DockerSecurityError("trusted state collector root pin differs")
+    for key in (
+        "state_sha256",
+        "profile_sha256",
+        "policy_sha256",
+        "root_baseline_sha256",
+        "writable_surface_audit_sha256",
+    ):
+        try:
+            _require_image_digest(decoded.get(key), key)
+        except ValueError as error:
+            raise DockerSecurityError(
+                "trusted state collector digest field is malformed"
+            ) from error
+    entries = decoded.get("entries")
+    entry_count = decoded.get("entry_count")
+    total_file_bytes = decoded.get("total_file_bytes")
+    if (
+        not isinstance(entries, list)
+        or isinstance(entry_count, bool)
+        or not isinstance(entry_count, int)
+        or entry_count < 0
+        or entry_count != len(entries)
+        or isinstance(total_file_bytes, bool)
+        or not isinstance(total_file_bytes, int)
+        or total_file_bytes < 0
+    ):
+        raise DockerSecurityError("trusted state collector accounting is malformed")
+    strict = _mapping(decoded.get("strict_surface"), "strict_surface")
+    if set(strict) != {"failures", "status"}:
+        raise DockerSecurityError("trusted state collector strict surface is malformed")
+    failures = strict.get("failures")
+    if (
+        not isinstance(failures, list)
+        or not all(isinstance(value, str) for value in failures)
+        or len(set(failures)) != len(failures)
+        or any(
+            value not in {"invalid_utf8_path", "invalid_utf8_symlink_target"}
+            for value in failures
+        )
+    ):
+        raise DockerSecurityError("trusted state collector strict failures differ")
+    representable = not failures
+    expected_status = "representable" if representable else "unrepresentable"
+    if strict.get("status") != expected_status:
+        raise DockerSecurityError("trusted state collector strict status differs")
+    return DockerTrustedState(
+        canonical_json=canonical,
+        state_sha256=cast(str, decoded["state_sha256"]),
+        profile=profile,
+        profile_sha256=cast(str, decoded["profile_sha256"]),
+        policy_sha256=cast(str, decoded["policy_sha256"]),
+        root_baseline_sha256=cast(str, decoded["root_baseline_sha256"]),
+        writable_surface_audit_sha256=cast(
+            str, decoded["writable_surface_audit_sha256"]
+        ),
+        collector_source_sha256=collector_source_sha256,
+        strict_representable=representable,
+        strict_failures=tuple(cast(list[str], failures)),
+    )
 
 
 def _validate_container_state(

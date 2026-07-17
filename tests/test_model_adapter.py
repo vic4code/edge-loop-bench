@@ -492,6 +492,26 @@ class ModelAdapterTests(unittest.TestCase):
             },
         )
 
+        duplicate_response = (
+            b'{"model":"phi4-mini:3.8b","response":"{\\"command\\":\\"pwd\\"}",'
+            b'"response":"{\\"command\\":\\"pwd\\"}","done":true,'
+            b'"done_reason":"stop","prompt_eval_count":7,"eval_count":4,'
+            b'"total_duration":1234}'
+        )
+        duplicate_model = OllamaRawModel(
+            config,
+            transport=lambda _payload: duplicate_response,
+        )
+        with self.assertRaisesRegex(RuntimeError, "invalid response JSON"):
+            duplicate_model(
+                InteractiveModelRequest(
+                    prepared_prompt=prepared,
+                    seed=29,
+                    context_id="context-duplicate",
+                    max_output_tokens=64,
+                )
+            )
+
     def test_ollama_config_digest_binds_fixed_request_and_response_contracts(self) -> None:
         config = OllamaGenerationConfig(
             profile=PHI4_MINI_RAW_PROFILE,
@@ -541,6 +561,15 @@ class ModelAdapterTests(unittest.TestCase):
                 "remote_fields": "absent_or_null",
             },
         )
+
+        original_sha256 = config.sha256
+        detached = config.canonical_definition
+        detached["action_schema"]["properties"].clear()
+        detached["response_contract"]["done_reason"].clear()
+        fresh = config.canonical_definition
+        self.assertIn("command", fresh["action_schema"]["properties"])
+        self.assertEqual(fresh["response_contract"]["done_reason"], ["length", "stop"])
+        self.assertEqual(config.sha256, original_sha256)
 
     def test_ollama_config_cannot_substitute_an_unrelated_model_tag(self) -> None:
         with self.assertRaises(TypeError):

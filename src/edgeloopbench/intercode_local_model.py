@@ -1,4 +1,4 @@
-"""Read-only local Ollama model and runtime attestation for v0.6.
+"""Read-only local Ollama model and runtime attestation for v0.7.
 
 Only the two preregistered small-model tags are addressable.  The verifier
 hashes the manifest, config, model blob, and runtime through non-symlink file
@@ -13,11 +13,16 @@ import json
 import os
 import re
 import stat
-import subprocess
 from dataclasses import InitVar, dataclass
 from pathlib import Path
-from typing import Protocol
 
+from .intercode_managed_ollama import (
+    OLLAMA_GENERATION_ENDPOINT_SHA256,
+    OLLAMA_LAUNCH_ENVIRONMENT_SHA256,
+    ManagedOllamaRuntimeError,
+    ManagedOllamaRuntimeReceipt,
+    require_live_managed_ollama_receipt,
+)
 from .model_adapter import RestrictedRawRenderingProfile
 
 
@@ -32,15 +37,7 @@ _MAX_MANIFEST_BYTES = 1 << 20
 _MAX_CONFIG_BYTES = 1 << 20
 _MAX_RUNTIME_BYTES = 256 << 20
 _MAX_MODEL_BYTES = 4 << 30
-_MAX_RUNTIME_OUTPUT_BYTES = 65_536
-_RUNTIME_TIMEOUT_SECONDS = 5.0
 _ATTESTATION_SEAL = object()
-
-
-class RuntimeRunner(Protocol):
-    def __call__(
-        self, argv: list[str], **kwargs: object
-    ) -> subprocess.CompletedProcess[bytes]: ...
 
 
 class LocalModelAttestationError(RuntimeError):
@@ -110,13 +107,16 @@ def attest_local_ollama_model(
     profile: RestrictedRawRenderingProfile,
     models_root: Path,
     runtime_binary: Path,
-    runtime_version: str,
-    runtime_binary_sha256: str,
-    kv_cache_quantization: str,
-    runner: RuntimeRunner = subprocess.run,
+    runtime_receipt: ManagedOllamaRuntimeReceipt,
 ) -> LocalModelAttestation:
     """Attest one exact local small model without loading or generating."""
 
+    try:
+        receipt = require_live_managed_ollama_receipt(runtime_receipt)
+    except ManagedOllamaRuntimeError as error:
+        raise LocalModelAttestationError(
+            "managed Ollama runtime receipt is invalid"
+        ) from error
     if type(profile) is not RestrictedRawRenderingProfile:
         raise LocalModelAttestationError("rendering profile type is invalid")
     model_path = _ALLOWED_MODEL_PATHS.get(profile.model)
@@ -127,15 +127,6 @@ def attest_local_ollama_model(
     _require_absolute_directory(models_root, "Ollama models root")
     if not isinstance(runtime_binary, Path) or not runtime_binary.is_absolute():
         raise LocalModelAttestationError("runtime binary must be an absolute Path")
-    _require_digest(runtime_binary_sha256, "runtime binary SHA-256")
-    if not isinstance(runtime_version, str) or not _RUNTIME_VERSION.fullmatch(
-        runtime_version
-    ):
-        raise LocalModelAttestationError("runtime version is invalid")
-    if not isinstance(kv_cache_quantization, str) or not _QUANTIZATION.fullmatch(
-        kv_cache_quantization
-    ):
-        raise LocalModelAttestationError("KV-cache quantization label is invalid")
 
     manifest_path = (
         models_root
@@ -210,13 +201,8 @@ def attest_local_ollama_model(
         label="Ollama runtime",
         require_executable=True,
     )
-    if runtime_evidence.sha256 != runtime_binary_sha256:
-        raise LocalModelAttestationError("Ollama runtime SHA-256 differs from gate")
-    _probe_runtime_version(
-        runtime_binary,
-        runtime_version=runtime_version,
-        runner=runner,
-    )
+    if runtime_evidence.sha256 != receipt.runtime_binary_sha256:
+        raise LocalModelAttestationError("Ollama runtime SHA-256 differs from receipt")
     after_probe = _hash_file(
         runtime_binary,
         maximum_bytes=_MAX_RUNTIME_BYTES,
@@ -225,6 +211,12 @@ def attest_local_ollama_model(
     )
     if after_probe != runtime_evidence:
         raise LocalModelAttestationError("Ollama runtime changed during attestation")
+    try:
+        require_live_managed_ollama_receipt(receipt)
+    except ManagedOllamaRuntimeError as error:
+        raise LocalModelAttestationError(
+            "managed Ollama runtime changed during model attestation"
+        ) from error
 
     values: dict[str, object] = {
         "model": profile.model,
@@ -236,8 +228,8 @@ def attest_local_ollama_model(
         "model_family": model_family,
         "model_parameter_label": parameter_label,
         "weight_quantization": weight_quantization,
-        "kv_cache_quantization": kv_cache_quantization,
-        "runtime_version": runtime_version,
+        "kv_cache_quantization": receipt.kv_cache_quantization,
+        "runtime_version": receipt.runtime_version,
         "runtime_binary_sha256": runtime_evidence.sha256,
     }
     provisional = _attestation_core_record(values)
@@ -333,38 +325,6 @@ def _validate_config(
     ]:
         raise LocalModelAttestationError("model config layer binding is invalid")
     return family, parameter_label, weight_quantization
-
-
-def _probe_runtime_version(
-    runtime_binary: Path,
-    *,
-    runtime_version: str,
-    runner: RuntimeRunner,
-) -> None:
-    try:
-        completed = runner(
-            [os.fspath(runtime_binary), "--version"],
-            shell=False,
-            capture_output=True,
-            check=False,
-            timeout=_RUNTIME_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        raise LocalModelAttestationError("Ollama version probe failed") from error
-    if type(completed.returncode) is not int or completed.returncode != 0:
-        raise LocalModelAttestationError("Ollama version probe returned non-zero")
-    if not isinstance(completed.stdout, bytes) or not isinstance(
-        completed.stderr, bytes
-    ):
-        raise LocalModelAttestationError("Ollama version probe returned non-bytes")
-    if (
-        len(completed.stdout) > _MAX_RUNTIME_OUTPUT_BYTES
-        or len(completed.stderr) > _MAX_RUNTIME_OUTPUT_BYTES
-    ):
-        raise LocalModelAttestationError("Ollama version output exceeded its bound")
-    expected = f"ollama version is {runtime_version}\n".encode("ascii")
-    if completed.stdout != expected or completed.stderr:
-        raise LocalModelAttestationError("Ollama runtime version differs from gate")
 
 
 def _read_small_file(
@@ -577,5 +537,7 @@ def _digest(payload: bytes) -> str:
 __all__ = (
     "LocalModelAttestation",
     "LocalModelAttestationError",
+    "OLLAMA_GENERATION_ENDPOINT_SHA256",
+    "OLLAMA_LAUNCH_ENVIRONMENT_SHA256",
     "attest_local_ollama_model",
 )

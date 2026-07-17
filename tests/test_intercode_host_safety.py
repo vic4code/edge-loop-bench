@@ -9,6 +9,8 @@ from pathlib import Path
 
 from edgeloopbench.intercode_gate_manifest import HostSafetyPins
 from edgeloopbench.intercode_host_safety import (
+    DockerDaemonIdentity,
+    DockerTelemetryPins,
     ExpectedHostResources,
     HostSafetyAction,
     HostSafetyPolicy,
@@ -17,12 +19,14 @@ from edgeloopbench.intercode_host_safety import (
     HostTelemetryCollector,
     HostTelemetryError,
     ResidentModel,
+    parse_host_safety_sample,
 )
 
 
 SHA = "sha256:" + "a" * 64
 QWEN_DIGEST = "b" * 64
 CONTAINER_ID = "c" * 64
+DOCKER_ENDPOINT = "unix:///tmp/edgeloop-test-docker.sock"
 
 
 def pins() -> HostSafetyPins:
@@ -47,8 +51,11 @@ class FakeRunner:
 
 class FakeUrlOpen:
     class Response:
-        def __init__(self, payload: bytes) -> None:
+        status = 200
+
+        def __init__(self, payload: bytes, final_url: str) -> None:
             self.payload = payload
+            self.final_url = final_url
 
         def __enter__(self) -> FakeUrlOpen.Response:
             return self
@@ -59,13 +66,17 @@ class FakeUrlOpen:
         def read(self, limit: int) -> bytes:
             return self.payload[:limit]
 
-    def __init__(self, payload: bytes) -> None:
+        def geturl(self) -> str:
+            return self.final_url
+
+    def __init__(self, payload: bytes, *, final_url: str = "http://127.0.0.1:11434/api/ps") -> None:
         self.payload = payload
+        self.final_url = final_url
         self.calls: list[tuple[object, float]] = []
 
     def __call__(self, request: object, timeout: float) -> FakeUrlOpen.Response:
         self.calls.append((request, timeout))
-        return self.Response(self.payload)
+        return self.Response(self.payload, self.final_url)
 
 
 @dataclasses.dataclass
@@ -145,9 +156,13 @@ def collect(
     *,
     outputs: dict[tuple[str, ...], tuple[int, bytes, bytes]] | None = None,
     ollama: bytes | None = None,
+    ollama_final_url: str = "http://127.0.0.1:11434/api/ps",
 ) -> tuple[HostSafetySample, FakeRunner, FakeUrlOpen, list[Path]]:
     runner = FakeRunner(outputs or command_outputs())
-    urlopen = FakeUrlOpen(ollama or ollama_payload())
+    urlopen = FakeUrlOpen(
+        ollama or ollama_payload(),
+        final_url=ollama_final_url,
+    )
     stat_paths: list[Path] = []
 
     def statvfs(path: os.PathLike[str]) -> FakeStatVfs:
@@ -194,6 +209,112 @@ def resources() -> ExpectedHostResources:
 
 
 class HostTelemetryCollectorTests(unittest.TestCase):
+    def test_pinned_docker_probe_emits_path_free_identity(self) -> None:
+        docker_pins = DockerTelemetryPins(
+            endpoint=DOCKER_ENDPOINT,
+            client_version="27.3.1",
+            server_version="27.3.1",
+            binary_sha256=SHA,
+        )
+        outputs = command_outputs()
+        outputs.pop(("/usr/local/bin/docker", "ps", "--quiet", "--no-trunc"))
+        outputs[
+            (
+                "/usr/local/bin/docker",
+                "--host",
+                DOCKER_ENDPOINT,
+                "version",
+                "--format",
+                "{{json .}}",
+            )
+        ] = (
+            0,
+            b'{"Client":{"Version":"27.3.1"},"Server":{"Version":"27.3.1"}}',
+            b"",
+        )
+        outputs[
+            (
+                "/usr/local/bin/docker",
+                "--host",
+                DOCKER_ENDPOINT,
+                "container",
+                "ls",
+                "--quiet",
+                "--no-trunc",
+                "--filter",
+                "status=running",
+            )
+        ] = (0, b"", b"")
+        runner = FakeRunner(outputs)
+        collector = HostTelemetryCollector(
+            docker_binary=Path("/usr/local/bin/docker"),
+            docker_pins=docker_pins,
+            docker_data_path=Path("/tmp/docker-data"),
+            environment={},
+            docker_binary_sha256=lambda _path: SHA,
+            runner=runner,
+            urlopen=FakeUrlOpen(ollama_payload(with_model=False)),
+            statvfs=lambda _path: FakeStatVfs(),
+            time_ns=lambda: 1,
+            monotonic_ns=lambda: 2,
+        )
+
+        value = collector.collect()
+
+        self.assertEqual(
+            value.docker_daemon,
+            DockerDaemonIdentity(
+                binary_sha256=SHA,
+                endpoint_sha256=docker_pins.endpoint_sha256,
+                client_version="27.3.1",
+                server_version="27.3.1",
+            ),
+        )
+        encoded = json.dumps(value.to_record(), sort_keys=True)
+        self.assertNotIn(DOCKER_ENDPOINT, encoded)
+        self.assertNotIn("usr/local/bin/docker", encoded)
+        self.assertTrue(all(call[1].get("env") == {} for call in runner.calls))
+
+    def test_pinned_docker_probe_rejects_remote_endpoint_and_binary_drift(self) -> None:
+        with self.assertRaises(ValueError):
+            DockerTelemetryPins(
+                endpoint="tcp://127.0.0.1:2375",
+                client_version="27.3.1",
+                server_version="27.3.1",
+                binary_sha256=SHA,
+            )
+
+        docker_pins = DockerTelemetryPins(
+            endpoint=DOCKER_ENDPOINT,
+            client_version="27.3.1",
+            server_version="27.3.1",
+            binary_sha256=SHA,
+        )
+        runner = FakeRunner(command_outputs())
+        collector = HostTelemetryCollector(
+            docker_binary=Path("/usr/local/bin/docker"),
+            docker_pins=docker_pins,
+            docker_data_path=Path("/tmp/docker-data"),
+            environment={},
+            docker_binary_sha256=lambda _path: "sha256:" + "f" * 64,
+            runner=runner,
+            urlopen=FakeUrlOpen(ollama_payload(with_model=False)),
+            statvfs=lambda _path: FakeStatVfs(),
+        )
+
+        with self.assertRaises(HostTelemetryError):
+            collector.collect()
+        self.assertEqual(runner.calls, [])
+
+    def test_ollama_residency_probe_rejects_redirected_response_identity(self) -> None:
+        with self.assertRaises(HostTelemetryError):
+            collect(
+                ollama=ollama_payload(with_model=False),
+                outputs=command_outputs(),
+                ollama_final_url="http://localhost:11434/api/ps",
+            )[0]
+
+
     def test_collects_strict_bounded_fixed_argv_telemetry(self) -> None:
         value, runner, urlopen, stat_paths = collect(
             outputs=command_outputs(docker_stdout=(CONTAINER_ID + "\n").encode())
@@ -234,6 +355,23 @@ class HostTelemetryCollectorTests(unittest.TestCase):
         encoded = json.dumps(record, sort_keys=True)
         self.assertNotIn("Users/test", encoded)
         self.assertNotIn("docker_data_path", encoded)
+
+    def test_path_free_record_round_trips_and_digest_tampering_is_rejected(self) -> None:
+        daemon = DockerDaemonIdentity(
+            binary_sha256=SHA,
+            endpoint_sha256="sha256:" + "d" * 64,
+            client_version="27.3.1",
+            server_version="27.3.1",
+        )
+        value = sample(docker_daemon=daemon)
+        record = value.to_record()
+
+        self.assertEqual(parse_host_safety_sample(record), value)
+
+        tampered = dict(record)
+        tampered["free_memory_percent"] = 99
+        with self.assertRaisesRegex(ValueError, "digest"):
+            parse_host_safety_sample(tampered)
 
     def test_probe_failure_oversize_and_bad_parse_fail_closed(self) -> None:
         cases = []
@@ -318,6 +456,29 @@ class HostSafetyPolicyTests(unittest.TestCase):
                 decision = self.policy.evaluate_admission(sample(**changes), resources())
                 self.assertEqual(decision.action, HostSafetyAction.STOP)
                 self.assertIn(reason, decision.reasons)
+
+    def test_admission_rejects_daemon_identity_that_differs_from_supplied_pins(self) -> None:
+        docker_pins = dataclasses.replace(
+            pins(),
+            docker_binary_sha256=SHA,
+            docker_endpoint_sha256="sha256:" + "d" * 64,
+            docker_client_version="27.3.1",
+            docker_server_version="27.3.1",
+        )
+        policy = HostSafetyPolicy(docker_pins)
+        value = sample(
+            docker_daemon=DockerDaemonIdentity(
+                binary_sha256=SHA,
+                endpoint_sha256="sha256:" + "e" * 64,
+                client_version="27.3.1",
+                server_version="27.3.1",
+            )
+        )
+
+        decision = policy.evaluate_admission(value, resources())
+
+        self.assertEqual(decision.action, HostSafetyAction.STOP)
+        self.assertIn(HostSafetyReason.DOCKER_IDENTITY, decision.reasons)
 
     def test_running_uses_growth_not_absolute_swap_and_allows_equal_caps(self) -> None:
         phase = sample(swap_used_bytes=9 << 30)

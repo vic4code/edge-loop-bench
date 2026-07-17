@@ -142,6 +142,8 @@ class FakeStatVfs:
 
 class FakeUrlOpen:
     class Response:
+        status = 200
+
         def __init__(self, payload: bytes) -> None:
             self.payload = payload
 
@@ -153,6 +155,9 @@ class FakeUrlOpen:
 
         def read(self, limit: int) -> bytes:
             return self.payload[:limit]
+
+        def geturl(self) -> str:
+            return "http://127.0.0.1:11434/api/ps"
 
     def __init__(self, payload: bytes) -> None:
         self.payload = payload
