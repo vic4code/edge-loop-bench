@@ -467,31 +467,46 @@ records the outcome-independent change.
 
 ### Pre-image admission stabilization on 2026-07-20
 
-Three production handoffs showed that Docker Desktop can restart two previously
-inventoried non-benchmark containers after an external stable-host window but
-before the runner's one-shot full admission sample. Polling and a persistent
-read-only Docker event stream did not remove that race. All three attempts
-stopped before image evidence, model loading, calibration, or any model prompt.
+Production handoffs repeatedly showed that Docker Desktop can restart two
+previously inventoried non-benchmark containers after an external stable-host
+window but before the runner's one-shot full admission sample. Polling and a
+persistent read-only Docker event stream did not remove that race. Attempts 13
+and 14 then showed a second bounded transition: after an exact-ID steward
+stopped both containers, the next sample had no running container but
+transient VM pressure level `2`. Every cited attempt stopped before image-build
+evidence, model loading, calibration, or any model prompt.
 
 The production runner therefore freezes one bounded read-only stabilization
 immediately before image planning. Its policy still evaluates
 `ExpectedHostResources()` with no resident models and no running containers.
 Configuration may name either zero or exactly two full, sorted, unique
 stewarded container IDs, but those IDs are not accepted resources. A denial is
-waitable only when `RUNNING_CONTAINERS` is its sole reason and the observed
-nonempty ID set is a subset of the configured pair. Production itself never
-mutates those containers; an external steward may reconcile only the exact
-pre-inventoried IDs. Every unknown container, additional policy reason,
-telemetry or liveness failure, identity change, and sample-order or cooldown
-failure stops immediately.
+waitable only when its reason set is `VM_PRESSURE`, `RUNNING_CONTAINERS`, or
+both. If `VM_PRESSURE` is present, the raw pressure level must be exactly `2`;
+levels `0`, `3`, and `4` are hard denials. If `RUNNING_CONTAINERS` is present,
+the observed nonempty ID set must be a subset of the configured pair.
+Production itself never mutates those containers; an external steward may
+reconcile only the exact pre-inventoried IDs. Every unknown container, any
+other policy reason, telemetry or liveness failure, identity change, and
+sample-order or cooldown failure stops immediately. Every waitable denial
+resets the clean-sample streak.
 
-The admitted baseline requires two consecutive fully allowed samples 30
-seconds apart and must stabilize within 600 seconds. A fresh `O_EXCL`,
+This is a bounded cooldown, not a pressure-threshold relaxation. The admitted
+baseline still requires two consecutive fully allowed pressure-level-`1`
+samples 30 seconds apart and must stabilize within 600 seconds. A fresh `O_EXCL`,
 owner-mode-`0600`, identity-bound journal records every raw path-free sample and
 derived decision in a hash chain. It is terminally sealed and reverified, and
 the accepted sample is re-derived from the sealed evidence before any image
-mutation. [ADR 035](decisions/035-stabilize-pre-mutation-host-admission.md)
-records this outcome-independent runner amendment.
+mutation. Runner revision
+`intercode-v0.7-production-runner-v6-bounded-pressure-cooldown` and journal
+revision `intercode-v0.7-image-build-admission-journal-v2` prevent earlier
+attempts from mixing with the amended evidence. The v2 declaration pins
+`retryable_vm_pressure_levels: [2]`, so replay does not infer this boundary
+from mutable runner behavior.
+[ADR 035](decisions/035-stabilize-pre-mutation-host-admission.md) records the
+stabilization boundary;
+[ADR 036](decisions/036-bound-transient-vm-pressure-cooldown.md) records the
+pre-outcome retry amendment.
 
 ## 9. Stop gates before model scoring
 
@@ -502,9 +517,10 @@ Stop rather than modify the design if any of these occurs:
 - any selected task fails its two offline gold replays;
 - `make check`, isolation, clean-reset, accounting, or leak tests fail;
 - calibration or its 18-hour planning gate fails;
-- AC power is lost, Low Power Mode is enabled, VM pressure is not normal, an
-  unexpected model/container appears, or the frozen v0.7 memory/swap/disk/
-  thermal threshold is crossed;
+- AC power is lost, Low Power Mode is enabled, VM pressure is not normal outside
+  the explicitly bounded pre-image level-`2` cooling wait, an unexpected
+  model/container appears, or the frozen v0.7 memory/swap/disk/thermal
+  threshold is crossed;
 - the prompt ceiling, active-time ceiling, or any per-episode budget is crossed;
 - an episode is interrupted or any journal/resource identity is ambiguous.
 

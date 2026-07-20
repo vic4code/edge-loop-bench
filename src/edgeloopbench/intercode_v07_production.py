@@ -121,7 +121,7 @@ from .model_adapter import PHI4_MINI_RAW_PROFILE, QWEN35_RAW_PROFILE
 
 
 V07_PRODUCTION_RUNNER_REVISION = (
-    "intercode-v0.7-production-runner-v5-admission-stabilization"
+    "intercode-v0.7-production-runner-v6-bounded-pressure-cooldown"
 )
 V07_PREFLIGHT_VM_PRESSURE_LEVEL = 1
 V07_PREFLIGHT_FREE_MEMORY_PERCENT_MINIMUM = 25
@@ -129,8 +129,9 @@ V07_PREFLIGHT_DISK_FREE_BYTES_MINIMUM = 32 << 30
 V07_IMAGE_ADMISSION_INTERVAL_SECONDS = 30
 V07_IMAGE_ADMISSION_CONSECUTIVE_SAMPLES = 2
 V07_IMAGE_ADMISSION_TIMEOUT_SECONDS = 600
+V07_IMAGE_ADMISSION_RETRYABLE_VM_PRESSURE_LEVELS = (2,)
 V07_IMAGE_ADMISSION_JOURNAL_REVISION = (
-    "intercode-v0.7-image-build-admission-journal-v1"
+    "intercode-v0.7-image-build-admission-journal-v2"
 )
 
 _VM_PRESSURE_ARGV = (
@@ -425,6 +426,9 @@ def _await_image_build_admission(
             "required_consecutive_samples": (
                 V07_IMAGE_ADMISSION_CONSECUTIVE_SAMPLES
             ),
+            "retryable_vm_pressure_levels": list(
+                V07_IMAGE_ADMISSION_RETRYABLE_VM_PRESSURE_LEVELS
+            ),
             "stewarded_container_ids": list(
                 stewarded.running_container_ids
             ),
@@ -522,13 +526,11 @@ def _await_image_build_admission(
             raise V07ProductionError(
                 "v0.7 image admission policy evaluation failed"
             ) from None
-        observed_containers = set(sample.running_container_ids)
-        retryable_denial = (
-            admission.reasons == (HostSafetyReason.RUNNING_CONTAINERS,)
-            and bool(observed_containers)
-            and observed_containers.issubset(
-                stewarded.running_container_ids
-            )
+        retryable_denial = _image_admission_denial_is_retryable(
+            admission.reasons,
+            vm_pressure_level=sample.vm_pressure_level,
+            observed_container_ids=sample.running_container_ids,
+            stewarded_container_ids=stewarded.running_container_ids,
         )
         sample_event: dict[str, object] = {
             "type": "image_build_admission_sample",
@@ -603,6 +605,36 @@ def _await_image_build_admission(
             ) from None
 
     raise AssertionError("bounded image admission loop exhausted unexpectedly")
+
+
+def _image_admission_denial_is_retryable(
+    reasons: tuple[HostSafetyReason, ...],
+    *,
+    vm_pressure_level: int,
+    observed_container_ids: tuple[str, ...],
+    stewarded_container_ids: tuple[str, ...],
+) -> bool:
+    if reasons == (HostSafetyReason.VM_PRESSURE,):
+        return (
+            vm_pressure_level
+            in V07_IMAGE_ADMISSION_RETRYABLE_VM_PRESSURE_LEVELS
+        )
+    if reasons not in (
+        (HostSafetyReason.RUNNING_CONTAINERS,),
+        (
+            HostSafetyReason.VM_PRESSURE,
+            HostSafetyReason.RUNNING_CONTAINERS,
+        ),
+    ):
+        return False
+    if (
+        HostSafetyReason.VM_PRESSURE in reasons
+        and vm_pressure_level
+        not in V07_IMAGE_ADMISSION_RETRYABLE_VM_PRESSURE_LEVELS
+    ):
+        return False
+    observed = set(observed_container_ids)
+    return bool(observed) and observed.issubset(stewarded_container_ids)
 
 
 def _declare_private_journal(path: Path) -> _PrivateAdmissionJournalIdentity:
@@ -839,6 +871,9 @@ def _verify_completed_admission_journal(
         "stewarded_container_ids": list(stewarded_container_ids),
         "sample_interval_seconds": pins.sample_interval_seconds,
         "required_consecutive_samples": pins.cooldown_consecutive_samples,
+        "retryable_vm_pressure_levels": list(
+            V07_IMAGE_ADMISSION_RETRYABLE_VM_PRESSURE_LEVELS
+        ),
         "timeout_seconds": pins.cooldown_timeout_seconds,
         "journal_instance_id": instance_id,
     }
@@ -871,7 +906,6 @@ def _verify_completed_admission_journal(
     accepted_pair = None
     first_monotonic_ns: int | None = None
     boot_time: int | None = None
-    stewarded = set(stewarded_container_ids)
     try:
         for index, record in enumerate(sample_records):
             sample = parse_host_safety_sample(record.get("sample"))
@@ -882,11 +916,11 @@ def _verify_completed_admission_journal(
             assert first_monotonic_ns is not None
             assert boot_time is not None
             admission = policy.evaluate_admission(sample, expected)
-            observed = set(sample.running_container_ids)
-            retryable = (
-                admission.reasons == (HostSafetyReason.RUNNING_CONTAINERS,)
-                and bool(observed)
-                and observed.issubset(stewarded)
+            retryable = _image_admission_denial_is_retryable(
+                admission.reasons,
+                vm_pressure_level=sample.vm_pressure_level,
+                observed_container_ids=sample.running_container_ids,
+                stewarded_container_ids=stewarded_container_ids,
             )
             if (
                 (not admission.allowed and not retryable)

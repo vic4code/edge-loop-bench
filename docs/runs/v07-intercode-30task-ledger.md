@@ -966,3 +966,48 @@ exists, must refuse every unknown full ID, may stop only either of the two
 pre-inventoried identities, records every successful stop, and exits at the
 Docker-identity marker. This is an operational timing change outside the
 production authority; no benchmark or admission rule changes.
+
+## Entry 032 — attempts 13 and 14 isolated a bounded pressure-cooling state
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: production host admission, attempts 13 and 14
+- Status: **sealed admission safety stops; bounded pressure cooldown frozen**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+Both attempts used clean pushed commit `c880cfc`, fresh artifact roots, and the
+prelaunched exact-ID supervisor. Their preflights passed at VM pressure level
+`1`; attempt 13 recorded 48% free memory and 44,142,452,736 free disk bytes,
+and attempt 14 recorded 48% free memory and 44,148,953,088 free disk bytes.
+
+In each attempt, the first admission sample observed pressure level `1` and
+exactly the same two configured AgentGPT container IDs. Production classified
+only that container denial as retryable. Each intervention journal then
+recorded two `operational_reconciliation` events, and the following admission
+sample observed neither container. That sample, 30.711 seconds later in
+attempt 13 and 30.554 seconds later in attempt 14, reported pressure level `2`.
+Under the frozen v1 journal semantics, production correctly classified each
+pressure-only sample as a hard denial, appended a stopped terminal, sealed the
+admission journal, closed managed Ollama, and exited. The aborted intervention
+journals remain unsealed diagnostic evidence.
+
+Neither attempt reached Docker identity, image planning, tokenizer work, model
+loading, qualification, calibration, formal execution, or a model prompt. The
+same zero-outcome transition therefore motivated ADR 036 before scoring:
+runner revision
+`intercode-v0.7-production-runner-v6-bounded-pressure-cooldown` and journal
+revision `intercode-v0.7-image-build-admission-journal-v2` may wait through a
+denial whose complete reason set is `VM_PRESSURE`, `RUNNING_CONTAINERS`, or
+both, provided raw VM pressure is exactly `2` whenever `VM_PRESSURE` is
+present and every observed container belongs to the exact stewarded pair. Raw
+pressure levels `0`, `3`, and `4`, and every other reason, remain hard denials.
+The v2 declaration pins `retryable_vm_pressure_levels: [2]` for sealed replay.
+
+This amendment does not admit pressure level `2`. Each retryable denial resets
+the candidate streak, and image work still requires two consecutive fully
+allowed pressure-level-`1` samples 30 seconds apart within the unchanged
+600-second total timeout. No task, model, arm, prompt, controller, evaluator,
+budget, or scoring rule changed.

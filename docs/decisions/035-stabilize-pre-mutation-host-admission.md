@@ -1,8 +1,12 @@
 # ADR 035: Stabilize pre-mutation host admission inside production
 
-- Status: Accepted before scoring
+- Status: Accepted before scoring; retry classification superseded by ADR 036
 - Date: 2026-07-20
 - Scope: v0.7 production image-build admission and raw safety evidence
+
+ADR 036 supersedes only this record's retryable-denial classification. The
+empty-resource baseline, external stewardship boundary, cadence, clean-sample
+requirement, timeout, and sealed-evidence requirements remain in force.
 
 ## Context
 

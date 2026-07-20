@@ -135,9 +135,135 @@ class V07ImageAdmissionStabilizationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(records[1]["admission_reasons"], ["running_containers"])
+        self.assertEqual(records[0]["retryable_vm_pressure_levels"], [2])
         self.assertEqual(records[3]["pair_action"], "continue")
         self.assertEqual(records[4]["accepted_sample_sha256"], accepted.sha256)
         self.assertEqual(parse_host_safety_sample(records[3]["sample"]), accepted)
+
+    def test_pressure_denials_reset_the_candidate_and_retry_until_two_clean_samples(
+        self,
+    ) -> None:
+        cases = (
+            (
+                _sample(30, vm_pressure_level=2),
+                ["vm_pressure"],
+            ),
+            (
+                _sample(
+                    30,
+                    running=(CONTAINER_ID,),
+                    vm_pressure_level=2,
+                ),
+                ["vm_pressure", "running_containers"],
+            ),
+        )
+        for denial, expected_reasons in cases:
+            with (
+                self.subTest(reasons=expected_reasons),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                collector = _Samples(
+                    [
+                        _sample(0),
+                        denial,
+                        _sample(60),
+                        _sample(90),
+                    ]
+                )
+                sleeps: list[float] = []
+                journal = Path(directory) / "image-build-admission.jsonl"
+
+                accepted = production_module._await_image_build_admission(
+                    collector,
+                    _pins(),
+                    journal,
+                    stewarded_container_ids=STEWARDED_CONTAINER_IDS,
+                    require_live_runtime=lambda: None,
+                    sleep=sleeps.append,
+                )
+
+                records = [
+                    json.loads(line)
+                    for line in journal.read_text(encoding="utf-8").splitlines()
+                ]
+                denial_record = records[2]
+
+                self.assertEqual(accepted.sha256, _sample(90).sha256)
+                self.assertEqual(collector.calls, 4)
+                self.assertEqual(sleeps, [30.0, 30.0, 30.0])
+                self.assertIs(denial_record["retryable_denial"], True)
+                self.assertEqual(
+                    denial_record["admission_reasons"],
+                    expected_reasons,
+                )
+                self.assertEqual(denial_record["allowed_streak"], 0)
+                self.assertEqual(
+                    records[3].get("candidate_sample_sha256"),
+                    None,
+                )
+
+    def test_only_warning_pressure_level_is_retryable_with_or_without_known_containers(
+        self,
+    ) -> None:
+        for pressure_level in (0, 2, 3, 4):
+            for running in ((), (CONTAINER_ID,)):
+                expected_retryable = pressure_level == 2
+                with (
+                    self.subTest(
+                        pressure_level=pressure_level,
+                        running=bool(running),
+                    ),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    collector = _Samples(
+                        [
+                            _sample(
+                                0,
+                                running=running,
+                                vm_pressure_level=pressure_level,
+                            ),
+                            _sample(30),
+                            _sample(60),
+                        ]
+                    )
+                    sleeps: list[float] = []
+                    journal = Path(directory) / "image-build-admission.jsonl"
+
+                    if expected_retryable:
+                        accepted = production_module._await_image_build_admission(
+                            collector,
+                            _pins(),
+                            journal,
+                            stewarded_container_ids=STEWARDED_CONTAINER_IDS,
+                            require_live_runtime=lambda: None,
+                            sleep=sleeps.append,
+                        )
+                        self.assertEqual(accepted.sha256, _sample(60).sha256)
+                        self.assertEqual(collector.calls, 3)
+                        self.assertEqual(sleeps, [30.0, 30.0])
+                    else:
+                        with self.assertRaises(V07ProductionError):
+                            production_module._await_image_build_admission(
+                                collector,
+                                _pins(),
+                                journal,
+                                stewarded_container_ids=STEWARDED_CONTAINER_IDS,
+                                require_live_runtime=lambda: None,
+                                sleep=sleeps.append,
+                            )
+                        self.assertEqual(collector.calls, 1)
+                        self.assertEqual(sleeps, [])
+
+                    records = [
+                        json.loads(line)
+                        for line in journal.read_text(encoding="utf-8").splitlines()
+                    ]
+                    self.assertIs(
+                        records[1]["retryable_denial"],
+                        expected_retryable,
+                    )
+                    if not expected_retryable:
+                        self.assertEqual(records[-2]["stop_reason"], "hard_denial")
 
     def test_hard_denial_and_timeout_seal_without_returning_a_baseline(self) -> None:
         cases = (
@@ -203,9 +329,10 @@ class V07ImageAdmissionStabilizationTests(unittest.TestCase):
             _sample(0, running=(CONTAINER_ID, unknown)),
             _sample(
                 0,
-                running=(CONTAINER_ID,),
+                running=(unknown,),
                 vm_pressure_level=2,
             ),
+            _sample(0, vm_pressure_level=2, disk_free_bytes=1),
         )
         for first in cases:
             with (
@@ -280,6 +407,41 @@ class V07ImageAdmissionStabilizationTests(unittest.TestCase):
 
         self.assertEqual(collector.calls, 21)
         self.assertEqual(len(sleeps), 20)
+
+    def test_persistent_warning_pressure_times_out_at_the_exact_boundary(
+        self,
+    ) -> None:
+        samples = [
+            _sample(seconds, vm_pressure_level=2)
+            for seconds in range(0, 631, 30)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "image-build-admission.jsonl"
+            collector = _Samples(samples)
+            sleeps: list[float] = []
+
+            with self.assertRaises(V07ProductionError):
+                production_module._await_image_build_admission(
+                    collector,
+                    _pins(),
+                    journal,
+                    stewarded_container_ids=STEWARDED_CONTAINER_IDS,
+                    require_live_runtime=lambda: None,
+                    sleep=sleeps.append,
+                )
+            records = [
+                json.loads(line)
+                for line in journal.read_text(encoding="utf-8").splitlines()
+            ]
+
+        sample_records = records[1:-2]
+        self.assertEqual(collector.calls, 21)
+        self.assertEqual(len(sleeps), 20)
+        self.assertEqual(len(sample_records), 21)
+        self.assertTrue(
+            all(record["retryable_denial"] for record in sample_records)
+        )
+        self.assertEqual(records[-2]["stop_reason"], "timeout")
 
     def test_path_replacement_fails_closed_before_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -397,6 +559,45 @@ class V07ImageAdmissionStabilizationTests(unittest.TestCase):
 
         self.assertEqual(collector.calls, 2)
 
+    def test_sealed_verifier_requires_exact_retryable_pressure_declaration(
+        self,
+    ) -> None:
+        for replacement in ("missing", [2, 3]):
+            with (
+                self.subTest(replacement=replacement),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                journal = Path(directory) / "image-build-admission.jsonl"
+                collector = _Samples([_sample(0), _sample(30)])
+                original = production_module._read_private_admission_records
+
+                def tamper(path, identity):  # type: ignore[no-untyped-def]
+                    records, inspection = original(path, identity)
+                    if replacement == "missing":
+                        records[0].pop("retryable_vm_pressure_levels", None)
+                    else:
+                        records[0]["retryable_vm_pressure_levels"] = replacement
+                    return records, inspection
+
+                with (
+                    mock.patch.object(
+                        production_module,
+                        "_read_private_admission_records",
+                        side_effect=tamper,
+                    ),
+                    self.assertRaises(V07ProductionError),
+                ):
+                    production_module._await_image_build_admission(
+                        collector,
+                        _pins(),
+                        journal,
+                        stewarded_container_ids=STEWARDED_CONTAINER_IDS,
+                        require_live_runtime=lambda: None,
+                        sleep=lambda _seconds: None,
+                    )
+
+                self.assertEqual(collector.calls, 2)
+
     def test_sealed_verifier_rejects_same_inode_tail_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             journal = Path(directory) / "image-build-admission.jsonl"
@@ -459,6 +660,7 @@ class V07ImageAdmissionStabilizationTests(unittest.TestCase):
                     "required_consecutive_samples": (
                         pins.cooldown_consecutive_samples
                     ),
+                    "retryable_vm_pressure_levels": [2],
                     "stewarded_container_ids": list(STEWARDED_CONTAINER_IDS),
                     "telemetry_collector_sha256": (
                         pins.telemetry_collector_sha256
