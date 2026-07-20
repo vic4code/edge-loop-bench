@@ -15,7 +15,7 @@ admission begins for the next model.
 ## Decision
 
 Use `intercode_v07_runtime_factory.py` as the sole production composition
-boundary, revision `intercode-v0.7-production-runtime-factory-v2`. It requires
+boundary, revision `intercode-v0.7-production-runtime-factory-v3`. It requires
 a live launcher-issued `ManagedOllamaRuntimeReceipt`, a
 verifier-issued `LocalModelAttestation`, a verifier-issued tokenizer-helper
 attestation, and an exact Docker daemon observation matching
@@ -29,6 +29,20 @@ requires the exact build recipe emitted by `tools/build_pinned_tokenizer.py`:
 - llama.cpp tag `b9840`, resolving to commit
   `8c146a8366304c871efc26057cc90370ccf58dad`
 - static, CPU-only macOS arm64 `llama-tokenize` target with two build jobs
+
+The v3 provisioning amendment avoids CMake's tag-wide FetchContent clone on a
+memory-constrained host. The build tool initializes a dedicated llama.cpp
+checkout, shallow-fetches only `refs/tags/b9840`, verifies the resulting full
+commit, and applies the compatibility patches from the pinned Ollama checkout
+before configuration. Configuration may set
+`OLLAMA_LLAMA_CPP_SKIP_COMPAT_PATCH=ON` only together with that already-patched
+local source; the compat sources remain linked. The stable provenance records
+both this source mode and the pre-applied patch contract. This changes build
+provisioning and attestation identity, not token-counting semantics.
+Plan-only output is a directly executable sequence of structured steps: each
+step carries its exact argument vector, working directory, sanitized
+environment, and any expected identity output. Published provenance also pins
+the llama.cpp repository URL; the attester rejects a repository substitution.
 
 The generation configuration is identical for Qwen3.5 4B and Phi-4 Mini 3.8B
 except for their pinned renderer/model identities and stop token:

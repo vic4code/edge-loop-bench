@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision and build the exact vocab-only tokenizer used by v0.6.
+"""Provision and build the exact vocab-only tokenizer used by v0.7.
 
 This is an explicit, networked provisioning tool. Benchmark tasks and measured
 episodes remain offline. Running without ``--execute`` only prints the frozen
@@ -23,8 +23,26 @@ from typing import Any
 
 OLLAMA_REPOSITORY = "https://github.com/ollama/ollama.git"
 OLLAMA_COMMIT = "710292ff4f191d8da9f6a4230804fbc693338d4a"
+LLAMA_CPP_REPOSITORY = "https://github.com/ggml-org/llama.cpp.git"
 LLAMA_CPP_TAG = "b9840"
 LLAMA_CPP_COMMIT = "8c146a8366304c871efc26057cc90370ccf58dad"
+
+
+def _step(
+    name: str,
+    argv: list[str],
+    *,
+    cwd: Path | None = None,
+    environment: dict[str, str] | None = None,
+    expected_stdout: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "argv": argv,
+        "cwd": None if cwd is None else str(cwd),
+        "environment": {} if environment is None else environment,
+        "expected_stdout": expected_stdout,
+        "name": name,
+    }
 
 
 def build_plan(work_dir: Path, output: Path) -> dict[str, Any]:
@@ -33,8 +51,8 @@ def build_plan(work_dir: Path, output: Path) -> dict[str, Any]:
     work_dir = work_dir.expanduser().absolute()
     output = output.expanduser().absolute()
     source_dir = work_dir / "ollama"
+    llama_source = work_dir / "llama.cpp"
     build_dir = work_dir / "cmake-build"
-    llama_source = build_dir / "_deps" / "llama_cpp-src"
     configure = [
         "cmake",
         "-S",
@@ -49,50 +67,131 @@ def build_plan(work_dir: Path, output: Path) -> dict[str, Any]:
         "-DGGML_NATIVE=OFF",
         "-DGGML_OPENMP=OFF",
         "-DLLAMA_CURL=OFF",
+        "-DOLLAMA_LLAMA_CPP_SKIP_COMPAT_PATCH=ON",
         "-DOLLAMA_RUNNER_DIR=",
     ]
     if sys.platform == "darwin":
         configure.append("-DCMAKE_OSX_ARCHITECTURES=arm64")
-    commands = [
-        ["git", "init", str(source_dir)],
-        ["git", "-C", str(source_dir), "remote", "add", "origin", OLLAMA_REPOSITORY],
-        [
-            "git",
-            "-C",
-            str(source_dir),
-            "fetch",
-            "--depth",
-            "1",
-            "origin",
-            OLLAMA_COMMIT,
-        ],
-        ["git", "-C", str(source_dir), "checkout", "--detach", "FETCH_HEAD"],
-        ["git", "-C", str(source_dir), "rev-parse", "HEAD"],
-        configure,
-        ["git", "-C", str(llama_source), "rev-parse", "HEAD"],
-        [
-            "cmake",
-            "--build",
-            str(build_dir),
-            "--target",
-            "llama-tokenize",
-            "--parallel",
-            "2",
-        ],
+    steps = [
+        _step("init-ollama", ["git", "init", str(source_dir)]),
+        _step(
+            "set-ollama-origin",
+            [
+                "git",
+                "-C",
+                str(source_dir),
+                "remote",
+                "add",
+                "origin",
+                OLLAMA_REPOSITORY,
+            ],
+        ),
+        _step(
+            "fetch-ollama",
+            [
+                "git",
+                "-C",
+                str(source_dir),
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                OLLAMA_COMMIT,
+            ],
+        ),
+        _step(
+            "checkout-ollama",
+            ["git", "-C", str(source_dir), "checkout", "--detach", "FETCH_HEAD"],
+        ),
+        _step(
+            "verify-ollama-commit",
+            ["git", "-C", str(source_dir), "rev-parse", "HEAD"],
+            expected_stdout=OLLAMA_COMMIT,
+        ),
+        _step("init-llama-cpp", ["git", "init", str(llama_source)]),
+        _step(
+            "set-llama-cpp-origin",
+            [
+                "git",
+                "-C",
+                str(llama_source),
+                "remote",
+                "add",
+                "origin",
+                LLAMA_CPP_REPOSITORY,
+            ],
+        ),
+        _step(
+            "fetch-llama-cpp",
+            [
+                "git",
+                "-C",
+                str(llama_source),
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                f"refs/tags/{LLAMA_CPP_TAG}",
+            ],
+        ),
+        _step(
+            "checkout-llama-cpp",
+            ["git", "-C", str(llama_source), "checkout", "--detach", "FETCH_HEAD"],
+        ),
+        _step(
+            "verify-llama-cpp-commit",
+            ["git", "-C", str(llama_source), "rev-parse", "HEAD"],
+            expected_stdout=LLAMA_CPP_COMMIT,
+        ),
+        _step(
+            "apply-compat-patches",
+            [
+                "cmake",
+                f"-DPATCH_DIR={source_dir / 'llama' / 'compat'}",
+                "-P",
+                str(source_dir / "llama" / "compat" / "apply-patch.cmake"),
+            ],
+            cwd=llama_source,
+        ),
+        _step(
+            "configure-tokenizer",
+            configure,
+            environment={"OLLAMA_LLAMA_CPP_SOURCE": str(llama_source)},
+        ),
+        _step(
+            "build-tokenizer",
+            [
+                "cmake",
+                "--build",
+                str(build_dir),
+                "--target",
+                "llama-tokenize",
+                "--parallel",
+                "2",
+            ],
+        ),
     ]
     return {
         "artifact": str(output),
-        "commands": commands,
         "llama_cpp_commit": LLAMA_CPP_COMMIT,
+        "llama_cpp_repository": LLAMA_CPP_REPOSITORY,
+        "llama_cpp_source_mode": "exact-shallow-tag",
         "llama_cpp_tag": LLAMA_CPP_TAG,
         "network_phase": "source provisioning only",
         "ollama_commit": OLLAMA_COMMIT,
         "ollama_repository": OLLAMA_REPOSITORY,
+        "steps": steps,
         "work_dir": str(work_dir),
     }
 
 
-def _run(command: list[str], *, capture: bool = False) -> str:
+def _run(
+    command: list[str],
+    *,
+    capture: bool = False,
+    cwd: Path | None = None,
+    llama_cpp_source: Path | None = None,
+) -> str:
     environment = os.environ.copy()
     for name in (
         "OLLAMA_LLAMA_CPP_SOURCE",
@@ -100,17 +199,61 @@ def _run(command: list[str], *, capture: bool = False) -> str:
         "OLLAMA_LLAMA_CPP_COMPAT",
     ):
         environment.pop(name, None)
+    if llama_cpp_source is not None:
+        if not llama_cpp_source.is_absolute():
+            raise RuntimeError("llama.cpp source override must be absolute")
+        environment["OLLAMA_LLAMA_CPP_SOURCE"] = str(llama_cpp_source)
     completed = subprocess.run(
         command,
         check=False,
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
+        cwd=cwd,
         env=environment,
         text=True,
     )
     if completed.returncode != 0:
         raise RuntimeError(f"command failed with status {completed.returncode}: {command[0]}")
     return completed.stdout.strip() if capture else ""
+
+
+def _execute_step(step: dict[str, Any]) -> str:
+    if set(step) != {"argv", "cwd", "environment", "expected_stdout", "name"}:
+        raise RuntimeError("build step shape is invalid")
+    argv = step["argv"]
+    cwd_value = step["cwd"]
+    environment = step["environment"]
+    expected_stdout = step["expected_stdout"]
+    name = step["name"]
+    if (
+        type(name) is not str
+        or not name
+        or type(argv) is not list
+        or not argv
+        or any(type(argument) is not str or not argument for argument in argv)
+        or (cwd_value is not None and type(cwd_value) is not str)
+        or type(environment) is not dict
+        or any(
+            type(key) is not str or type(value) is not str
+            for key, value in environment.items()
+        )
+        or (expected_stdout is not None and type(expected_stdout) is not str)
+    ):
+        raise RuntimeError("build step value is invalid")
+    if set(environment) - {"OLLAMA_LLAMA_CPP_SOURCE"}:
+        raise RuntimeError("build step environment is not permitted")
+    cwd = None if cwd_value is None else Path(cwd_value)
+    llama_source_value = environment.get("OLLAMA_LLAMA_CPP_SOURCE")
+    llama_source = None if llama_source_value is None else Path(llama_source_value)
+    observed = _run(
+        argv,
+        capture=expected_stdout is not None,
+        cwd=cwd,
+        llama_cpp_source=llama_source,
+    )
+    if expected_stdout is not None and observed != expected_stdout:
+        raise RuntimeError(f"{name} did not resolve to the pinned identity")
+    return observed
 
 
 def _sha256_file(path: Path) -> str:
@@ -124,7 +267,11 @@ def _sha256_file(path: Path) -> str:
 def _assert_dedicated_directory(path: Path) -> None:
     if path.is_symlink():
         raise RuntimeError("work directory must not be a symlink")
-    path.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if not path.is_dir() or any(path.iterdir()):
+            raise RuntimeError("work directory must be a fresh empty directory")
+        return
+    path.mkdir(parents=True)
 
 
 def _assert_unused_build_directory(path: Path) -> None:
@@ -150,9 +297,9 @@ def _assert_regular_or_absent(path: Path) -> None:
 
 def _provenance_record(plan: dict[str, Any], artifact_sha256: str) -> dict[str, Any]:
     configure = next(
-        command
-        for command in plan["commands"]
-        if command and command[0] == "cmake" and "-S" in command
+        step["argv"]
+        for step in plan["steps"]
+        if step["name"] == "configure-tokenizer"
     )
     return {
         "artifact_sha256": artifact_sha256,
@@ -161,55 +308,19 @@ def _provenance_record(plan: dict[str, Any], artifact_sha256: str) -> dict[str, 
                 argument for argument in configure if argument.startswith("-D")
             ],
             "parallel_jobs": 2,
+            "source_provisioning": {
+                "compatibility_patch": "preapplied-from-pinned-ollama",
+                "llama_cpp_fetch": "exact-shallow-tag",
+            },
             "target": "llama-tokenize",
             "target_platform": "macos-arm64",
         },
         "llama_cpp_commit": LLAMA_CPP_COMMIT,
+        "llama_cpp_repository": LLAMA_CPP_REPOSITORY,
         "llama_cpp_tag": LLAMA_CPP_TAG,
         "ollama_commit": OLLAMA_COMMIT,
         "ollama_repository": OLLAMA_REPOSITORY,
     }
-
-
-def _provision_ollama(source_dir: Path) -> None:
-    if source_dir.exists():
-        if source_dir.is_symlink() or not (source_dir / ".git").is_dir():
-            raise RuntimeError("existing Ollama source is not a dedicated Git checkout")
-        origin = _run(
-            ["git", "-C", str(source_dir), "remote", "get-url", "origin"],
-            capture=True,
-        )
-        head = _run(
-            ["git", "-C", str(source_dir), "rev-parse", "HEAD"],
-            capture=True,
-        )
-        dirty = _run(
-            ["git", "-C", str(source_dir), "status", "--porcelain"],
-            capture=True,
-        )
-        if origin != OLLAMA_REPOSITORY or head != OLLAMA_COMMIT or dirty:
-            raise RuntimeError("existing Ollama source does not match the clean pinned commit")
-        return
-
-    _run(["git", "init", str(source_dir)])
-    _run(
-        ["git", "-C", str(source_dir), "remote", "add", "origin", OLLAMA_REPOSITORY]
-    )
-    _run(
-        [
-            "git",
-            "-C",
-            str(source_dir),
-            "fetch",
-            "--depth",
-            "1",
-            "origin",
-            OLLAMA_COMMIT,
-        ]
-    )
-    _run(["git", "-C", str(source_dir), "checkout", "--detach", "FETCH_HEAD"])
-    if _run(["git", "-C", str(source_dir), "rev-parse", "HEAD"], capture=True) != OLLAMA_COMMIT:
-        raise RuntimeError("Ollama checkout did not resolve to the pinned commit")
 
 
 def execute_build(work_dir: Path, output: Path) -> dict[str, Any]:
@@ -221,27 +332,22 @@ def execute_build(work_dir: Path, output: Path) -> dict[str, Any]:
     output = output.expanduser().absolute()
     _assert_dedicated_directory(work_dir)
     source_dir = work_dir / "ollama"
+    llama_source = work_dir / "llama.cpp"
     build_dir = work_dir / "cmake-build"
     _assert_unused_build_directory(build_dir)
-    _provision_ollama(source_dir)
-    version = (source_dir / "LLAMA_CPP_VERSION").read_text(encoding="utf-8").strip()
-    if version != LLAMA_CPP_TAG:
-        raise RuntimeError("Ollama no longer contains the pinned llama.cpp tag")
-
     plan = build_plan(work_dir, output)
-    _run(plan["commands"][5])
-    llama_source = build_dir / "_deps" / "llama_cpp-src"
-    resolved_llama = _run(
-        ["git", "-C", str(llama_source), "rev-parse", "HEAD"],
-        capture=True,
-    )
-    if resolved_llama != LLAMA_CPP_COMMIT:
-        raise RuntimeError("llama.cpp tag did not resolve to the pinned full commit")
-    patched_loader = llama_source / "src" / "llama-model-loader.cpp"
-    if "ollama_compat" not in patched_loader.read_text(encoding="utf-8"):
-        raise RuntimeError("Ollama compatibility hooks were not applied")
-
-    _run(plan["commands"][7])
+    for step in plan["steps"]:
+        _execute_step(step)
+        if step["name"] == "verify-ollama-commit":
+            version = (source_dir / "LLAMA_CPP_VERSION").read_text(
+                encoding="utf-8"
+            ).strip()
+            if version != LLAMA_CPP_TAG:
+                raise RuntimeError("Ollama no longer contains the pinned llama.cpp tag")
+        if step["name"] == "apply-compat-patches":
+            patched_loader = llama_source / "src" / "llama-model-loader.cpp"
+            if "ollama_compat" not in patched_loader.read_text(encoding="utf-8"):
+                raise RuntimeError("Ollama compatibility hooks were not applied")
     candidates = (
         build_dir / "bin" / "llama-tokenize",
         build_dir / "tools" / "tokenize" / "llama-tokenize",

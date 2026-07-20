@@ -63,7 +63,7 @@ from .model_adapter import (
 )
 
 
-V07_RUNTIME_FACTORY_REVISION = "intercode-v0.7-production-runtime-factory-v2"
+V07_RUNTIME_FACTORY_REVISION = "intercode-v0.7-production-runtime-factory-v3"
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _CONSTRUCTION_SEAL = object()
@@ -110,6 +110,7 @@ _MAX_RESIDENCY_RESPONSE_BYTES = 1 * 1_024 * 1_024
 _RESIDENCY_TIMEOUT_SECONDS = 30.0
 _OLLAMA_SOURCE_COMMIT = "710292ff4f191d8da9f6a4230804fbc693338d4a"
 _OLLAMA_REPOSITORY = "https://github.com/ollama/ollama.git"
+_LLAMA_CPP_REPOSITORY = "https://github.com/ggml-org/llama.cpp.git"
 _LLAMA_CPP_TAG = "b9840"
 _TOKENIZER_CMAKE_DEFINITIONS = (
     "-DCMAKE_BUILD_TYPE=Release",
@@ -120,6 +121,7 @@ _TOKENIZER_CMAKE_DEFINITIONS = (
     "-DGGML_NATIVE=OFF",
     "-DGGML_OPENMP=OFF",
     "-DLLAMA_CURL=OFF",
+    "-DOLLAMA_LLAMA_CPP_SKIP_COMPAT_PATCH=ON",
     "-DOLLAMA_RUNNER_DIR=",
     "-DCMAKE_OSX_ARCHITECTURES=arm64",
 )
@@ -855,6 +857,7 @@ def attest_v07_tokenizer_helper(
         "artifact_sha256",
         "build_recipe",
         "llama_cpp_commit",
+        "llama_cpp_repository",
         "llama_cpp_tag",
         "ollama_commit",
         "ollama_repository",
@@ -868,12 +871,17 @@ def attest_v07_tokenizer_helper(
     expected_recipe = {
         "cmake_definitions": list(_TOKENIZER_CMAKE_DEFINITIONS),
         "parallel_jobs": 2,
+        "source_provisioning": {
+            "compatibility_patch": "preapplied-from-pinned-ollama",
+            "llama_cpp_fetch": "exact-shallow-tag",
+        },
         "target": "llama-tokenize",
         "target_platform": "macos-arm64",
     }
     comparisons = (
         (provenance["build_recipe"], expected_recipe),
         (provenance["llama_cpp_commit"], V07_LLAMA_CPP_COMMIT),
+        (provenance["llama_cpp_repository"], _LLAMA_CPP_REPOSITORY),
         (provenance["llama_cpp_tag"], _LLAMA_CPP_TAG),
         (provenance["ollama_commit"], _OLLAMA_SOURCE_COMMIT),
         (provenance["ollama_repository"], _OLLAMA_REPOSITORY),

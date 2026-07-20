@@ -266,3 +266,39 @@ summary smoke test. The live read-only sample reported VM pressure level `2`,
 filesystem. Ollama was not running. Because the frozen pressure requirement is
 exactly level `1`, no tokenizer build, Docker build, model load, prompt, or
 experiment artifact was started.
+
+## Entry 009 — scoped host recovery and tokenizer provisioning safety stops
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: pre-execution host recovery and tokenizer provisioning
+- Status: **two build attempts stopped safely; no model request issued**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+After an unexpected workstation restart, Docker Desktop's daemon was recovered
+and the 15 unrelated auto-start containers named in the live inventory were
+temporarily stopped without deletion. Docker Desktop's benchmark-session VM
+allocation was reduced from 8,092 MiB and eight CPUs to 4,096 MiB and four
+CPUs. The daemon reported the new limits, then was stopped before native
+tokenizer compilation. These are operational host controls, not measured
+serving-efficiency factors; no model serving or effectiveness episode occurred.
+
+Two fresh tokenizer work directories reached warning VM pressure level `2`
+while CMake's FetchContent path cloned the pinned llama.cpp tag graph. Each
+attempt was interrupted immediately under the safety policy. Partial ignored
+build trees were retained for diagnosis and never admitted as artifacts. The
+failure was isolated to source provisioning rather than compilation, model
+loading, controller behavior, or scoring.
+
+Before another attempt, runtime-factory revision v3 changes the frozen recipe
+to shallow-fetch exactly `refs/tags/b9840`, verify commit
+`8c146a8366304c871efc26057cc90370ccf58dad`, pre-apply the compatibility patch
+from pinned Ollama commit `710292ff4f191d8da9f6a4230804fbc693338d4a`, and
+configure against that local source. Tests were added before implementation.
+The directly replayable structured plan passed fresh-context review, and the
+full repository check passed 676 tests with one expected APFS-only skip plus
+compile, manifest-validation, and summary-smoke gates. No experimental result
+may be inferred from this entry.
