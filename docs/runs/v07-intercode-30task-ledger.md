@@ -330,3 +330,38 @@ line. A regression test using the observed `p4242\nf3\n` framing was added
 before the parser change. The correction accepts only numeric `p` and `f`
 records, extracts only PIDs, and retains exact single-owner equality. A later
 attempt must use a fresh artifact root and a new intervention-journal identity.
+
+## Entry 011 — second production attempt denied after Docker VM wake
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: full host admission
+- Status: **infrastructure-invalid before image build or model loading**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+Before attempt 2, the Docker Desktop VM allocation was reduced to 2,048 MiB
+and four CPUs; formal task containers retain their separately frozen 512 MiB
+limit. This operational allocation is not a serving-efficiency ablation. The
+fresh attempt passed its own preflight at VM pressure level `1`, 47 percent free
+memory, more than 47 GB free disk, and zero reported running containers. The
+managed Ollama ownership fix also passed on the live host.
+
+The first production Docker access then observed two unrelated AgentGPT
+containers, so full host admission refused the attempt and closed the owned
+Ollama process. Docker's event log places both `restart: always` starts at
+18:27:03 Asia/Taipei; the Docker backend process itself retained its 18:13:44
+start time. This timing is consistent with Docker Desktop Resource Saver
+stopping an idle Linux VM and the production access waking it, at which point
+restart-policy containers returned. Docker documents the default five-minute
+idle transition and 3–10 second VM wake behavior in its [Resource Saver
+guide](https://docs.docker.com/desktop/use-desktop/resource-saver/).
+
+Attempt 2 created only the private artifact tree, source inventory, preflight
+record, and intervention prefix. It built no image, opened no task container,
+loaded no model, issued no tokenizer or model request, and consumed no prompt.
+A fresh attempt must explicitly wake the VM, stop the two exact unrelated
+containers, verify an empty running set, and enter production immediately
+before the next idle transition. Existing restart policies are not edited.
