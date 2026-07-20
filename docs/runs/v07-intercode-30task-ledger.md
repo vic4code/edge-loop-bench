@@ -794,3 +794,35 @@ progress toward benchmark-owned containers. This changes no task, arm, model,
 prompt, controller, evaluator, or scoring rule. Attempt 8 created no image
 manifest, tokenizer request, resident model, qualification row, calibration
 row, formal row, or model prompt.
+
+## Entry 027 — polling supervisor lost the admission race
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: production host admission, attempt 9
+- Status: **safety stop; no-scoring keep-awake method selected**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+After a controlled Docker Desktop restart with the same 4-CPU, 2,048-MiB
+settings, host pressure eventually returned to `1`. Attempt 9 began only after
+six consecutive five-second normal samples, zero running containers, no
+Ollama listener, and a further five-second high-frequency handoff window.
+
+Production full admission still denied before writing Docker identity. The
+250-millisecond external supervisor then observed and stopped the same two
+exact AgentGPT identities, but only after the production collector had already
+completed its admission sample. This proves polling cannot close the wake
+race; shortening it further would add load without creating synchronization.
+
+The next operational attempt instead holds one read-only `docker events`
+stream from before the stability window until production durably writes
+`docker-identity.json`. Its only purpose is to prevent Docker Resource Saver
+from sleeping and re-waking the daemon during handoff. The stream mutates no
+container, image, volume, network, setting, or restart policy and terminates
+before image build proceeds. Exact-container stopping and unknown-container
+refusal remain unchanged. Attempt 9 created no Docker manifest, tokenizer
+request, resident model, qualification row, calibration row, formal row, or
+model prompt.
