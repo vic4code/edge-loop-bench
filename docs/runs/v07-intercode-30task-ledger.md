@@ -1011,3 +1011,72 @@ the candidate streak, and image work still requires two consecutive fully
 allowed pressure-level-`1` samples 30 seconds apart within the unchanged
 600-second total timeout. No task, model, arm, prompt, controller, evaluator,
 budget, or scoring rule changed.
+
+## Entry 033 — attempt 15 timed out safely and model-preload admission was frozen
+
+- Date: 2026-07-20 through 2026-07-21, Asia/Taipei
+- Phase: production host admission, attempt 15; pre-scoring amendment for attempt 16
+- Status: **sealed admission safety stop; per-model preload gate frozen**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+Attempt 15 used clean pushed commit
+`86ac5e68d6a8db817d55af32ac8f0e92fe54f509` and a fresh artifact root. Its
+persisted preflight was allowed at VM pressure level `1`, 50% free memory, and
+46,283,112,448 free disk bytes. The external operational trace identified a
+Docker Resource Saver cold-wake during the handoff. The sealed admission
+journal independently records that its first sample had pressure level `1`,
+48% free memory, no resident model, and exactly the two configured
+pre-inventoried AgentGPT container IDs.
+
+The exact-ID steward stopped those two non-benchmark containers without making
+them expected resources. Every one of the next **20** samples recorded no
+running container and no resident model, but raw pressure level `2`, a sole
+`VM_PRESSURE` denial, and 40% to 44% free memory. All 20 were correctly
+classified as waitable observations rather than admitted baselines. The
+allowed streak therefore remained zero until the frozen 600-second limit
+produced a `timeout` terminal. The journal contains 21 raw samples in total,
+one stopped terminal, and a seal over the preceding 23 events.
+
+Attempt 15 reached no Docker identity, image plan or manifest, tokenizer work,
+resident model, qualification row, calibration row, formal row, or benchmark
+model prompt. The sealed timeout is serving- and host-admission evidence, not
+an agent failure and not evidence for or against any loop arm. Its separate
+operator-intervention journal remains diagnostic operational evidence and is
+not an effectiveness input.
+
+Review before attempt 16 found a second timing-sensitive serving boundary:
+the existing model-phase manager loaded each target and immediately used one
+sample as its phase baseline. ADR 037 therefore advances the host policy to
+`intercode-v0.7-host-safety-policy-v2-model-preload-stabilization`, the
+model-phase manager to
+`intercode-v0.7-model-phase-manager-v2-model-preload-stabilization`, the outer
+runner to
+`intercode-v0.7-production-runner-v7-model-preload-stabilization`, and creates
+`intercode-v0.7-model-preload-admission-journal-v1` before scoring. The
+runtime factory also advances to
+`intercode-v0.7-production-runtime-factory-v4-issued-residency-receipts`.
+
+Each calibration and confirmatory model transition now requires an immediately
+allowed pre-transition baseline and then a distinct sealed post-load gate. The
+post-load gate may wait only on a sole raw pressure-level-`2` denial. It admits
+only two fully allowed pressure-level-`1` samples at least 30 seconds apart
+within 600 seconds, each with at least 25% free memory, exactly the target
+resident model, and no container. Swap growth from the pre-transition baseline
+is capped at 1 GiB on every post-load sample, with an immediate hard stop on
+excess, and at 64 MiB across the accepted pair. The once-only transition must
+return a builder-sealed, issuer-registered receipt that exactly binds the
+expected runtime and previous/target model identities; a copied field-identical
+receipt has no authority. Every other reason or ambiguity is a hard stop. Four
+derived fresh journals separate both calibration and both confirmatory
+transitions. Sealed replay must re-derive the accepted pair, and its second
+sample becomes the phase baseline without another collection. Failure
+authorizes zero model prompts and no automatic retry.
+
+Attempt 16 has not produced a model outcome. It may launch only from a fresh
+artifact root after the amended source, tests, design, and ADR pass the full
+repository release gate. No task, model, arm, prompt, controller, evaluator,
+budget, schedule, or statistical decision rule changed.

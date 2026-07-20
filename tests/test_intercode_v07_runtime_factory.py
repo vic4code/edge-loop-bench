@@ -666,6 +666,18 @@ class V07RuntimeFactoryTests(unittest.TestCase):
                         target=qwen,
                         boundary=boundary,
                     )
+                    forged_receipt = object.__new__(type(first_receipt))
+                    for field in dataclasses.fields(first_receipt):
+                        object.__setattr__(
+                            forged_receipt,
+                            field.name,
+                            getattr(first_receipt, field.name),
+                        )
+                    with self.assertRaisesRegex(
+                        V07RuntimeFactoryError,
+                        "issued",
+                    ):
+                        forged_receipt.canonical_record()
                     self.assertIsNone(first_receipt.previous_model_id)
                     self.assertEqual(
                         fake_http.resident_models,

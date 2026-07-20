@@ -1,6 +1,6 @@
 # EdgeLoopBench v0.7 InterCode-Bash 30-task compromise study
 
-- Status: **preregistered; no measured output exists**
+- Status: **preregistered; no measured model output exists**
 - Design date: **2026-07-16**
 - Source: **InterCode-Bash at `c3e46d827cfc9d4c704ec078f7abf9f41e3191d8`**
 - Confirmatory sample: **30 tasks, strata `9/8/9/4`**
@@ -508,6 +508,75 @@ stabilization boundary;
 [ADR 036](decisions/036-bound-transient-vm-pressure-cooldown.md) records the
 pre-outcome retry amendment.
 
+### Per-model preload stabilization on 2026-07-21
+
+Attempt 15 passed preflight at pressure level `1` and 50% free memory. The
+external operational trace identified a Docker Resource Saver cold-wake during
+the handoff, while the sealed journal independently recorded two exact
+pre-inventoried non-benchmark containers in its first admission sample. After
+the external exact-ID steward stopped them, all 20 follow-on samples contained
+neither a running container nor a resident model, but remained at raw pressure
+level `2` and 40% to 44% free memory until the frozen 600-second gate timed
+out. The journal sealed before image planning, model loading, calibration, or
+a model prompt. This is host-admission and serving-substrate evidence; it is
+not an agent-effectiveness observation.
+
+The same review found that each then-current calibration or formal model
+transition loaded its target and used one immediate sample as the phase
+baseline. Before attempt 16, every model transition is therefore amended to
+use journal revision
+`intercode-v0.7-model-preload-admission-journal-v1`. Host policy revision
+`intercode-v0.7-host-safety-policy-v2-model-preload-stabilization`, model-phase
+manager revision
+`intercode-v0.7-model-phase-manager-v2-model-preload-stabilization`, and
+production runner revision
+`intercode-v0.7-production-runner-v7-model-preload-stabilization` bind the new
+semantics. Runtime-factory revision
+`intercode-v0.7-production-runtime-factory-v4-issued-residency-receipts`
+identity-registers transition receipts before they can enter this gate.
+
+Before residency mutation, one sample must immediately pass the complete
+admission policy against the exact current resources: no resident model on the
+first transition, or the exact active model on later transitions, and no
+running container. It must have pressure level `1`, at least 25% free memory,
+and all pinned power, Low-Power-Mode-off, disk, warning, runtime, Docker,
+resource, liveness, and identity checks allowed. A denied or ambiguous
+pre-transition sample is not waitable and no model is loaded.
+
+The gate invokes the residency transition once and requires its exact
+builder-sealed, issuer-registered receipt; a copied field-identical object has
+no authority. The path-free canonical receipt must bind the expected
+runtime receipt plus the previous and target model IDs, manifest digests, and
+artifact digests before post-load sampling. A transition exception or receipt
+mismatch stops and seals without returning a model-phase authority.
+
+After target load and before any benchmark model prompt, bounded read-only
+collection may wait only when the complete denial is the sole reason
+`VM_PRESSURE` and the raw dispatch flag is exactly `2`. Levels `0`, `3`, and
+`4`, less than 25% free memory, any additional reason, a missing or unexpected
+resident model, any container, or any host/runtime/evidence ambiguity stops
+immediately. A waitable sample resets the clean-sample streak. Admission
+requires two consecutive fully allowed pressure-level-`1` samples at least 30
+seconds apart and within 600 seconds, both with at least 25% free memory,
+exactly the target model resident, and no running container. Swap growth from
+the pre-transition baseline to every post-load sample is capped at 1 GiB, with
+an immediate hard stop on excess; growth across the accepted pair is capped at
+64 MiB.
+
+Each transition uses a fresh mode-`0600`, identity-bound hash-chained journal.
+The manager derives four fixed paths under `model-preload-admission/`:
+`calibration-01.jsonl`, `calibration-02.jsonl`, `confirmatory-01.jsonl`, and
+`confirmatory-02.jsonl`. Each journal records its declaration, pre-transition
+baseline, one admission-start event containing the validated path-free
+residency receipt and stabilization clock, complete raw samples and decisions,
+and one completed or stopped terminal. The terminal journal is sealed,
+reopened, and replay-verified. The second accepted sample is installed directly
+as the phase baseline; no unrecorded replacement sample is collected. A
+denial, timeout, crash, or replay ambiguity authorizes zero benchmark model
+prompts and no automatic transition retry.
+[ADR 037](decisions/037-stabilize-each-model-preload-before-phase-admission.md)
+records the serving/effectiveness boundary and rejected alternatives.
+
 ## 9. Stop gates before model scoring
 
 Stop rather than modify the design if any of these occurs:
@@ -518,9 +587,9 @@ Stop rather than modify the design if any of these occurs:
 - `make check`, isolation, clean-reset, accounting, or leak tests fail;
 - calibration or its 18-hour planning gate fails;
 - AC power is lost, Low Power Mode is enabled, VM pressure is not normal outside
-  the explicitly bounded pre-image level-`2` cooling wait, an unexpected
-  model/container appears, or the frozen v0.7 memory/swap/disk/thermal
-  threshold is crossed;
+  the explicitly bounded pre-image or post-model-load level-`2` waits, an
+  unexpected model/container appears, or the frozen v0.7
+  memory/swap/disk/thermal threshold is crossed;
 - the prompt ceiling, active-time ceiling, or any per-episode budget is crossed;
 - an episode is interrupted or any journal/resource identity is ambiguous.
 

@@ -63,7 +63,9 @@ from .model_adapter import (
 )
 
 
-V07_RUNTIME_FACTORY_REVISION = "intercode-v0.7-production-runtime-factory-v3"
+V07_RUNTIME_FACTORY_REVISION = (
+    "intercode-v0.7-production-runtime-factory-v4-issued-residency-receipts"
+)
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _CONSTRUCTION_SEAL = object()
@@ -448,7 +450,7 @@ def issue_v07_managed_residency_boundary(
     return boundary
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True, eq=False)
 class V07ResidencyReceipt:
     """Path-free evidence that one exact model became solely resident."""
 
@@ -515,8 +517,26 @@ class V07ResidencyReceipt:
         }
 
     def canonical_record(self) -> dict[str, object]:
-        self.__post_init__(_RESIDENCY_RECEIPT_SEAL)
+        _require_issued_residency_receipt(self)
         return {**self._core_record(), "transition_sha256": self.transition_sha256}
+
+
+_ISSUED_RESIDENCY_RECEIPTS: weakref.WeakSet[V07ResidencyReceipt] = (
+    weakref.WeakSet()
+)
+_RESIDENCY_RECEIPT_LOCK = threading.RLock()
+
+
+def _require_issued_residency_receipt(
+    value: V07ResidencyReceipt,
+) -> V07ResidencyReceipt:
+    if type(value) is not V07ResidencyReceipt:
+        raise V07RuntimeFactoryError("residency receipt type is invalid")
+    with _RESIDENCY_RECEIPT_LOCK:
+        if value not in _ISSUED_RESIDENCY_RECEIPTS:
+            raise V07RuntimeFactoryError("residency receipt was not issued")
+    value.__post_init__(_RESIDENCY_RECEIPT_SEAL)
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -1122,7 +1142,7 @@ def transition_v07_model_residency(
             "model_manifest_sha256": target.generation.profile.model_manifest_sha256,
         },
     }
-    return V07ResidencyReceipt(
+    receipt = V07ResidencyReceipt(
         previous_model_id=(None if previous_profile is None else previous_profile.model),
         previous_model_manifest_sha256=(
             None
@@ -1141,6 +1161,9 @@ def transition_v07_model_residency(
         transition_sha256=_digest_canonical(core),
         _seal=_RESIDENCY_RECEIPT_SEAL,
     )
+    with _RESIDENCY_RECEIPT_LOCK:
+        _ISSUED_RESIDENCY_RECEIPTS.add(receipt)
+    return _require_issued_residency_receipt(receipt)
 
 
 def build_v07_host_identity(

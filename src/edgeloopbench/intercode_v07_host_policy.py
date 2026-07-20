@@ -16,13 +16,19 @@ No Docker, Ollama, network, or host probe runs at import time.
 
 from __future__ import annotations
 
+import fcntl
+import json
+import os
 import re
+import secrets
+import stat
 import threading
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import InitVar, dataclass
 from enum import Enum
+from pathlib import Path
 from typing import TypeVar
 
 from .intercode_host_safety import (
@@ -30,14 +36,23 @@ from .intercode_host_safety import (
     HostSafetySample,
     HostTelemetryCollector,
     ResidentModel,
+    parse_host_safety_sample,
 )
 from .intercode_v07_manifest import V07HostSafetyPins
+from .intercode_v07_runtime_factory import V07ResidencyReceipt
+from .journal import JournalError, append_journal_event, inspect_journal, seal_journal
 from .model_adapter import PHI4_MINI_RAW_PROFILE, QWEN35_RAW_PROFILE
 
 
-V07_HOST_POLICY_REVISION = "intercode-v0.7-host-safety-policy-v1"
+V07_HOST_POLICY_REVISION = (
+    "intercode-v0.7-host-safety-policy-v2-model-preload-stabilization"
+)
+V07_MODEL_PRELOAD_ADMISSION_JOURNAL_REVISION = (
+    "intercode-v0.7-model-preload-admission-journal-v1"
+)
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_JOURNAL_INSTANCE_ID = re.compile(r"[0-9a-f]{32}\Z")
 _SESSION_AUTHORITY = object()
 _HOOK_AUTHORITY = object()
 _EVIDENCE_AUTHORITY = object()
@@ -52,6 +67,12 @@ _ALLOWED_PHASE_MODEL_SETS = frozenset(
         for profile in (QWEN35_RAW_PROFILE, PHI4_MINI_RAW_PROFILE)
     )
 )
+_ALLOWED_TRANSITION_RESOURCE_SETS = _ALLOWED_PHASE_MODEL_SETS | frozenset(((),))
+_PRELOAD_PHASES = frozenset(("calibration", "confirmatory"))
+_JOURNAL_CHAIN_FIELDS = frozenset(
+    ("sequence", "previous_event_sha256", "event_sha256")
+)
+_MAX_PRELOAD_JOURNAL_BYTES = 8 << 20
 
 
 class V07HostSafetyError(RuntimeError):
@@ -122,6 +143,216 @@ class V07HostSafetyDenied(V07HostSafetyError):
         self.decision = decision
         reason = ",".join(item.value for item in decision.reasons)
         super().__init__(f"v0.7 host safety denied {stage}: {reason}")
+
+
+@dataclass(frozen=True, slots=True)
+class _PrivatePreloadJournalIdentity:
+    parent_device: int
+    parent_inode: int
+    file_device: int
+    file_inode: int
+
+
+def _declare_preload_journal(
+    path: Path,
+    *,
+    phase: str,
+    transition_index: int,
+) -> _PrivatePreloadJournalIdentity:
+    if (
+        type(path) is not type(Path())
+        or not path.is_absolute()
+        or Path(os.path.normpath(path)) != path
+        or phase not in _PRELOAD_PHASES
+        or type(transition_index) is not int
+        or transition_index not in (1, 2)
+        or path.name != f"{phase}-{transition_index:02d}.jsonl"
+    ):
+        raise V07HostSafetyError("v0.7 preload journal path is invalid")
+    parent_descriptor = -1
+    descriptor = -1
+    identity: _PrivatePreloadJournalIdentity | None = None
+    parent_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    parent_flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    file_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        parent_descriptor = os.open(path.parent, parent_flags)
+        parent = os.fstat(parent_descriptor)
+        if (
+            not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.getuid()
+            or stat.S_IMODE(parent.st_mode) != 0o700
+        ):
+            raise OSError("unsafe preload journal parent")
+        descriptor = os.open(
+            path.name,
+            file_flags,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size != 0
+        ):
+            raise OSError("unsafe preload journal")
+        identity = _PrivatePreloadJournalIdentity(
+            parent_device=parent.st_dev,
+            parent_inode=parent.st_ino,
+            file_device=metadata.st_dev,
+            file_inode=metadata.st_ino,
+        )
+        os.fsync(descriptor)
+        os.fsync(parent_descriptor)
+    except OSError:
+        raise V07HostSafetyError(
+            "v0.7 preload admission journal could not be declared"
+        ) from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+    assert identity is not None
+    _validate_preload_journal(path, identity)
+    return identity
+
+
+def _validate_preload_journal(
+    path: Path,
+    identity: _PrivatePreloadJournalIdentity,
+) -> None:
+    parent_descriptor = -1
+    descriptor = -1
+    parent_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    parent_flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    file_flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        parent_descriptor = os.open(path.parent, parent_flags)
+        parent = os.fstat(parent_descriptor)
+        descriptor = os.open(path.name, file_flags, dir_fd=parent_descriptor)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.getuid()
+            or stat.S_IMODE(parent.st_mode) != 0o700
+            or (parent.st_dev, parent.st_ino)
+            != (identity.parent_device, identity.parent_inode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or (metadata.st_dev, metadata.st_ino)
+            != (identity.file_device, identity.file_inode)
+        ):
+            raise OSError("preload journal identity changed")
+    except OSError:
+        raise V07HostSafetyError(
+            "v0.7 preload admission journal identity changed"
+        ) from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+
+
+def _append_preload_event(
+    path: Path,
+    event: Mapping[str, object],
+    identity: _PrivatePreloadJournalIdentity,
+) -> None:
+    try:
+        _validate_preload_journal(path, identity)
+        append_journal_event(path, event)
+        _validate_preload_journal(path, identity)
+    except (JournalError, OSError, ValueError):
+        raise V07HostSafetyError(
+            "v0.7 preload admission journal append failed"
+        ) from None
+
+
+def _seal_preload_journal(
+    path: Path,
+    identity: _PrivatePreloadJournalIdentity,
+) -> None:
+    try:
+        _validate_preload_journal(path, identity)
+        seal_journal(path)
+        _validate_preload_journal(path, identity)
+        inspect_journal(path, require_sealed=True)
+    except (JournalError, OSError, ValueError):
+        raise V07HostSafetyError(
+            "v0.7 preload admission journal seal failed"
+        ) from None
+
+
+def _read_preload_records(
+    path: Path,
+    identity: _PrivatePreloadJournalIdentity,
+) -> list[dict[str, object]]:
+    _validate_preload_journal(path, identity)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        fcntl.flock(descriptor, fcntl.LOCK_SH)
+        metadata = os.fstat(descriptor)
+        if (
+            (metadata.st_dev, metadata.st_ino)
+            != (identity.file_device, identity.file_inode)
+            or metadata.st_size > _MAX_PRELOAD_JOURNAL_BYTES
+        ):
+            raise OSError("preload journal identity or size changed")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 65_536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_PRELOAD_JOURNAL_BYTES:
+                raise OSError("preload journal exceeds read bound")
+            chunks.append(chunk)
+        payload = b"".join(chunks)
+        inspection = inspect_journal(path, require_sealed=True)
+        final = os.fstat(descriptor)
+        if (
+            final.st_size != metadata.st_size
+            or final.st_mtime_ns != metadata.st_mtime_ns
+            or final.st_ctime_ns != metadata.st_ctime_ns
+            or inspection.file_byte_length != len(payload)
+            or inspection.record_count != len(payload.splitlines())
+        ):
+            raise OSError("preload journal changed during verification")
+        records = [json.loads(line) for line in payload.splitlines()]
+        if any(not isinstance(record, dict) for record in records):
+            raise ValueError("preload record is not an object")
+    except (JournalError, OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        raise V07HostSafetyError(
+            "v0.7 preload admission journal could not be verified"
+        ) from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    _validate_preload_journal(path, identity)
+    return records
+
+
+def _preload_domain_record(record: Mapping[str, object]) -> dict[str, object]:
+    if not _JOURNAL_CHAIN_FIELDS.issubset(record):
+        raise V07HostSafetyError("v0.7 preload journal framing is invalid")
+    return {
+        key: value
+        for key, value in record.items()
+        if key not in _JOURNAL_CHAIN_FIELDS
+    }
 
 
 class V07HostSafetyPolicy:
@@ -417,6 +648,7 @@ class V07HostSafetySession:
         expected: ExpectedHostResources,
         require_live_runtime: RequireLiveRuntime,
         _authority: object,
+        _initial_baseline: HostSafetySample | None = None,
     ) -> None:
         if _authority is not _SESSION_AUTHORITY:
             raise V07HostSafetyError("v0.7 host sessions must be factory-issued")
@@ -424,7 +656,15 @@ class V07HostSafetySession:
         self._collector = collector
         self._expected = expected
         self._require_live_runtime = require_live_runtime
-        self._phase_baseline: HostSafetySample | None = None
+        if _initial_baseline is not None:
+            _require_sample(_initial_baseline, "verified preload baseline")
+            initial_decision = policy.evaluate_admission(
+                _initial_baseline,
+                expected,
+            )
+            if not initial_decision.allowed:
+                raise V07HostSafetyDenied("phase", initial_decision)
+        self._phase_baseline = _initial_baseline
         self._active: V07EpisodeHostAdmission | None = None
         self._failed = False
         self._cooldown_attempted = False
@@ -525,6 +765,8 @@ class V07HostSafetySession:
             return evidence
 
     def _start(self) -> None:
+        if self._phase_baseline is not None:
+            raise V07HostSafetyError("v0.7 host session baseline is already set")
         sample = self._collect_runtime_bound_sample()
         decision = self._policy.evaluate_admission(sample, self._expected)
         if not decision.allowed:
@@ -737,6 +979,695 @@ _ISSUED_SESSIONS: weakref.WeakSet[V07HostSafetySession] = weakref.WeakSet()
 _ISSUED_HOOKS: weakref.WeakSet[V07EpisodeHostAdmission] = weakref.WeakSet()
 
 
+def _resource_record(expected: ExpectedHostResources) -> dict[str, object]:
+    return {
+        "resident_models": [model.to_record() for model in expected.resident_models],
+        "running_container_ids": list(expected.running_container_ids),
+    }
+
+
+def _validate_preload_transition_record(
+    value: object,
+    *,
+    previous_expected: ExpectedHostResources,
+    expected: ExpectedHostResources,
+    expected_runtime_receipt_sha256: str,
+) -> dict[str, object]:
+    if type(value) is not V07ResidencyReceipt:
+        raise V07HostSafetyError("v0.7 residency transition receipt is invalid")
+    try:
+        record = value.canonical_record()
+    except Exception as error:
+        raise V07HostSafetyError(
+            "v0.7 residency transition receipt is invalid"
+        ) from error
+    if (
+        type(expected_runtime_receipt_sha256) is not str
+        or _SHA256.fullmatch(expected_runtime_receipt_sha256) is None
+    ):
+        raise V07HostSafetyError("v0.7 residency transition receipt is invalid")
+    previous_model = (
+        None
+        if not previous_expected.resident_models
+        else previous_expected.resident_models[0]
+    )
+    target_model = expected.resident_models[0]
+    profile_by_model = {
+        profile.model: profile
+        for profile in (QWEN35_RAW_PROFILE, PHI4_MINI_RAW_PROFILE)
+    }
+    previous_profile = (
+        None if previous_model is None else profile_by_model[previous_model.model]
+    )
+    target_profile = profile_by_model[target_model.model]
+    previous = record.get("previous")
+    target = record.get("target")
+    expected_previous = (
+        None
+        if previous_profile is None
+        else {
+            "model_artifact_sha256": previous_profile.model_artifact_sha256,
+            "model_id": previous_profile.model,
+            "model_manifest_sha256": previous_profile.model_manifest_sha256,
+        }
+    )
+    expected_target = {
+        "model_artifact_sha256": target_profile.model_artifact_sha256,
+        "model_id": target_profile.model,
+        "model_manifest_sha256": target_profile.model_manifest_sha256,
+    }
+    if (
+        previous != expected_previous
+        or target != expected_target
+        or record.get("schema")
+        != "edgeloopbench.v07-model-residency-transition.v1"
+        or record.get("runtime_receipt_sha256")
+        != expected_runtime_receipt_sha256
+        or _SHA256.fullmatch(str(record.get("transition_sha256"))) is None
+    ):
+        raise V07HostSafetyError("v0.7 residency transition receipt is invalid")
+    try:
+        json.dumps(record, allow_nan=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        raise V07HostSafetyError(
+            "v0.7 residency transition receipt is invalid"
+        ) from None
+    return record
+
+
+def _collect_preload_sample(
+    collector: HostTelemetryCollector,
+    require_live_runtime: RequireLiveRuntime,
+) -> HostSafetySample:
+    try:
+        require_live_runtime()
+        sample = collector.collect()
+        require_live_runtime()
+        return _require_sample(sample, "preload sample")
+    except V07HostSafetyError:
+        raise
+    except Exception as error:
+        raise V07HostSafetyError(
+            "v0.7 preload telemetry or runtime liveness failed"
+        ) from error
+
+
+def _preload_denial_is_retryable(
+    decision: V07HostSafetyDecision,
+    sample: HostSafetySample,
+) -> bool:
+    return (
+        decision.reasons == (V07HostSafetyReason.VM_PRESSURE,)
+        and sample.vm_pressure_level == 2
+    )
+
+
+def _stop_preload_admission(
+    path: Path,
+    identity: _PrivatePreloadJournalIdentity,
+    *,
+    stop_reason: str,
+    sample_count: int,
+) -> None:
+    _append_preload_event(
+        path,
+        {
+            "type": "model_preload_admission_stopped",
+            "stop_reason": stop_reason,
+            "sample_count": sample_count,
+        },
+        identity,
+    )
+    _seal_preload_journal(path, identity)
+
+
+def _preload_sample_event(
+    *,
+    sample: HostSafetySample,
+    admission: V07HostSafetyDecision,
+    retryable: bool,
+    candidate: HostSafetySample | None,
+    pair: V07HostSafetyDecision | None,
+    transition_swap_growth_bytes: int,
+    transition_swap_allowed: bool,
+) -> dict[str, object]:
+    event: dict[str, object] = {
+        "type": "model_preload_admission_sample",
+        "sample": sample.to_record(),
+        "admission_action": admission.action.value,
+        "admission_reasons": [reason.value for reason in admission.reasons],
+        "retryable_denial": retryable,
+        "allowed_streak": (
+            2 if pair is not None and pair.allowed and transition_swap_allowed
+            else int(admission.allowed and transition_swap_allowed)
+        ),
+        "transition_swap_growth_bytes": transition_swap_growth_bytes,
+        "transition_swap_allowed": transition_swap_allowed,
+    }
+    if candidate is not None:
+        event["candidate_sample_sha256"] = candidate.sha256
+    if pair is not None:
+        event["pair_action"] = pair.action.value
+        event["pair_reasons"] = [reason.value for reason in pair.reasons]
+    return event
+
+
+def _verify_completed_preload_journal(
+    path: Path,
+    identity: _PrivatePreloadJournalIdentity,
+    *,
+    pins: V07HostSafetyPins,
+    previous_expected: ExpectedHostResources,
+    expected: ExpectedHostResources,
+    phase: str,
+    transition_index: int,
+    transition_record: Mapping[str, object],
+    expected_runtime_receipt_sha256: str,
+) -> HostSafetySample:
+    """Replay a sealed successful journal and return only its accepted sample."""
+
+    records = _read_preload_records(path, identity)
+    if len(records) < 7:
+        raise V07HostSafetyError("v0.7 preload journal record count is invalid")
+    declaration, baseline_record, started_record = records[:3]
+    completed, sealed = records[-2:]
+    instance_id = declaration.get("journal_instance_id")
+    expected_declaration = {
+        "type": "model_preload_admission_declared",
+        "journal_revision": V07_MODEL_PRELOAD_ADMISSION_JOURNAL_REVISION,
+        "host_policy_revision": V07_HOST_POLICY_REVISION,
+        "journal_instance_id": instance_id,
+        "phase": phase,
+        "transition_index": transition_index,
+        "policy_source_sha256": pins.policy_source_sha256,
+        "telemetry_collector_source_sha256": pins.telemetry_collector_source_sha256,
+        "runtime_receipt_sha256": expected_runtime_receipt_sha256,
+        "previous_expected_resources": _resource_record(previous_expected),
+        "expected_resources": _resource_record(expected),
+        "sample_interval_seconds": pins.sample_interval_seconds,
+        "required_consecutive_samples": pins.cooldown_consecutive_samples,
+        "required_free_memory_percent_minimum": (
+            pins.admission_free_percent_minimum
+        ),
+        "retryable_vm_pressure_levels": [2],
+        "timeout_seconds": pins.cooldown_timeout_seconds,
+        "max_transition_swap_growth_bytes": pins.max_phase_swap_growth_bytes,
+        "max_pair_swap_growth_bytes": pins.cooldown_max_swap_growth_bytes,
+    }
+    if (
+        not isinstance(instance_id, str)
+        or _JOURNAL_INSTANCE_ID.fullmatch(instance_id) is None
+        or _preload_domain_record(declaration) != expected_declaration
+    ):
+        raise V07HostSafetyError("v0.7 preload declaration did not reproduce")
+
+    try:
+        transition_baseline = parse_host_safety_sample(baseline_record.get("sample"))
+    except (TypeError, ValueError):
+        raise V07HostSafetyError(
+            "v0.7 preload transition baseline is invalid"
+        ) from None
+    policy = V07HostSafetyPolicy(pins)
+    baseline_decision = policy.evaluate_admission(
+        transition_baseline,
+        previous_expected,
+    )
+    expected_baseline_record = {
+        "type": "model_preload_transition_baseline",
+        "sample": transition_baseline.to_record(),
+        "admission_action": baseline_decision.action.value,
+        "admission_reasons": [reason.value for reason in baseline_decision.reasons],
+    }
+    if (
+        not baseline_decision.allowed
+        or _preload_domain_record(baseline_record) != expected_baseline_record
+    ):
+        raise V07HostSafetyError(
+            "v0.7 preload transition baseline did not reproduce"
+        )
+    admission_started = started_record.get("admission_started_monotonic_ns")
+    expected_started_record = {
+        "type": "model_preload_admission_started",
+        "admission_started_monotonic_ns": admission_started,
+        "residency_transition": dict(transition_record),
+    }
+    if (
+        type(admission_started) is not int
+        or admission_started < transition_baseline.captured_monotonic_ns
+        or _preload_domain_record(started_record) != expected_started_record
+    ):
+        raise V07HostSafetyError("v0.7 preload start did not reproduce")
+
+    sample_records = records[3:-2]
+    if not sample_records or any(
+        record.get("type") != "model_preload_admission_sample"
+        for record in sample_records
+    ):
+        raise V07HostSafetyError("v0.7 preload sample sequence is invalid")
+    candidate: HostSafetySample | None = None
+    previous_sample: HostSafetySample | None = None
+    accepted: HostSafetySample | None = None
+    timeout_ns = pins.cooldown_timeout_seconds * 1_000_000_000
+    try:
+        for index, record in enumerate(sample_records):
+            sample = parse_host_safety_sample(record.get("sample"))
+            elapsed_ns = sample.captured_monotonic_ns - admission_started
+            if (
+                sample.boot_time_unix_microseconds
+                != transition_baseline.boot_time_unix_microseconds
+                or elapsed_ns < 0
+                or elapsed_ns > timeout_ns
+                or (
+                    previous_sample is not None
+                    and sample.captured_monotonic_ns
+                    < previous_sample.captured_monotonic_ns
+                )
+            ):
+                raise ValueError("preload sample identity or order differs")
+            admission = policy.evaluate_admission(sample, expected)
+            transition_swap_growth = (
+                sample.swap_used_bytes - transition_baseline.swap_used_bytes
+            )
+            transition_swap_allowed = (
+                transition_swap_growth <= pins.max_phase_swap_growth_bytes
+            )
+            retryable = (
+                transition_swap_allowed
+                and _preload_denial_is_retryable(admission, sample)
+            )
+            pair = None
+            if admission.allowed and candidate is not None:
+                pair = policy.evaluate_cooldown_pair(
+                    candidate,
+                    sample,
+                    cooldown_started_monotonic_ns=admission_started,
+                    admission_boot_time_unix_microseconds=(
+                        transition_baseline.boot_time_unix_microseconds
+                    ),
+                    expected=expected,
+                )
+            expected_event = _preload_sample_event(
+                sample=sample,
+                admission=admission,
+                retryable=retryable,
+                candidate=candidate,
+                pair=pair,
+                transition_swap_growth_bytes=transition_swap_growth,
+                transition_swap_allowed=transition_swap_allowed,
+            )
+            if _preload_domain_record(record) != expected_event:
+                raise ValueError("preload sample event differs")
+            if not transition_swap_allowed:
+                raise ValueError("transition swap denial appears in success")
+            if not admission.allowed and not retryable:
+                raise ValueError("hard denial appears in successful journal")
+            if pair is not None:
+                if not pair.allowed or not transition_swap_allowed:
+                    raise ValueError("preload pair denial appears in success")
+                if index != len(sample_records) - 1:
+                    raise ValueError("accepted preload pair is not terminal")
+                accepted = sample
+            candidate = sample if admission.allowed else None
+            previous_sample = sample
+    except (TypeError, ValueError):
+        raise V07HostSafetyError(
+            "v0.7 preload sample evidence did not reproduce"
+        ) from None
+
+    expected_completed = {
+        "type": "model_preload_admission_completed",
+        "accepted_sample_sha256": None if accepted is None else accepted.sha256,
+        "sample_count": len(sample_records),
+        "transition_baseline_sha256": transition_baseline.sha256,
+    }
+    expected_sealed = {
+        "type": "journal_sealed",
+        "sealed_event_count": len(records) - 1,
+    }
+    if (
+        accepted is None
+        or _preload_domain_record(completed) != expected_completed
+        or _preload_domain_record(sealed) != expected_sealed
+        or len(sample_records)
+        > pins.cooldown_timeout_seconds // pins.sample_interval_seconds + 1
+    ):
+        raise V07HostSafetyError("v0.7 preload completion did not reproduce")
+    return accepted
+
+
+def open_v07_preload_stabilized_host_safety_session(
+    *,
+    pins: V07HostSafetyPins,
+    collector: HostTelemetryCollector,
+    previous_expected: ExpectedHostResources,
+    expected: ExpectedHostResources,
+    require_live_before: RequireLiveRuntime,
+    perform_transition: Callable[[], V07ResidencyReceipt],
+    require_live_runtime: RequireLiveRuntime,
+    expected_runtime_receipt_sha256: str,
+    journal_path: Path,
+    phase: str,
+    transition_index: int,
+    monotonic_ns: Callable[[], int] = time.monotonic_ns,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> V07HostSafetySession:
+    """Transition once, stabilize, seal/replay, and issue one phase session."""
+
+    policy = V07HostSafetyPolicy(pins)
+    if type(collector) is not HostTelemetryCollector:
+        raise V07HostSafetyError(
+            "v0.7 preload stabilization requires the production collector"
+        )
+    for resources, label in (
+        (previous_expected, "previous"),
+        (expected, "target"),
+    ):
+        if type(resources) is not ExpectedHostResources:
+            raise V07HostSafetyError(f"v0.7 preload {label} resources are invalid")
+        resources.__post_init__()
+        if resources.running_container_ids:
+            raise V07HostSafetyError("v0.7 preload cannot expect running containers")
+    if previous_expected.resident_models not in _ALLOWED_TRANSITION_RESOURCE_SETS:
+        raise V07HostSafetyError("v0.7 preload previous model is invalid")
+    if expected.resident_models not in _ALLOWED_PHASE_MODEL_SETS:
+        raise V07HostSafetyError("v0.7 preload target model is invalid")
+    if any(
+        not callable(value)
+        for value in (
+            require_live_before,
+            perform_transition,
+            require_live_runtime,
+            monotonic_ns,
+            sleeper,
+        )
+    ):
+        raise V07HostSafetyError("v0.7 preload execution boundary is invalid")
+    if (
+        type(expected_runtime_receipt_sha256) is not str
+        or _SHA256.fullmatch(expected_runtime_receipt_sha256) is None
+    ):
+        raise V07HostSafetyError("v0.7 preload runtime receipt is invalid")
+
+    identity = _declare_preload_journal(
+        journal_path,
+        phase=phase,
+        transition_index=transition_index,
+    )
+    instance_id = secrets.token_hex(16)
+    declaration = {
+        "type": "model_preload_admission_declared",
+        "journal_revision": V07_MODEL_PRELOAD_ADMISSION_JOURNAL_REVISION,
+        "host_policy_revision": V07_HOST_POLICY_REVISION,
+        "journal_instance_id": instance_id,
+        "phase": phase,
+        "transition_index": transition_index,
+        "policy_source_sha256": pins.policy_source_sha256,
+        "telemetry_collector_source_sha256": pins.telemetry_collector_source_sha256,
+        "runtime_receipt_sha256": expected_runtime_receipt_sha256,
+        "previous_expected_resources": _resource_record(previous_expected),
+        "expected_resources": _resource_record(expected),
+        "sample_interval_seconds": pins.sample_interval_seconds,
+        "required_consecutive_samples": pins.cooldown_consecutive_samples,
+        "required_free_memory_percent_minimum": (
+            pins.admission_free_percent_minimum
+        ),
+        "retryable_vm_pressure_levels": [2],
+        "timeout_seconds": pins.cooldown_timeout_seconds,
+        "max_transition_swap_growth_bytes": pins.max_phase_swap_growth_bytes,
+        "max_pair_swap_growth_bytes": pins.cooldown_max_swap_growth_bytes,
+    }
+    _append_preload_event(journal_path, declaration, identity)
+
+    try:
+        transition_baseline = _collect_preload_sample(
+            collector,
+            require_live_before,
+        )
+    except (KeyboardInterrupt, SystemExit):
+        _stop_preload_admission(
+            journal_path,
+            identity,
+            stop_reason="transition_baseline_collection_interrupted",
+            sample_count=0,
+        )
+        raise
+    except Exception:
+        _stop_preload_admission(
+            journal_path,
+            identity,
+            stop_reason="transition_baseline_collection_failed",
+            sample_count=0,
+        )
+        raise
+    baseline_decision = policy.evaluate_admission(
+        transition_baseline,
+        previous_expected,
+    )
+    _append_preload_event(
+        journal_path,
+        {
+            "type": "model_preload_transition_baseline",
+            "sample": transition_baseline.to_record(),
+            "admission_action": baseline_decision.action.value,
+            "admission_reasons": [
+                reason.value for reason in baseline_decision.reasons
+            ],
+        },
+        identity,
+    )
+    if not baseline_decision.allowed:
+        _stop_preload_admission(
+            journal_path,
+            identity,
+            stop_reason="transition_baseline_denied",
+            sample_count=0,
+        )
+        raise V07HostSafetyDenied("phase", baseline_decision)
+
+    try:
+        transition_record = _validate_preload_transition_record(
+            perform_transition(),
+            previous_expected=previous_expected,
+            expected=expected,
+            expected_runtime_receipt_sha256=expected_runtime_receipt_sha256,
+        )
+    except (KeyboardInterrupt, SystemExit):
+        _stop_preload_admission(
+            journal_path,
+            identity,
+            stop_reason="transition_interrupted",
+            sample_count=0,
+        )
+        raise
+    except Exception as error:
+        _stop_preload_admission(
+            journal_path,
+            identity,
+            stop_reason="transition_failed",
+            sample_count=0,
+        )
+        raise V07HostSafetyError("v0.7 model preload transition failed") from error
+    try:
+        admission_started_monotonic_ns = monotonic_ns()
+    except Exception as error:
+        _stop_preload_admission(
+            journal_path,
+            identity,
+            stop_reason="transition_clock_failed",
+            sample_count=0,
+        )
+        raise V07HostSafetyError("v0.7 preload monotonic clock failed") from error
+    if (
+        type(admission_started_monotonic_ns) is not int
+        or admission_started_monotonic_ns < transition_baseline.captured_monotonic_ns
+    ):
+        _stop_preload_admission(
+            journal_path,
+            identity,
+            stop_reason="transition_clock_failed",
+            sample_count=0,
+        )
+        raise V07HostSafetyError("v0.7 preload monotonic clock is invalid")
+    _append_preload_event(
+        journal_path,
+        {
+            "type": "model_preload_admission_started",
+            "admission_started_monotonic_ns": admission_started_monotonic_ns,
+            "residency_transition": transition_record,
+        },
+        identity,
+    )
+
+    candidate: HostSafetySample | None = None
+    previous_sample: HostSafetySample | None = None
+    maximum_samples = (
+        pins.cooldown_timeout_seconds // pins.sample_interval_seconds + 1
+    )
+    timeout_ns = pins.cooldown_timeout_seconds * 1_000_000_000
+    for sample_index in range(1, maximum_samples + 1):
+        try:
+            sample = _collect_preload_sample(collector, require_live_runtime)
+        except (KeyboardInterrupt, SystemExit):
+            _stop_preload_admission(
+                journal_path,
+                identity,
+                stop_reason="sample_collection_interrupted",
+                sample_count=sample_index - 1,
+            )
+            raise
+        except Exception:
+            _stop_preload_admission(
+                journal_path,
+                identity,
+                stop_reason="sample_collection_failed",
+                sample_count=sample_index - 1,
+            )
+            raise
+        admission = policy.evaluate_admission(sample, expected)
+        elapsed_ns = sample.captured_monotonic_ns - admission_started_monotonic_ns
+        boot_matches = (
+            sample.boot_time_unix_microseconds
+            == transition_baseline.boot_time_unix_microseconds
+        )
+        ordered = (
+            elapsed_ns >= 0
+            and (
+                previous_sample is None
+                or sample.captured_monotonic_ns
+                >= previous_sample.captured_monotonic_ns
+            )
+        )
+        transition_swap_growth = (
+            sample.swap_used_bytes - transition_baseline.swap_used_bytes
+        )
+        transition_swap_allowed = (
+            transition_swap_growth <= pins.max_phase_swap_growth_bytes
+        )
+        retryable = (
+            boot_matches
+            and ordered
+            and elapsed_ns <= timeout_ns
+            and transition_swap_allowed
+            and _preload_denial_is_retryable(admission, sample)
+        )
+        pair = None
+        if boot_matches and ordered and admission.allowed and candidate is not None:
+            pair = policy.evaluate_cooldown_pair(
+                candidate,
+                sample,
+                cooldown_started_monotonic_ns=admission_started_monotonic_ns,
+                admission_boot_time_unix_microseconds=(
+                    transition_baseline.boot_time_unix_microseconds
+                ),
+                expected=expected,
+            )
+        _append_preload_event(
+            journal_path,
+            _preload_sample_event(
+                sample=sample,
+                admission=admission,
+                retryable=retryable,
+                candidate=candidate,
+                pair=pair,
+                transition_swap_growth_bytes=transition_swap_growth,
+                transition_swap_allowed=transition_swap_allowed,
+            ),
+            identity,
+        )
+
+        hard_decision: V07HostSafetyDecision | None = None
+        if not boot_matches:
+            hard_decision = V07HostSafetyDecision(
+                V07HostSafetyAction.RECOVER,
+                (V07HostSafetyReason.BOOT_IDENTITY,),
+            )
+        elif not ordered:
+            hard_decision = V07HostSafetyDecision(
+                V07HostSafetyAction.STOP,
+                (V07HostSafetyReason.SAMPLE_ORDER,),
+            )
+        elif elapsed_ns > timeout_ns:
+            _stop_preload_admission(
+                journal_path,
+                identity,
+                stop_reason="timeout",
+                sample_count=sample_index,
+            )
+            raise V07HostSafetyError("v0.7 model preload admission timed out")
+        elif not transition_swap_allowed:
+            hard_decision = V07HostSafetyDecision(
+                V07HostSafetyAction.STOP,
+                (V07HostSafetyReason.PHASE_SWAP_GROWTH,),
+            )
+        elif not admission.allowed and not retryable:
+            hard_decision = admission
+        elif pair is not None and not pair.allowed:
+            hard_decision = pair
+        if hard_decision is not None:
+            _stop_preload_admission(
+                journal_path,
+                identity,
+                stop_reason="hard_denial",
+                sample_count=sample_index,
+            )
+            raise V07HostSafetyDenied("phase", hard_decision)
+        if pair is not None and pair.allowed:
+            _append_preload_event(
+                journal_path,
+                {
+                    "type": "model_preload_admission_completed",
+                    "accepted_sample_sha256": sample.sha256,
+                    "sample_count": sample_index,
+                    "transition_baseline_sha256": transition_baseline.sha256,
+                },
+                identity,
+            )
+            _seal_preload_journal(journal_path, identity)
+            verified = _verify_completed_preload_journal(
+                journal_path,
+                identity,
+                pins=pins,
+                previous_expected=previous_expected,
+                expected=expected,
+                phase=phase,
+                transition_index=transition_index,
+                transition_record=transition_record,
+                expected_runtime_receipt_sha256=expected_runtime_receipt_sha256,
+            )
+            session = V07HostSafetySession(
+                policy=policy,
+                collector=collector,
+                expected=expected,
+                require_live_runtime=require_live_runtime,
+                _authority=_SESSION_AUTHORITY,
+                _initial_baseline=verified,
+            )
+            _ISSUED_SESSIONS.add(session)
+            return session
+
+        candidate = sample if admission.allowed else None
+        previous_sample = sample
+        if sample_index == maximum_samples:
+            _stop_preload_admission(
+                journal_path,
+                identity,
+                stop_reason="timeout",
+                sample_count=sample_index,
+            )
+            raise V07HostSafetyError("v0.7 model preload admission timed out")
+        try:
+            sleeper(float(pins.sample_interval_seconds))
+        except Exception as error:
+            _stop_preload_admission(
+                journal_path,
+                identity,
+                stop_reason="wait_failed",
+                sample_count=sample_index,
+            )
+            raise V07HostSafetyError("v0.7 model preload wait failed") from error
+    raise AssertionError("unreachable v0.7 preload admission state")
+
+
 def open_v07_host_safety_session(
     *,
     pins: V07HostSafetyPins,
@@ -836,6 +1767,7 @@ def _decision(reasons: list[V07HostSafetyReason]) -> V07HostSafetyDecision:
 
 __all__ = (
     "V07_HOST_POLICY_REVISION",
+    "V07_MODEL_PRELOAD_ADMISSION_JOURNAL_REVISION",
     "V07EpisodeHostAdmission",
     "V07EpisodeHostEvidence",
     "V07CooldownEvidence",
@@ -846,5 +1778,6 @@ __all__ = (
     "V07HostSafetyPolicy",
     "V07HostSafetyReason",
     "V07HostSafetySession",
+    "open_v07_preload_stabilized_host_safety_session",
     "open_v07_host_safety_session",
 )

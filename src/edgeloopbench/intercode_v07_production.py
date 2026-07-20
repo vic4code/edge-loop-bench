@@ -121,7 +121,7 @@ from .model_adapter import PHI4_MINI_RAW_PROFILE, QWEN35_RAW_PROFILE
 
 
 V07_PRODUCTION_RUNNER_REVISION = (
-    "intercode-v0.7-production-runner-v6-bounded-pressure-cooldown"
+    "intercode-v0.7-production-runner-v7-model-preload-stabilization"
 )
 V07_PREFLIGHT_VM_PRESSURE_LEVEL = 1
 V07_PREFLIGHT_FREE_MEMORY_PERCENT_MINIMUM = 25
@@ -1276,6 +1276,7 @@ def execute_v07_production(
             collector=collector,
             residency_boundary=residency,
             intervention_journal_path=intervention_path,
+            preload_admission_directory=paths["model_preload_admission"],
         )
         calibration_design = build_v07_calibration_design(source)
         calibration_runtime = build_v07_calibration_runtime_composer(
@@ -1446,6 +1447,10 @@ def _create_artifact_tree(root: Path) -> dict[str, Path]:
         for path in paths.values():
             path.mkdir(mode=0o700)
             os.chmod(path, 0o700)
+        preload_directory = paths["records"] / "model-preload-admission"
+        preload_directory.mkdir(mode=0o700)
+        os.chmod(preload_directory, 0o700)
+        paths["model_preload_admission"] = preload_directory
     except OSError:
         raise V07ProductionError("v0.7 artifact tree could not be created") from None
     for path in (root, *paths.values()):

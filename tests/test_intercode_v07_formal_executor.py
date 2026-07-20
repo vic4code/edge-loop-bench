@@ -52,6 +52,7 @@ from edgeloopbench.intercode_v07_host_policy import (
     open_v07_host_safety_session,
 )
 from edgeloopbench.intercode_v07_model_phase import (
+    V07ModelPhaseError,
     V07ModelPhaseManager,
     build_v07_model_phase_manager,
 )
@@ -59,6 +60,7 @@ from edgeloopbench.intercode_v07_manifest import build_v07_execution_pins
 from edgeloopbench.intercode_v07_runner import V07EpisodeRun
 from edgeloopbench.intercode_v07_runtime_factory import (
     issue_v07_managed_residency_boundary,
+    transition_v07_model_residency,
 )
 from edgeloopbench.model_adapter import PHI4_MINI_RAW_PROFILE, QWEN35_RAW_PROFILE
 from tests.test_intercode_v07_study_binding import V07PreparedStudyTests
@@ -818,6 +820,9 @@ class V07FormalExecutorTests(unittest.TestCase):
             qwen = self.fixture.runtime_session.model_runtime(
                 QWEN35_RAW_PROFILE.model
             )
+            phi = self.fixture.runtime_session.model_runtime(
+                PHI4_MINI_RAW_PROFILE.model
+            )
             telemetry = _Telemetry(
                 qwen.expected_resident_model,
                 docker_binary=docker_binary,
@@ -841,6 +846,8 @@ class V07FormalExecutorTests(unittest.TestCase):
                 self.fixture.runtime.receipt
             )
             intervention_path = root / "interventions.jsonl"
+            preload_directory = root / "model-preload-admission"
+            preload_directory.mkdir(mode=0o700)
             from edgeloopbench.intercode_v07_interventions import (
                 declare_v07_intervention_journal,
             )
@@ -852,6 +859,9 @@ class V07FormalExecutorTests(unittest.TestCase):
                 collector=collector,
                 residency_boundary=boundary,
                 intervention_journal_path=intervention_path,
+                preload_admission_directory=preload_directory,
+                monotonic_ns=lambda: 10_000_000_000,
+                sleeper=lambda _seconds: None,
             )
             sessions = [
                 self._host_session(
@@ -866,28 +876,77 @@ class V07FormalExecutorTests(unittest.TestCase):
                     docker_binary=docker_binary,
                     model_id=QWEN35_RAW_PROFILE.model,
                 ),
+                self._host_session(
+                    docker_binary=docker_binary,
+                    model_id=PHI4_MINI_RAW_PROFILE.model,
+                ),
             ]
+
+            from edgeloopbench import ollama_loopback_http as http_module
+            from tests.test_intercode_v07_runtime_factory import FakeResidencyHttp
+
+            fake_http = FakeResidencyHttp()
+            with mock.patch.object(
+                http_module._OLLAMA_HTTP_OPENER,
+                "open",
+                side_effect=fake_http.open,
+            ):
+                receipt_boundary = issue_v07_managed_residency_boundary(
+                    self.fixture.runtime.receipt
+                )
+                receipts = (
+                    transition_v07_model_residency(
+                        previous=None,
+                        target=qwen,
+                        boundary=receipt_boundary,
+                    ),
+                    transition_v07_model_residency(
+                        previous=qwen,
+                        target=phi,
+                        boundary=receipt_boundary,
+                    ),
+                    transition_v07_model_residency(
+                        previous=phi,
+                        target=qwen,
+                        boundary=receipt_boundary,
+                    ),
+                    transition_v07_model_residency(
+                        previous=qwen,
+                        target=phi,
+                        boundary=receipt_boundary,
+                    ),
+                )
+
+            opened_preloads: list[dict[str, object]] = []
+
+            def open_preload(**kwargs):  # type: ignore[no-untyped-def]
+                opened_preloads.append(kwargs)
+                receipt = kwargs["perform_transition"]()
+                self.assertIs(receipt, receipts[len(opened_preloads) - 1])
+                return sessions[len(opened_preloads) - 1]
 
             with mock.patch(
                 "edgeloopbench.intercode_v07_model_phase."
                 "transition_v07_model_residency",
-                return_value=object(),
+                side_effect=receipts,
             ) as transition, mock.patch(
                 "edgeloopbench.intercode_v07_model_phase."
-                "open_v07_host_safety_session",
-                side_effect=sessions,
+                "open_v07_preload_stabilized_host_safety_session",
+                side_effect=open_preload,
             ) as open_host:
                 first = manager.open_calibration_phase(None, qwen)
-                phi = self.fixture.runtime_session.model_runtime(
-                    PHI4_MINI_RAW_PROFILE.model
-                )
                 second = manager.open_calibration_phase(qwen, phi)
                 third = manager.open_formal_phase(None, QWEN35_RAW_PROFILE.model)
+                fourth = manager.open_formal_phase(
+                    QWEN35_RAW_PROFILE.model,
+                    PHI4_MINI_RAW_PROFILE.model,
+                )
 
             self.assertIs(type(manager), V07ModelPhaseManager)
             self.assertIs(first, sessions[0])
             self.assertIs(second, sessions[1])
             self.assertIs(third, sessions[2])
+            self.assertIs(fourth, sessions[3])
             self.assertIsNone(transition.call_args_list[0].kwargs["previous"])
             self.assertIs(
                 transition.call_args_list[1].kwargs["previous"],
@@ -897,7 +956,65 @@ class V07FormalExecutorTests(unittest.TestCase):
                 transition.call_args_list[2].kwargs["previous"],
                 phi,
             )
-            self.assertEqual(open_host.call_count, 3)
+            self.assertIs(
+                transition.call_args_list[3].kwargs["previous"],
+                qwen,
+            )
+            self.assertEqual(open_host.call_count, 4)
+            self.assertEqual(
+                [Path(call["journal_path"]).name for call in opened_preloads],
+                [
+                    "calibration-01.jsonl",
+                    "calibration-02.jsonl",
+                    "confirmatory-01.jsonl",
+                    "confirmatory-02.jsonl",
+                ],
+            )
+            self.assertEqual(
+                [call["expected_runtime_receipt_sha256"] for call in opened_preloads],
+                [qwen.runtime_receipt_sha256] * 4,
+            )
+
+            failed_intervention = root / "failed-interventions.jsonl"
+            failed_preload = root / "failed-model-preload-admission"
+            failed_preload.mkdir(mode=0o700)
+            declare_v07_intervention_journal(failed_intervention)
+            failed_manager = build_v07_model_phase_manager(
+                runtime_session=self.fixture.runtime_session,
+                execution_pins=self.fixture.execution_pins,
+                collector=collector,
+                residency_boundary=issue_v07_managed_residency_boundary(
+                    self.fixture.runtime.receipt
+                ),
+                intervention_journal_path=failed_intervention,
+                preload_admission_directory=failed_preload,
+                monotonic_ns=lambda: 10_000_000_000,
+                sleeper=lambda _seconds: None,
+            )
+
+            def fail_after_transition(**kwargs):  # type: ignore[no-untyped-def]
+                kwargs["perform_transition"]()
+                raise V07HostSafetyError("post-load gate denied")
+
+            with mock.patch(
+                "edgeloopbench.intercode_v07_model_phase."
+                "transition_v07_model_residency",
+                return_value=receipts[0],
+            ) as failed_transition, mock.patch(
+                "edgeloopbench.intercode_v07_model_phase."
+                "open_v07_preload_stabilized_host_safety_session",
+                side_effect=fail_after_transition,
+            ):
+                with self.assertRaisesRegex(
+                    V07ModelPhaseError,
+                    "failed closed",
+                ):
+                    failed_manager.open_calibration_phase(None, qwen)
+                self.assertIsNone(failed_manager.active_model_id)
+                with self.assertRaisesRegex(V07ModelPhaseError, "terminally"):
+                    failed_manager.open_calibration_phase(None, qwen)
+
+            self.assertEqual(failed_transition.call_count, 1)
 
 
 if __name__ == "__main__":

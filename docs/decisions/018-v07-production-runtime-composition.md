@@ -15,8 +15,9 @@ admission begins for the next model.
 ## Decision
 
 Use `intercode_v07_runtime_factory.py` as the sole production composition
-boundary, revision `intercode-v0.7-production-runtime-factory-v3`. It requires
-a live launcher-issued `ManagedOllamaRuntimeReceipt`, a
+boundary, revision
+`intercode-v0.7-production-runtime-factory-v4-issued-residency-receipts`. It
+requires a live launcher-issued `ManagedOllamaRuntimeReceipt`, a
 verifier-issued `LocalModelAttestation`, a verifier-issued tokenizer-helper
 attestation, and an exact Docker daemon observation matching
 `DockerTelemetryPins`.
@@ -98,6 +99,10 @@ formal episode may start from that state. The typed residency boundary is also
 bound to the session's exact managed-runtime receipt object and digest. A
 transition receipt is minted only after the registered authority, live runtime,
 and final sole-resident observation are all rechecked.
+The v4 amendment also identity-registers each minted transition receipt.
+Canonical projection and downstream preload admission require membership in
+that issuer registry; an `object.__new__` clone with every field copied from a
+valid receipt is rejected even though its structural digest is identical.
 
 ## Consequences
 
