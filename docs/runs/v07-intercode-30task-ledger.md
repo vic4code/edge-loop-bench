@@ -760,3 +760,37 @@ This gate still contains no model outcome: no tokenizer request, Ollama model
 load, calibration row, confirmatory row, or model prompt has occurred. The next
 permitted action is a clean committed v3 production attempt under the same
 stable-normal host admission protocol.
+
+## Entry 026 — admission handoff race remained fail-closed
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: production host admission, attempt 8
+- Status: **safety stop; continuous Docker-wake supervision required**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+Attempt 8 began from clean pushed commit `a9a950d` after six consecutive
+five-second samples with pressure level `1`, zero running containers, and no
+Ollama listener. Its persisted preflight was allowed with pressure `1`, free
+memory `51%`, and 45,641,248,768 free disk bytes. The source inventory also
+sealed the expected commit before the managed empty Ollama server launched.
+
+Full host admission nevertheless denied the attempt before Docker identity
+was written. The denied sample is intentionally not persisted, so its precise
+reason cannot be reconstructed from the artifact. Immediate post-failure
+inventory found the same two exact AgentGPT containers running again, which is
+consistent with Docker Desktop waking them during the narrow handoff from the
+external stability window to the production collector. Both exact identities
+were re-inspected and stopped without changing restart policies.
+
+The next operational attempt keeps the Docker daemon actively supervised only
+until production durably writes `docker-identity.json`. During that interval,
+the supervisor may stop only those two exact pre-inventoried identities and
+must refuse any unknown running container; it exits before image build can
+progress toward benchmark-owned containers. This changes no task, arm, model,
+prompt, controller, evaluator, or scoring rule. Attempt 8 created no image
+manifest, tokenizer request, resident model, qualification row, calibration
+row, formal row, or model prompt.
