@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from edgeloopbench.intercode_managed_ollama import (
     OLLAMA_GENERATION_ENDPOINT_SHA256,
@@ -16,6 +17,7 @@ from edgeloopbench.intercode_managed_ollama import (
     ManagedOllamaRuntimeError,
     ManagedOllamaRuntimeReceipt,
     OllamaEndpointObservation,
+    _read_loopback_listener_pids,
     launch_managed_v07_ollama,
     require_live_managed_ollama_receipt,
 )
@@ -112,6 +114,31 @@ OWNED_ENDPOINT = OllamaEndpointObservation(True, "0.31.1", (4242,))
 
 
 class ManagedOllamaRuntimeTests(unittest.TestCase):
+    def test_macos_lsof_pid_output_accepts_its_mandatory_fd_record(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["/usr/sbin/lsof"],
+            0,
+            stdout=b"p4242\nf3\n",
+            stderr=b"",
+        )
+        with patch(
+            "edgeloopbench.intercode_managed_ollama.subprocess.run",
+            return_value=completed,
+        ):
+            self.assertEqual(_read_loopback_listener_pids(), (4242,))
+
+        for malformed in (b"p4242\nfX\n", b"p4242\nnlocalhost\n", b"f3\n"):
+            with self.subTest(malformed=malformed), patch(
+                "edgeloopbench.intercode_managed_ollama.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    ["/usr/sbin/lsof"],
+                    0,
+                    stdout=malformed,
+                    stderr=b"",
+                ),
+            ):
+                self.assertEqual(_read_loopback_listener_pids(), ())
+
     def launch_fixture(
         self,
         binary: Path,

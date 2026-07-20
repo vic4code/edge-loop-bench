@@ -769,6 +769,8 @@ def _read_loopback_listener_pids() -> tuple[int, ...]:
         return ()
     pids: set[int] = set()
     for line in completed.stdout.splitlines():
+        if line.startswith(b"f") and line[1:].isdigit():
+            continue
         if not line.startswith(b"p") or not line[1:].isdigit():
             return ()
         pid = int(line[1:])

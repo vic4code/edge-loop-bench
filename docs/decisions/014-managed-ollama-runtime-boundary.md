@@ -74,6 +74,14 @@ interface. The macOS implementation may use the fixed system `lsof` binary;
 HTTP identity probing uses the existing fixed loopback, proxy-free,
 redirect-rejecting boundary.
 
+The 2026-07-20 pre-measurement amendment binds the parser to macOS `lsof -Fp`
+record framing. That command emits a `p<digits>` process record and a mandatory
+`f<digits>` file-descriptor record for each matching listener. The parser
+accepts only those two record types, ignores the descriptor value, and still
+requires the unique extracted PID to equal the launcher-owned child. Unknown,
+malformed, missing, or additional PID records fail closed. This corrects a
+live-host false rejection without weakening endpoint ownership.
+
 ## Threat model
 
 - **Spoofing:** a desktop Ollama or another listener impersonates the measured

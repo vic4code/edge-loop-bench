@@ -302,3 +302,31 @@ The directly replayable structured plan passed fresh-context review, and the
 full repository check passed 676 tests with one expected APFS-only skip plus
 compile, manifest-validation, and summary-smoke gates. No experimental result
 may be inferred from this entry.
+
+## Entry 010 — first production attempt rejected by macOS listener framing
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: managed Ollama launch
+- Status: **infrastructure-invalid before model loading**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+Production attempt `v07-production-20260720-attempt1` passed its read-only host
+preflight with VM pressure level `1`, 44 percent free memory, more than 47 GB
+free disk, and zero running containers. It created only the private artifact
+tree, source inventory, preflight record, and intervention prefix before the
+managed Ollama boundary rejected endpoint ownership. The owned server was
+closed; no image, task container, model residency, tokenizer request, model
+prompt, calibration row, or formal row started.
+
+Live diagnosis reproduced the exact server version and same owned process PID,
+but the production listener parser returned an empty PID set. macOS
+`/usr/sbin/lsof -Fp` emits both `p<PID>` and mandatory `f<FD>` records; the
+parser had accepted only `p` records and rejected the legitimate descriptor
+line. A regression test using the observed `p4242\nf3\n` framing was added
+before the parser change. The correction accepts only numeric `p` and `f`
+records, extracts only PIDs, and retains exact single-owner equality. A later
+attempt must use a fresh artifact root and a new intervention-journal identity.
