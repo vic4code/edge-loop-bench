@@ -930,3 +930,39 @@ sealed admission evidence. It has no image manifest, tokenizer request,
 resident model, qualification row, calibration row, formal row, or model
 prompt. A fresh attempt may begin only after an external pressure-`1` window;
 the host threshold is not relaxed in response to this stop.
+
+## Entry 031 — attempt 12 exposed manual steward latency
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: production host admission, attempt 12
+- Status: **safety stop; prelaunched exact-ID steward required**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+Attempt 12 used clean pushed commit `6d86fe0`, a fresh artifact root, an
+already-open read-only Docker event stream, zero running containers, no Ollama
+listener, and six consecutive pressure-`1` observations across 60 seconds.
+Preflight passed at pressure `1`, 43% free memory, and 44,198,928,384 free disk
+bytes.
+
+The Docker event stream proved that both exact AgentGPT containers started as
+production entered Docker admission. The first raw sample, approximately one
+second later, recorded pressure `1`, the two exact stewarded IDs, and the sole
+retryable `RUNNING_CONTAINERS` reason. Because interactive tool round trips
+delayed the external steward, the containers remained live for approximately
+22 seconds before both exact identities were stopped and reconciled. The
+second sample at 30.694 seconds contained no container but pressure `2`, so the
+runner correctly appended `hard_denial`, sealed, closed managed Ollama, and
+exited.
+
+Attempt 12 reached no Docker identity, image plan, tokenizer request, resident
+model, qualification row, calibration row, formal row, or model prompt. The
+next attempt replaces interactive reconciliation latency with a prelaunched
+local supervisor. It may poll only after the fresh intervention journal
+exists, must refuse every unknown full ID, may stop only either of the two
+pre-inventoried identities, records every successful stop, and exits at the
+Docker-identity marker. This is an operational timing change outside the
+production authority; no benchmark or admission rule changes.
