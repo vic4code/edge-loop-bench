@@ -465,6 +465,34 @@ attested exited-container probe race flow to the frozen
 closed. [ADR 033](decisions/033-preserve-watchdog-semantics-across-process-races.md)
 records the outcome-independent change.
 
+### Pre-image admission stabilization on 2026-07-20
+
+Three production handoffs showed that Docker Desktop can restart two previously
+inventoried non-benchmark containers after an external stable-host window but
+before the runner's one-shot full admission sample. Polling and a persistent
+read-only Docker event stream did not remove that race. All three attempts
+stopped before image evidence, model loading, calibration, or any model prompt.
+
+The production runner therefore freezes one bounded read-only stabilization
+immediately before image planning. Its policy still evaluates
+`ExpectedHostResources()` with no resident models and no running containers.
+Configuration may name either zero or exactly two full, sorted, unique
+stewarded container IDs, but those IDs are not accepted resources. A denial is
+waitable only when `RUNNING_CONTAINERS` is its sole reason and the observed
+nonempty ID set is a subset of the configured pair. Production itself never
+mutates those containers; an external steward may reconcile only the exact
+pre-inventoried IDs. Every unknown container, additional policy reason,
+telemetry or liveness failure, identity change, and sample-order or cooldown
+failure stops immediately.
+
+The admitted baseline requires two consecutive fully allowed samples 30
+seconds apart and must stabilize within 600 seconds. A fresh `O_EXCL`,
+owner-mode-`0600`, identity-bound journal records every raw path-free sample and
+derived decision in a hash chain. It is terminally sealed and reverified, and
+the accepted sample is re-derived from the sealed evidence before any image
+mutation. [ADR 035](decisions/035-stabilize-pre-mutation-host-admission.md)
+records this outcome-independent runner amendment.
+
 ## 9. Stop gates before model scoring
 
 Stop rather than modify the design if any of these occurs:

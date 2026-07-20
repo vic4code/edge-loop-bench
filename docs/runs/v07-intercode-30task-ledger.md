@@ -826,3 +826,74 @@ before image build proceeds. Exact-container stopping and unknown-container
 refusal remain unchanged. Attempt 9 created no Docker manifest, tokenizer
 request, resident model, qualification row, calibration row, formal row, or
 model prompt.
+
+## Entry 028 — read-only event stream did not close the handoff race
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: production host admission, attempt 10 and pre-scoring amendment
+- Status: **safety stop; bounded in-runner stabilization frozen**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+Attempt 10 held a persistent read-only `docker events` stream while six
+consecutive samples showed pressure level `1`, zero running containers, and no
+Ollama listener. Production still denied its one-shot full admission before
+writing Docker identity; the external exact-ID steward observed and stopped
+the same two pre-inventoried AgentGPT containers only afterward. Keeping the
+daemon awake therefore did not synchronize the production sample with
+container reconciliation.
+
+The failed artifact contains only its intervention, preflight, and source
+inventory evidence. It has no image manifest, tokenizer request, resident
+model, qualification row, calibration row, formal row, or model prompt. The
+attempt remains append-only and is not eligible for resume.
+
+ADR 035 advances the production runner to
+`intercode-v0.7-production-runner-v5-admission-stabilization`. Before image
+planning, production now journals a bounded read-only stabilization. The
+expected host resources remain empty. A denial is waitable only when its sole
+reason is `RUNNING_CONTAINERS` and its nonempty observed IDs are a subset of
+the zero-or-exactly-two full, sorted, unique IDs configured for the external
+steward. Production does not stop or otherwise mutate those containers. All
+other denials stop and seal immediately; success requires two fully allowed
+samples 30 seconds apart within 600 seconds.
+
+Every raw sample and derived decision is appended to a fresh `O_EXCL`,
+owner-mode-`0600`, identity-bound, hash-chained journal. The terminal journal
+is sealed and reverified, and its accepted sample is reproduced before image
+mutation. This amendment changes no task, model, arm, prompt, controller,
+evaluator, budget, or scoring rule and was frozen with zero model outcomes.
+
+## Entry 029 — admission stabilization release gate passed
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: corrected-instrument release gate
+- Status: **ready for fresh production attempt 11**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+The current source, adversarial tests, ADR 035, design amendment, and
+append-only attempt history passed the complete repository gate. `make check`
+exited zero after **734 tests** in 141.979 seconds, with one declared skip and
+no failure or error. Python byte-compilation, all three configuration
+validations, report rendering, and the sample summary check also passed.
+
+The focused production module passed 19 tests covering exact stewarded-ID
+handling, unknown and mixed container refusal, hard second reasons, clean
+sample streak resets, the exact 600-second boundary, managed-runtime liveness
+on both sides of collection, private-journal identity replacement, same-inode
+tail mutation, exact domain schemas, impossible post-pair-denial continuation,
+sealed-before-build ordering, managed-runtime closure, and canonical CLI pair
+binding. An independent fresh-context review found no remaining blocker.
+
+This gate contains no model output. Attempt 11 must use a fresh artifact root
+and the committed source identity. Its external steward may stop only the two
+pre-inventoried full container IDs, records each successful stop as an
+`operational_reconciliation`, refuses every unknown running ID, and exits
+before Docker image work begins.

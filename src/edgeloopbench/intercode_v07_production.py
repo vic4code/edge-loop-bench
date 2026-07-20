@@ -10,13 +10,16 @@ publication authorities.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import sys
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
@@ -29,9 +32,14 @@ from .intercode_gate_manifest import HostSafetyPins
 from .intercode_host_safety import (
     DockerDaemonIdentity,
     DockerTelemetryPins,
+    ExpectedHostResources,
     HostSafetyPolicy,
+    HostSafetyReason,
+    HostSafetySample,
+    HostTelemetryError,
     HostTelemetryCollector,
     attest_docker_executable,
+    parse_host_safety_sample,
 )
 from .intercode_image_build import (
     InterCodeImageBuildRequest,
@@ -43,6 +51,7 @@ from .intercode_local_model import attest_local_ollama_model
 from .intercode_managed_ollama import (
     ManagedOllamaRuntime,
     launch_managed_v07_ollama,
+    require_live_managed_ollama_receipt,
 )
 from .intercode_replay_environment import V07_STRICT_REPLAY_EVALUATOR_SHA256
 from .intercode_source import load_intercode_source
@@ -101,13 +110,28 @@ from .intercode_v07_study_evidence import (
     analyze_v07_study_effectiveness,
     verify_v07_study_evidence,
 )
+from .journal import (
+    JournalError,
+    JournalInspection,
+    append_journal_event,
+    inspect_journal,
+    seal_journal,
+)
 from .model_adapter import PHI4_MINI_RAW_PROFILE, QWEN35_RAW_PROFILE
 
 
-V07_PRODUCTION_RUNNER_REVISION = "intercode-v0.7-production-runner-v4"
+V07_PRODUCTION_RUNNER_REVISION = (
+    "intercode-v0.7-production-runner-v5-admission-stabilization"
+)
 V07_PREFLIGHT_VM_PRESSURE_LEVEL = 1
 V07_PREFLIGHT_FREE_MEMORY_PERCENT_MINIMUM = 25
 V07_PREFLIGHT_DISK_FREE_BYTES_MINIMUM = 32 << 30
+V07_IMAGE_ADMISSION_INTERVAL_SECONDS = 30
+V07_IMAGE_ADMISSION_CONSECUTIVE_SAMPLES = 2
+V07_IMAGE_ADMISSION_TIMEOUT_SECONDS = 600
+V07_IMAGE_ADMISSION_JOURNAL_REVISION = (
+    "intercode-v0.7-image-build-admission-journal-v1"
+)
 
 _VM_PRESSURE_ARGV = (
     "/usr/sbin/sysctl",
@@ -121,6 +145,10 @@ _FREE_MEMORY = re.compile(
     rb"System-wide memory free percentage: ([0-9]{1,3})%\n?\Z"
 )
 _MAX_PROBE_BYTES = 65_536
+_MAX_ADMISSION_JOURNAL_BYTES = 8 << 20
+_JOURNAL_CHAIN_FIELDS = frozenset(
+    {"sequence", "previous_event_sha256", "event_sha256"}
+)
 
 
 class V07ProductionError(RuntimeError):
@@ -151,6 +179,7 @@ class V07ProductionConfig:
     ollama_binary: Path
     ollama_models_root: Path
     tokenizer_helper: Path
+    stewarded_container_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _existing_path(self.repository_root, directory=True, executable=False)
@@ -161,6 +190,26 @@ class V07ProductionConfig:
         _existing_path(self.ollama_binary, directory=False, executable=True)
         _existing_path(self.ollama_models_root, directory=True, executable=False)
         _planned_executable_path(self.tokenizer_helper)
+        try:
+            ExpectedHostResources(
+                running_container_ids=self.stewarded_container_ids
+            )
+        except ValueError:
+            raise V07ProductionError(
+                "v0.7 stewarded container identities are invalid"
+            ) from None
+        if len(self.stewarded_container_ids) not in (0, 2):
+            raise V07ProductionError(
+                "v0.7 requires zero or two stewarded container identities"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class _PrivateAdmissionJournalIdentity:
+    parent_device: int
+    parent_inode: int
+    file_device: int
+    file_inode: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +363,641 @@ def inspect_v07_production_preflight(
     )
 
 
+def _await_image_build_admission(
+    collector: HostTelemetryCollector,
+    pins: HostSafetyPins,
+    journal_path: Path,
+    *,
+    stewarded_container_ids: tuple[str, ...] = (),
+    require_live_runtime: Callable[[], object],
+    sleep: Callable[[float], object] = time.sleep,
+) -> HostSafetySample:
+    """Journal a bounded, read-only stabilization before any Docker mutation."""
+
+    if (
+        not callable(getattr(collector, "collect", None))
+        or type(pins) is not HostSafetyPins
+        or type(journal_path) is not type(Path())
+        or not journal_path.is_absolute()
+        or not callable(require_live_runtime)
+        or not callable(sleep)
+    ):
+        raise V07ProductionError("v0.7 image admission boundary is invalid")
+    try:
+        stewarded = ExpectedHostResources(
+            running_container_ids=stewarded_container_ids
+        )
+    except ValueError:
+        raise V07ProductionError(
+            "v0.7 stewarded container identities are invalid"
+        ) from None
+    if len(stewarded.running_container_ids) not in (0, 2):
+        raise V07ProductionError(
+            "v0.7 requires zero or two stewarded container identities"
+        )
+    frozen_timing = (
+        pins.sample_interval_seconds,
+        pins.cooldown_consecutive_samples,
+        pins.cooldown_timeout_seconds,
+    )
+    if frozen_timing != (
+        V07_IMAGE_ADMISSION_INTERVAL_SECONDS,
+        V07_IMAGE_ADMISSION_CONSECUTIVE_SAMPLES,
+        V07_IMAGE_ADMISSION_TIMEOUT_SECONDS,
+    ):
+        raise V07ProductionError("v0.7 image admission timing pins drifted")
+    expected = ExpectedHostResources()
+    policy = HostSafetyPolicy(pins)
+    identity = _declare_private_journal(journal_path)
+    _append_admission_event(
+        journal_path,
+        {
+            "type": "image_build_admission_declared",
+            "expected_resources": {
+                "resident_models": [],
+                "running_container_ids": [],
+            },
+            "journal_revision": V07_IMAGE_ADMISSION_JOURNAL_REVISION,
+            "journal_instance_id": secrets.token_hex(16),
+            "policy_sha256": pins.policy_sha256,
+            "runner_revision": V07_PRODUCTION_RUNNER_REVISION,
+            "sample_interval_seconds": V07_IMAGE_ADMISSION_INTERVAL_SECONDS,
+            "required_consecutive_samples": (
+                V07_IMAGE_ADMISSION_CONSECUTIVE_SAMPLES
+            ),
+            "stewarded_container_ids": list(
+                stewarded.running_container_ids
+            ),
+            "telemetry_collector_sha256": pins.telemetry_collector_sha256,
+            "timeout_seconds": V07_IMAGE_ADMISSION_TIMEOUT_SECONDS,
+        },
+        identity,
+    )
+    started_monotonic_ns: int | None = None
+    initial_boot_time: int | None = None
+    previous_monotonic_ns: int | None = None
+    candidate: HostSafetySample | None = None
+    sample_count = 0
+    maximum_samples = (
+        V07_IMAGE_ADMISSION_TIMEOUT_SECONDS
+        // V07_IMAGE_ADMISSION_INTERVAL_SECONDS
+        + 1
+    )
+
+    while sample_count < maximum_samples:
+        try:
+            require_live_runtime()
+        except Exception:
+            _stop_image_admission(
+                journal_path,
+                stop_reason="runtime_liveness_error",
+                sample_count=sample_count,
+                identity=identity,
+            )
+            raise V07ProductionError(
+                "v0.7 managed Ollama runtime became unavailable"
+            ) from None
+        try:
+            sample = collector.collect()
+        except HostTelemetryError:
+            _stop_image_admission(
+                journal_path,
+                stop_reason="telemetry_error",
+                sample_count=sample_count,
+                identity=identity,
+            )
+            raise V07ProductionError(
+                "v0.7 image admission telemetry failed"
+            ) from None
+        if type(sample) is not HostSafetySample:
+            _stop_image_admission(
+                journal_path,
+                stop_reason="telemetry_error",
+                sample_count=sample_count,
+                identity=identity,
+            )
+            raise V07ProductionError("v0.7 image admission sample is invalid")
+        try:
+            require_live_runtime()
+        except Exception:
+            _stop_image_admission(
+                journal_path,
+                stop_reason="runtime_liveness_error",
+                sample_count=sample_count,
+                identity=identity,
+            )
+            raise V07ProductionError(
+                "v0.7 managed Ollama runtime became unavailable"
+            ) from None
+
+        sample_count += 1
+        if started_monotonic_ns is None:
+            started_monotonic_ns = sample.captured_monotonic_ns
+            initial_boot_time = sample.boot_time_unix_microseconds
+        assert initial_boot_time is not None
+        assert started_monotonic_ns is not None
+        boot_changed = sample.boot_time_unix_microseconds != initial_boot_time
+        sample_order_changed = (
+            previous_monotonic_ns is not None
+            and sample.captured_monotonic_ns < previous_monotonic_ns
+        )
+        try:
+            admission = policy.evaluate_admission(sample, expected)
+            pair = None
+            if admission.allowed and candidate is not None and not boot_changed:
+                pair = policy.evaluate_cooldown_pair(
+                    candidate,
+                    sample,
+                    cooldown_started_monotonic_ns=started_monotonic_ns,
+                    admission_boot_time_unix_microseconds=initial_boot_time,
+                    expected=expected,
+                )
+        except ValueError:
+            _stop_image_admission(
+                journal_path,
+                stop_reason="policy_error",
+                sample_count=sample_count,
+                identity=identity,
+            )
+            raise V07ProductionError(
+                "v0.7 image admission policy evaluation failed"
+            ) from None
+        observed_containers = set(sample.running_container_ids)
+        retryable_denial = (
+            admission.reasons == (HostSafetyReason.RUNNING_CONTAINERS,)
+            and bool(observed_containers)
+            and observed_containers.issubset(
+                stewarded.running_container_ids
+            )
+        )
+        sample_event: dict[str, object] = {
+            "type": "image_build_admission_sample",
+            "sample": sample.to_record(),
+            "admission_action": admission.action.value,
+            "admission_reasons": [reason.value for reason in admission.reasons],
+            "retryable_denial": retryable_denial,
+            "allowed_streak": (
+                2 if pair is not None and pair.allowed else int(admission.allowed)
+            ),
+        }
+        if candidate is not None:
+            sample_event["candidate_sample_sha256"] = candidate.sha256
+        if pair is not None:
+            sample_event["pair_action"] = pair.action.value
+            sample_event["pair_reasons"] = [reason.value for reason in pair.reasons]
+        _append_admission_event(journal_path, sample_event, identity)
+
+        elapsed_ns = sample.captured_monotonic_ns - started_monotonic_ns
+        hard_denial = not admission.allowed and not retryable_denial
+        pair_denied = pair is not None and not pair.allowed
+        if boot_changed or sample_order_changed or hard_denial or pair_denied:
+            _stop_image_admission(
+                journal_path,
+                stop_reason="hard_denial",
+                sample_count=sample_count,
+                identity=identity,
+            )
+            raise V07ProductionError("v0.7 image admission was denied")
+        if pair is not None and pair.allowed:
+            _append_admission_event(
+                journal_path,
+                {
+                    "type": "image_build_admission_completed",
+                    "accepted_sample_sha256": sample.sha256,
+                    "sample_count": sample_count,
+                },
+                identity,
+            )
+            _seal_admission_journal(journal_path, identity)
+            return _verify_completed_admission_journal(
+                journal_path,
+                identity,
+                pins=pins,
+                stewarded_container_ids=stewarded.running_container_ids,
+            )
+        if (
+            elapsed_ns >= V07_IMAGE_ADMISSION_TIMEOUT_SECONDS * 1_000_000_000
+            or sample_count >= maximum_samples
+        ):
+            _stop_image_admission(
+                journal_path,
+                stop_reason="timeout",
+                sample_count=sample_count,
+                identity=identity,
+            )
+            raise V07ProductionError("v0.7 image admission did not stabilize")
+
+        candidate = sample if admission.allowed else None
+        previous_monotonic_ns = sample.captured_monotonic_ns
+        try:
+            sleep(float(V07_IMAGE_ADMISSION_INTERVAL_SECONDS))
+        except (OSError, ValueError):
+            _stop_image_admission(
+                journal_path,
+                stop_reason="sleep_error",
+                sample_count=sample_count,
+                identity=identity,
+            )
+            raise V07ProductionError(
+                "v0.7 image admission wait failed"
+            ) from None
+
+    raise AssertionError("bounded image admission loop exhausted unexpectedly")
+
+
+def _declare_private_journal(path: Path) -> _PrivateAdmissionJournalIdentity:
+    parent_descriptor = -1
+    descriptor = -1
+    parent_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    parent_flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    identity: _PrivateAdmissionJournalIdentity | None = None
+    try:
+        parent_descriptor = os.open(path.parent, parent_flags)
+        parent = os.fstat(parent_descriptor)
+        if (
+            not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.getuid()
+            or stat.S_IMODE(parent.st_mode) != 0o700
+        ):
+            raise OSError("unsafe parent")
+        descriptor = os.open(
+            path.name,
+            flags,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size != 0
+        ):
+            raise OSError("unsafe journal")
+        identity = _PrivateAdmissionJournalIdentity(
+            parent_device=parent.st_dev,
+            parent_inode=parent.st_ino,
+            file_device=metadata.st_dev,
+            file_inode=metadata.st_ino,
+        )
+        os.fsync(descriptor)
+        os.fsync(parent_descriptor)
+    except OSError:
+        raise V07ProductionError(
+            "v0.7 image admission journal could not be declared"
+        ) from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+    assert identity is not None
+    _validate_private_journal(path, identity)
+    return identity
+
+
+def _validate_private_journal(
+    path: Path,
+    identity: _PrivateAdmissionJournalIdentity,
+) -> None:
+    parent_descriptor = -1
+    descriptor = -1
+    parent_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    parent_flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    file_flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        parent_descriptor = os.open(path.parent, parent_flags)
+        parent = os.fstat(parent_descriptor)
+        descriptor = os.open(path.name, file_flags, dir_fd=parent_descriptor)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != os.getuid()
+            or stat.S_IMODE(parent.st_mode) != 0o700
+            or parent.st_dev != identity.parent_device
+            or parent.st_ino != identity.parent_inode
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_dev != identity.file_device
+            or metadata.st_ino != identity.file_inode
+        ):
+            raise OSError("journal identity changed")
+    except OSError:
+        raise V07ProductionError(
+            "v0.7 image admission journal identity changed"
+        ) from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+
+
+def _append_admission_event(
+    path: Path,
+    event: Mapping[str, object],
+    identity: _PrivateAdmissionJournalIdentity,
+) -> None:
+    try:
+        _validate_private_journal(path, identity)
+        append_journal_event(path, event)
+        _validate_private_journal(path, identity)
+    except (JournalError, OSError, ValueError):
+        raise V07ProductionError(
+            "v0.7 image admission journal append failed"
+        ) from None
+
+
+def _seal_admission_journal(
+    path: Path,
+    identity: _PrivateAdmissionJournalIdentity,
+) -> None:
+    try:
+        _validate_private_journal(path, identity)
+        seal_journal(path)
+        _validate_private_journal(path, identity)
+        inspect_journal(path, require_sealed=True)
+        _validate_private_journal(path, identity)
+    except (JournalError, OSError, ValueError):
+        raise V07ProductionError(
+            "v0.7 image admission journal seal failed"
+        ) from None
+
+
+def _read_private_admission_records(
+    path: Path,
+    identity: _PrivateAdmissionJournalIdentity,
+) -> tuple[list[dict[str, object]], JournalInspection]:
+    _validate_private_journal(path, identity)
+    parent_descriptor = -1
+    descriptor = -1
+    parent_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    parent_flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    file_flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        parent_descriptor = os.open(path.parent, parent_flags)
+        descriptor = os.open(path.name, file_flags, dir_fd=parent_descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_SH)
+        metadata = os.fstat(descriptor)
+        if (
+            metadata.st_dev != identity.file_device
+            or metadata.st_ino != identity.file_inode
+            or metadata.st_size > _MAX_ADMISSION_JOURNAL_BYTES
+        ):
+            raise OSError("journal identity or size changed")
+        snapshots = tuple(
+            _read_bounded_admission_snapshot(descriptor)
+            for _ in range(3)
+        )
+        inspection = inspect_journal(path, require_sealed=True)
+        final_metadata = os.fstat(descriptor)
+        if (
+            snapshots[0] != snapshots[1]
+            or snapshots[1] != snapshots[2]
+            or metadata.st_size != len(snapshots[0])
+            or final_metadata.st_size != metadata.st_size
+            or final_metadata.st_mtime_ns != metadata.st_mtime_ns
+            or final_metadata.st_ctime_ns != metadata.st_ctime_ns
+            or inspection.file_byte_length != len(snapshots[0])
+            or inspection.complete_byte_length != len(snapshots[0])
+        ):
+            raise OSError("journal changed during verification")
+        payload = snapshots[0]
+    except (JournalError, OSError, ValueError):
+        raise V07ProductionError(
+            "v0.7 image admission journal could not be verified"
+        ) from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+    _validate_private_journal(path, identity)
+    try:
+        parsed = [json.loads(line) for line in payload.splitlines()]
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise V07ProductionError(
+            "v0.7 image admission journal is not valid JSONL"
+        ) from None
+    if any(not isinstance(record, dict) for record in parsed):
+        raise V07ProductionError(
+            "v0.7 image admission journal record is invalid"
+        )
+    return parsed, inspection
+
+
+def _read_bounded_admission_snapshot(descriptor: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(descriptor, 65_536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _MAX_ADMISSION_JOURNAL_BYTES:
+            raise OSError("journal exceeds read bound")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _verify_completed_admission_journal(
+    path: Path,
+    identity: _PrivateAdmissionJournalIdentity,
+    *,
+    pins: HostSafetyPins,
+    stewarded_container_ids: tuple[str, ...],
+) -> HostSafetySample:
+    """Re-derive the accepted baseline only from sealed raw evidence."""
+
+    records, inspection = _read_private_admission_records(path, identity)
+    if inspection.record_count != len(records) or len(records) < 4:
+        raise V07ProductionError(
+            "v0.7 image admission journal record count is invalid"
+        )
+    declaration = records[0]
+    completed = records[-2]
+    sealed = records[-1]
+    instance_id = declaration.get("journal_instance_id")
+    expected_declaration = {
+        "type": "image_build_admission_declared",
+        "journal_revision": V07_IMAGE_ADMISSION_JOURNAL_REVISION,
+        "runner_revision": V07_PRODUCTION_RUNNER_REVISION,
+        "policy_sha256": pins.policy_sha256,
+        "telemetry_collector_sha256": pins.telemetry_collector_sha256,
+        "expected_resources": {
+            "resident_models": [],
+            "running_container_ids": [],
+        },
+        "stewarded_container_ids": list(stewarded_container_ids),
+        "sample_interval_seconds": pins.sample_interval_seconds,
+        "required_consecutive_samples": pins.cooldown_consecutive_samples,
+        "timeout_seconds": pins.cooldown_timeout_seconds,
+        "journal_instance_id": instance_id,
+    }
+    if _journal_domain_record(declaration) != expected_declaration:
+        raise V07ProductionError(
+            "v0.7 image admission declaration differs from its pins"
+        )
+    if (
+        type(instance_id) is not str
+        or re.fullmatch(r"[0-9a-f]{32}", instance_id) is None
+        or completed.get("type") != "image_build_admission_completed"
+        or sealed.get("type") != "journal_sealed"
+    ):
+        raise V07ProductionError(
+            "v0.7 image admission terminal records are invalid"
+        )
+
+    sample_records = records[1:-2]
+    if not sample_records or any(
+        record.get("type") != "image_build_admission_sample"
+        for record in sample_records
+    ):
+        raise V07ProductionError(
+            "v0.7 image admission sample sequence is invalid"
+        )
+    policy = HostSafetyPolicy(pins)
+    expected = ExpectedHostResources()
+    samples: list[HostSafetySample] = []
+    candidate: HostSafetySample | None = None
+    accepted_pair = None
+    first_monotonic_ns: int | None = None
+    boot_time: int | None = None
+    stewarded = set(stewarded_container_ids)
+    try:
+        for index, record in enumerate(sample_records):
+            sample = parse_host_safety_sample(record.get("sample"))
+            samples.append(sample)
+            if first_monotonic_ns is None:
+                first_monotonic_ns = sample.captured_monotonic_ns
+                boot_time = sample.boot_time_unix_microseconds
+            assert first_monotonic_ns is not None
+            assert boot_time is not None
+            admission = policy.evaluate_admission(sample, expected)
+            observed = set(sample.running_container_ids)
+            retryable = (
+                admission.reasons == (HostSafetyReason.RUNNING_CONTAINERS,)
+                and bool(observed)
+                and observed.issubset(stewarded)
+            )
+            if (
+                (not admission.allowed and not retryable)
+                or sample.boot_time_unix_microseconds != boot_time
+                or (
+                    index > 0
+                    and sample.captured_monotonic_ns
+                    < samples[index - 1].captured_monotonic_ns
+                )
+            ):
+                raise ValueError("sample decision differs")
+            pair = None
+            if admission.allowed and candidate is not None:
+                pair = policy.evaluate_cooldown_pair(
+                    candidate,
+                    sample,
+                    cooldown_started_monotonic_ns=first_monotonic_ns,
+                    admission_boot_time_unix_microseconds=boot_time,
+                    expected=expected,
+                )
+            streak = 2 if pair is not None and pair.allowed else int(admission.allowed)
+            expected_sample_record: dict[str, object] = {
+                "type": "image_build_admission_sample",
+                "sample": sample.to_record(),
+                "admission_action": admission.action.value,
+                "admission_reasons": [
+                    reason.value for reason in admission.reasons
+                ],
+                "retryable_denial": retryable,
+                "allowed_streak": streak,
+            }
+            if candidate is not None:
+                expected_sample_record["candidate_sample_sha256"] = (
+                    candidate.sha256
+                )
+            if pair is not None:
+                expected_sample_record["pair_action"] = pair.action.value
+                expected_sample_record["pair_reasons"] = [
+                    reason.value for reason in pair.reasons
+                ]
+            if _journal_domain_record(record) != expected_sample_record:
+                raise ValueError("sample event differs")
+            if pair is not None and not pair.allowed:
+                raise ValueError("pair denial was not terminal")
+            if pair is not None and pair.allowed:
+                if index != len(sample_records) - 1:
+                    raise ValueError("completed pair is not terminal")
+                accepted_pair = pair
+            candidate = sample if admission.allowed else None
+    except (TypeError, ValueError):
+        raise V07ProductionError(
+            "v0.7 image admission evidence did not reproduce"
+        ) from None
+
+    accepted = samples[-1]
+    expected_completed = {
+        "type": "image_build_admission_completed",
+        "accepted_sample_sha256": accepted.sha256,
+        "sample_count": len(samples),
+    }
+    expected_sealed = {
+        "type": "journal_sealed",
+        "sealed_event_count": len(records) - 1,
+    }
+    if (
+        accepted_pair is None
+        or _journal_domain_record(completed) != expected_completed
+        or _journal_domain_record(sealed) != expected_sealed
+        or len(samples) > (
+            pins.cooldown_timeout_seconds // pins.sample_interval_seconds + 1
+        )
+        or accepted.captured_monotonic_ns - samples[0].captured_monotonic_ns
+        > pins.cooldown_timeout_seconds * 1_000_000_000
+    ):
+        raise V07ProductionError(
+            "v0.7 image admission completion did not reproduce"
+        )
+    return accepted
+
+
+def _journal_domain_record(record: Mapping[str, object]) -> dict[str, object]:
+    if not _JOURNAL_CHAIN_FIELDS.issubset(record):
+        raise V07ProductionError(
+            "v0.7 image admission journal framing is invalid"
+        )
+    return {
+        key: value
+        for key, value in record.items()
+        if key not in _JOURNAL_CHAIN_FIELDS
+    }
+
+
+def _stop_image_admission(
+    path: Path,
+    *,
+    stop_reason: str,
+    sample_count: int,
+    identity: _PrivateAdmissionJournalIdentity,
+) -> None:
+    _append_admission_event(
+        path,
+        {
+            "type": "image_build_admission_stopped",
+            "stop_reason": stop_reason,
+            "sample_count": sample_count,
+        },
+        identity,
+    )
+    _seal_admission_journal(path, identity)
+
+
 def execute_v07_production(
     config: V07ProductionConfig,
 ) -> V07ProductionResult:
@@ -377,17 +1061,24 @@ def execute_v07_production(
             docker_pins=docker_pins,
             environment=environment,
         )
-        baseline = collector.collect()
-        if type(baseline.docker_daemon) is not DockerDaemonIdentity:
-            raise V07ProductionError("v0.7 Docker daemon identity is unavailable")
         legacy_safety = _image_build_safety_pins(
             inventory=inventory,
             docker_pins=docker_pins,
             managed=managed,
         )
         image_policy = HostSafetyPolicy(legacy_safety)
-        if not image_policy.evaluate_admission(baseline).allowed:
-            raise V07ProductionError("v0.7 full host admission was denied")
+        baseline = _await_image_build_admission(
+            collector,
+            legacy_safety,
+            paths["records"] / "image-build-admission.jsonl",
+            stewarded_container_ids=config.stewarded_container_ids,
+            require_live_runtime=lambda: require_live_managed_ollama_receipt(
+                managed.receipt
+            ),
+            sleep=time.sleep,
+        )
+        if type(baseline.docker_daemon) is not DockerDaemonIdentity:
+            raise V07ProductionError("v0.7 Docker daemon identity is unavailable")
         _write_record(
             paths["records"] / "docker-identity.json",
             baseline.docker_daemon.to_record(),
@@ -992,6 +1683,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ollama-binary", required=True)
     parser.add_argument("--ollama-models-root", required=True)
     parser.add_argument("--tokenizer-helper", required=True)
+    parser.add_argument(
+        "--stewarded-container-id",
+        action="append",
+        default=[],
+    )
     parser.add_argument("--execute", action="store_true")
     arguments = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
@@ -1004,6 +1700,9 @@ def main(argv: list[str] | None = None) -> int:
             ollama_binary=_command_path(arguments.ollama_binary),
             ollama_models_root=_command_path(arguments.ollama_models_root),
             tokenizer_helper=_command_path(arguments.tokenizer_helper),
+            stewarded_container_ids=tuple(
+                sorted(arguments.stewarded_container_id)
+            ),
         )
         if arguments.execute:
             payload = execute_v07_production(config).canonical_record()
