@@ -51,6 +51,7 @@ def _result(episode: CampaignEpisode, *, strict_success: bool = False) -> Intera
         logical_prompt_tokens=100 * calls,
         logical_completion_tokens=10 * calls,
         environment_actions=calls,
+        replayed_environment_actions=0,
         evaluator_calls=calls + 1,
         checkpoint_creates=calls,
         checkpoint_restores=0,

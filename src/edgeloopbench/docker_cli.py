@@ -63,6 +63,14 @@ CONTAINER_USER = "65532:65532"
 CONTAINER_WORKDIR = "/"
 CONTAINER_OS = "linux"
 CONTAINER_ARCHITECTURE = "arm64"
+RUNTIME_ROOT_MUTATION_ARGV = ("/bin/chmod", "1777", "/")
+RUNTIME_ROOT_ATTESTATION_ARGV = (
+    "/usr/bin/stat",
+    "--format=%u:%g:%a",
+    "--",
+    "/",
+)
+RUNTIME_ROOT_ATTESTATION_STDOUT = "0:0:1777\n"
 ACTION_START_MARKER = b"\x1eELB_ACTION_STARTED_V1\x1f\n"
 ACTION_WRAPPER_ARG0 = "edgeloop-action-v1"
 ACTION_WRAPPER_SCRIPT = (
@@ -94,6 +102,8 @@ _STATE_PROFILE_PATTERN = re.compile(r"^fs[1-4]$")
 _MAX_ACTION_BYTES = 8 * 1024
 _MAX_CWD_BYTES = 4 * 1024
 _MAX_TRUSTED_STATE_BYTES = 4 * 1024 * 1024
+WRITABLE_LAYER_STORAGE_MODE = "sampled-size-rw-no-hard-quota-v1"
+DEFAULT_FSIZE_BYTES = 16 * 1024 * 1024
 _STATE_COLLECTOR_ARGV = (
     "/usr/bin/python3 -I -S -B /opt/edgeloop/state_collector.py --profile fsN"
 )
@@ -162,18 +172,25 @@ class DockerOrphanedResourceError(DockerCliError):
 class DockerLimits:
     memory_bytes: int
     memory_swap_bytes: int
-    storage_bytes: int
+    writable_layer_watchdog_bytes: int
     nano_cpus: int
     pids_limit: int
     nofile_soft: int
     nofile_hard: int
     nproc_soft: int
     nproc_hard: int
+    fsize_soft: int = DEFAULT_FSIZE_BYTES
+    fsize_hard: int = DEFAULT_FSIZE_BYTES
+    storage_enforcement_mode: str = WRITABLE_LAYER_STORAGE_MODE
 
     def __post_init__(self) -> None:
         for field, value in self.__dict__.items():
+            if field == "storage_enforcement_mode":
+                continue
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"Docker limit {field} must be a positive integer")
+        if self.storage_enforcement_mode != WRITABLE_LAYER_STORAGE_MODE:
+            raise ValueError("Docker storage enforcement mode differs from the frozen mode")
         if self.memory_swap_bytes != self.memory_bytes:
             raise ValueError(
                 "memory_swap_bytes must equal memory_bytes to prevent container swap"
@@ -182,6 +199,8 @@ class DockerLimits:
             raise ValueError("nofile_soft must not exceed nofile_hard")
         if self.nproc_soft > self.nproc_hard:
             raise ValueError("nproc_soft must not exceed nproc_hard")
+        if self.fsize_soft > self.fsize_hard:
+            raise ValueError("fsize_soft must not exceed fsize_hard")
         if self.nano_cpus > 64_000_000_000:
             raise ValueError("nano_cpus exceeds the supported safety ceiling")
         if self.pids_limit > 4096:
@@ -467,7 +486,7 @@ class DockerCli:
         ) from cause
 
     def start_container(self, container: DockerContainer) -> DockerContainer:
-        """Start one exact created container and attest the running result."""
+        """Start one exact container and normalize its exported root mount."""
 
         self._require_container_handle(container)
         self._verify_local_daemon()
@@ -479,6 +498,31 @@ class DockerCli:
             raise DockerSecurityError(
                 "Docker container start did not report the exact full id"
             )
+        mutation = self._invoke(
+            "container",
+            "exec",
+            "--user",
+            "0:0",
+            container.identifier,
+            *RUNTIME_ROOT_MUTATION_ARGV,
+        )
+        if mutation.stdout or mutation.stderr:
+            raise DockerSecurityError("runtime root mode mutation produced output")
+        attestation = self._invoke(
+            "container",
+            "exec",
+            "--user",
+            "0:0",
+            container.identifier,
+            *RUNTIME_ROOT_ATTESTATION_ARGV,
+        )
+        if attestation.stderr:
+            raise DockerSecurityError("runtime root mount attestation produced stderr")
+        if attestation.stdout != RUNTIME_ROOT_ATTESTATION_STDOUT:
+            raise DockerSecurityError(
+                "runtime root owner or mode differs from UID 0, GID 0, mode 01777"
+            )
+        self._attest_container_lifecycle(container, lifecycle="running")
         return container
 
     def collect_trusted_state(
@@ -622,6 +666,56 @@ class DockerCli:
             raise DockerSecurityError("container image identity changed after validation")
         return running
 
+    def inspect_container_writable_layer_bytes(
+        self,
+        *,
+        container: DockerContainer,
+        timeout_seconds: float,
+    ) -> int:
+        """Sample ``SizeRw`` for one exact running container.
+
+        Docker Desktop does not provide the frozen study with a supported hard
+        writable-layer quota.  This sampled value is therefore a watchdog
+        signal, not a capacity guarantee.
+        """
+
+        self._require_container_handle(container)
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(float(timeout_seconds))
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("writable-layer probe timeout must be positive")
+        result = self._invoke(
+            "container",
+            "inspect",
+            "--size",
+            "--",
+            container.identifier,
+            timeout_seconds=float(timeout_seconds),
+        )
+        inspected = _decode_single_inspection(
+            result.stdout, "Docker sized container inspection"
+        )
+        expected_labels = _runtime_labels(container.spec, container.name)
+        image_id = self._validate_security_profile(
+            inspected,
+            identifier=container.identifier,
+            name=container.name,
+            spec=container.spec,
+            labels=expected_labels,
+            running=True,
+        )
+        if image_id != container.image_id:
+            raise DockerSecurityError(
+                "container image identity changed during writable-layer probe"
+            )
+        size = inspected.get("SizeRw")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise DockerSecurityError("container writable layer size is unavailable")
+        return size
+
     def list_run_containers(self, run_id: str) -> tuple[str, ...]:
         """Discover stopped or running resources carrying the exact run labels."""
 
@@ -709,12 +803,12 @@ class DockerCli:
                 str(limit.memory_bytes),
                 "--memory-swap",
                 str(limit.memory_swap_bytes),
-                "--storage-opt",
-                f"size={limit.storage_bytes}",
                 "--cpus",
                 _render_cpus(limit.nano_cpus),
                 "--pids-limit",
                 str(limit.pids_limit),
+                "--ulimit",
+                f"fsize={limit.fsize_soft}:{limit.fsize_hard}",
                 "--ulimit",
                 f"nofile={limit.nofile_soft}:{limit.nofile_hard}",
                 "--ulimit",
@@ -822,10 +916,22 @@ class DockerCli:
         self,
         *arguments: str,
         pinned_endpoint: bool = True,
+        timeout_seconds: float | None = None,
     ) -> DockerCommandResult:
         for argument in arguments:
             if not isinstance(argument, str) or "\x00" in argument:
                 raise ValueError("Docker argv entries must be NUL-free strings")
+        if timeout_seconds is None:
+            timeout = self._command_timeout_seconds
+        elif (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(float(timeout_seconds))
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("Docker command timeout override must be positive")
+        else:
+            timeout = float(timeout_seconds)
         argv = list(self._build_argv(*arguments, pinned_endpoint=pinned_endpoint))
         try:
             completed = self._runner(
@@ -837,7 +943,7 @@ class DockerCli:
                 encoding="utf-8",
                 errors="strict",
                 env=dict(self._env),
-                timeout=self._command_timeout_seconds,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired as error:
             raise DockerCommandTimeout("Docker CLI command timed out") from error
@@ -1041,13 +1147,11 @@ class DockerCli:
         _require_exact_integer(
             host.get("MemorySwap"), limits.memory_swap_bytes, "memory swap"
         )
-        if host.get("StorageOpt") != {"size": str(limits.storage_bytes)}:
-            raise DockerSecurityError(
-                "container writable-layer storage limit differs from the frozen value"
-            )
+        _require_empty(host.get("StorageOpt"), "storage options")
         _require_exact_integer(host.get("NanoCpus"), limits.nano_cpus, "CPU")
         _require_exact_integer(host.get("PidsLimit"), limits.pids_limit, "pids")
         expected_ulimits = {
+            "fsize": (limits.fsize_soft, limits.fsize_hard),
             "nofile": (limits.nofile_soft, limits.nofile_hard),
             "nproc": (limits.nproc_soft, limits.nproc_hard),
         }
@@ -1065,7 +1169,13 @@ class DockerCli:
             raise DockerSecurityError("container restart policy must be exactly no")
         if host.get("AutoRemove") is not False:
             raise DockerSecurityError("container auto-remove must be disabled")
-        if host.get("OomKillDisable") is not False:
+        if "OomKillDisable" not in host:
+            raise DockerSecurityError("container OOM kill must remain enabled")
+        oom_kill_disable = host["OomKillDisable"]
+        if not (
+            oom_kill_disable is False
+            or ((running or exited) and oom_kill_disable is None)
+        ):
             raise DockerSecurityError("container OOM kill must remain enabled")
         return image_id
 

@@ -52,15 +52,18 @@ After final fixture ownership is set, the build creates the initial commit at
 a fixed timestamp. It then rebuilds the Git index from `HEAD` so every index
 stat-cache field is zero, normalizes `/.git` and `/.gitignore` mtimes, and makes
 the metadata root-owned and read-only. Sticky-root semantics prevent UID 65532
-from replacing either path. Gold commands, evaluator code, private task
+from replacing either path. Gold commands, scoring evaluator code, private task
 references, and host paths never enter the agent image or daemon build context.
 Scoring invokes absolute system Git with fixed arguments and optional locks
 disabled, so candidate configuration or `PATH` cannot change the observation.
 
-The root `.dockerignore` still excludes the workspace by default. It admits
-`docker/intercode/**` plus exactly the parent chain and byte-pinned upstream
-`docker.gitignore`; source rows, gold data, local results, logs, and host Git
-history remain outside the daemon build context.
+The root `.dockerignore` excludes the workspace by default. It admits only the
+two reviewed Dockerfiles, the non-scoring evaluator placeholder, the state
+collector, the four exact setup scripts, and the parent chain to the
+byte-pinned upstream `docker.gitignore`. Source rows, gold data, scoring
+evaluator material, bytecode caches, local results, logs, and host Git history
+remain outside the daemon build context. Every admitted file is part of the
+recorded context digest.
 
 The agent image also contains a root-owned mode-`0555` standard-library state
 collector. Its measured argv is fixed to `/usr/bin/python3 -I -S -B
@@ -69,6 +72,13 @@ consults `PATH`. A build-time audit fails closed unless `/` is UID 0 and mode
 `01777`, the model-writable surface is completely covered, captured state has
 no extended attributes, and POSIX ACLs are absent. Runtime collection also
 requires empty `/dev/shm` and `/dev/mqueue` plus header-only SysV IPC tables.
+On Linux, ACL inspection calls `os.listxattr()` on the already verified open
+descriptor and fails closed on an unavailable or rejected descriptor call; it
+does not rely on the runtime's incomplete `os.supports_fd` metadata.
+The build audit permits `.dockerenv` to be absent only because Docker injects
+that pinned root name at container start; runtime collection still requires
+it. The pinned base's unused `/var/lib/pebble/default` directory is normalized
+from world-writable to root-owned mode `0755` before the audit.
 Its output is bounded canonical JSON over sorted relative paths, content, type,
 mode, UID/GID, symlink targets, and complete path-derived hardlink groups.
 Inodes, devices, timestamps, gold data, and evaluator paths are not emitted or
@@ -87,6 +97,13 @@ numeric UID/GID `65532:65532` after the fixture roots are handed to that user.
 The upstream working directory `/` is preserved for relative-command fidelity,
 but `/` remains root-owned and is mode `1777`: the agent can create and remove
 its own top-level outputs without deleting root-owned system entries. The
+final filesystem layer reapplies mode `1777` immediately before the strict
+writable-surface audit. This is required because an overlay mount does not
+prove that root-directory metadata set in an earlier layer remains visible.
+Docker's exported runtime mount is then initialized to mode `1777` by one
+fixed root-only trust-boundary operation and independently attested before any
+agent action; the image's configured and action-execution user remains numeric
+UID/GID `65532:65532`. The
 derived image narrowly pre-creates agent-owned `/usr/workspace` for the fs3
 directory-copy row; it does not chown `/usr`. `HOME` is an agent-owned
 `/home/agent`. Qualification must still reject any row whose behavior diverges
@@ -104,9 +121,14 @@ proves them deterministic under the frozen protocol.
 
 ### fs1
 
-The source script has no known fatal setup typo. The derived script adds
-fail-fast behavior and deterministic timestamps, while retaining the original
-fixture contents, paths, modes, and two explicitly dated files.
+The source script has no fatal setup typo. Its dated `touch` both creates the
+empty `/testbed/recent.txt` fixture and assigns its mtime. The first live
+derived build exposed that the deterministic-timestamp rewrite had retained
+only the later no-dereference timestamp assignment, which cannot create a
+missing path. The correction now creates that empty file explicitly before
+normalization. The derived script otherwise adds fail-fast behavior and
+deterministic timestamps while retaining the original fixture contents,
+paths, modes, and two explicitly dated files.
 
 ### fs2
 
@@ -121,6 +143,10 @@ Three source defects are corrected:
 
 The folder2 archive is also emitted with sorted members, fixed ownership,
 fixed member mtimes, and a timestamp-free gzip header.
+
+The four upstream dated `touch` commands also create empty fixtures. The
+derived no-dereference timestamp form does not create a missing path, so the
+correction explicitly creates those four empty files before normalization.
 
 ### fs3
 
@@ -140,6 +166,10 @@ Five source defects are corrected:
 The archive uses sorted members, fixed ownership and mtimes, and a
 timestamp-free gzip header.
 
+The five upstream dated `touch` commands also create empty fixtures. The
+correction explicitly creates all five before normalization; this additionally
+ensures that `recent.txt` exists before it is included in the archive.
+
 ### fs4
 
 The upstream script intentionally creates no fixtures. The derived script only
@@ -153,28 +183,28 @@ note and the static tests to change together.
 
 | Derived asset | SHA-256 |
 | --- | --- |
-| `docker/intercode/setup/setup_nl2b_fs_1.sh` | `3fe38c065ceb7d82a0105c413128d47788f4fd731f30ccc8a4a4d58200663c58` |
-| `docker/intercode/setup/setup_nl2b_fs_2.sh` | `29381bf8d1fade3ca86561f3e6bd129a9bbdddcf00f5e5236cc6358dd91d839f` |
-| `docker/intercode/setup/setup_nl2b_fs_3.sh` | `7d55db5d64d14ea8b4b72d86fa0fa68e7ed9fdeaa461fcfe8b80ff1f011d7026` |
+| `docker/intercode/setup/setup_nl2b_fs_1.sh` | `8a6a7e86384f0118adc30446d8fcf678137eb7de1ecc2d1a7caa6fa3bcc9a76b` |
+| `docker/intercode/setup/setup_nl2b_fs_2.sh` | `6b4357910069649f9b76974f649300b0cd44053a8e592e3ddc44fdc3343abca4` |
+| `docker/intercode/setup/setup_nl2b_fs_3.sh` | `bfbe25f6d21b84adfcf09b8dd9c4516e13f993ce905d0e8816313db08b97810d` |
 | `docker/intercode/setup/setup_nl2b_fs_4.sh` | `e155eece189f409162571aa0f300a1a7f57ea216adbe8dec36e6b73affd94858` |
 
 For pre-build review only, the remaining derived source hashes are:
 
 | Derived asset | SHA-256 |
 | --- | --- |
-| `docker/intercode/Dockerfile.agent` | `6c2b440dc7ebe277355fb21664de2a94eb0644f86698c92bcb836b88667a214f` |
+| `docker/intercode/Dockerfile.agent` | `a74d041ff6fdd5d54f3a5bd6d25779af090ce63fb9c9d24483adb106b514f6d1` |
 | `docker/intercode/Dockerfile.evaluator` | `318fc5e51345036ada580f2552ae8fed61d37d31c9853eddcd3a893fd9c22ffa` |
 | `docker/intercode/evaluator_placeholder.py` | `de4642dd71f18a3b5f1bfcb7a73f99292129aa9e73a25034a49d76269cd32cad` |
-| `docker/intercode/state_collector.py` | `513a0261fad1e52ce77479afd1c3196921ce558cc80e83632b68795e5639bba0` |
-| `.dockerignore` | `41f598c8c3bb3868c615a3e59c23b215a4ce3754c2127538427f43b5a3653983` |
+| `docker/intercode/state_collector.py` | `28cdd90502bb9b5d6ede8800bde5378a9f828ade09f97c08f60f49201626f6f5` |
+| `.dockerignore` | `875b9b99193b7c98fc25ee9ae017c771cd5a2a854f920dd0e1523ab3ba5223ce` |
 
 The collector's semantic pins are independent of its source bytes:
 
 | Collector semantic record | SHA-256 |
 | --- | --- |
 | root baseline names | `sha256:06dcf54e33c9412b1c0bb2cf7ddab33848169e640012209b9d05c81ee1da457f` |
-| collection and writable-surface policy | `sha256:70eeeda4091cb2da38aa8024af7c52dbacb464cf5b20a9f6bfdac5d66ecb67a9` |
-| fs1..fs4 profile set | `sha256:1c515db46e794a58c457ac5d906ad80cae2ecb696ce2f07932733087368b1990` |
+| collection and writable-surface policy | `sha256:1645f88e660e5c002af6a9b2a20aba06a8003cd4068008e38b417dd704b70794` |
+| fs1..fs4 profile set | `sha256:19e2b86952ab1bb93d6a4648d00d200421cd328064e6caf6da4575e9a194c8d3` |
 
 ## Image-build control contract
 

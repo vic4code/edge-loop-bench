@@ -293,16 +293,16 @@ class FakeDockerRunner:
                 "org.edgeloopbench.filesystem-version": str(version),
                 "org.edgeloopbench.state-collector.profile": f"fs{version}",
                 "org.edgeloopbench.state-collector.sha256": (
-                    "sha256:513a0261fad1e52ce77479afd1c3196921ce558cc80e83632b68795e5639bba0"
+                    "sha256:28cdd90502bb9b5d6ede8800bde5378a9f828ade09f97c08f60f49201626f6f5"
                 ),
                 "org.edgeloopbench.state-collector.policy-sha256": (
-                    "sha256:70eeeda4091cb2da38aa8024af7c52dbacb464cf5b20a9f6bfdac5d66ecb67a9"
+                    "sha256:1645f88e660e5c002af6a9b2a20aba06a8003cd4068008e38b417dd704b70794"
                 ),
                 "org.edgeloopbench.state-collector.root-baseline-sha256": (
                     "sha256:06dcf54e33c9412b1c0bb2cf7ddab33848169e640012209b9d05c81ee1da457f"
                 ),
                 "org.edgeloopbench.state-collector.profile-set-sha256": (
-                    "sha256:1c515db46e794a58c457ac5d906ad80cae2ecb696ce2f07932733087368b1990"
+                    "sha256:19e2b86952ab1bb93d6a4648d00d200421cd328064e6caf6da4575e9a194c8d3"
                 ),
                 "org.edgeloopbench.state-collector.argv": (
                     "/usr/bin/python3 -I -S -B "

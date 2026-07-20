@@ -206,6 +206,7 @@ def _result() -> InteractiveResult:
         logical_prompt_tokens=100,
         logical_completion_tokens=10,
         environment_actions=1,
+        replayed_environment_actions=0,
         evaluator_calls=2,
         checkpoint_creates=1,
         checkpoint_restores=0,

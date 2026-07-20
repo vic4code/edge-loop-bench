@@ -27,10 +27,10 @@ from .intercode_host_safety import (
 
 PLATFORM = "linux/arm64"
 DOCKERFILE_AGENT_SHA256 = (
-    "sha256:6c2b440dc7ebe277355fb21664de2a94eb0644f86698c92bcb836b88667a214f"
+    "sha256:a74d041ff6fdd5d54f3a5bd6d25779af090ce63fb9c9d24483adb106b514f6d1"
 )
 DOCKERIGNORE_SHA256 = (
-    "sha256:41f598c8c3bb3868c615a3e59c23b215a4ce3754c2127538427f43b5a3653983"
+    "sha256:875b9b99193b7c98fc25ee9ae017c771cd5a2a854f920dd0e1523ab3ba5223ce"
 )
 _REVISION = "c3e46d827cfc9d4c704ec078f7abf9f41e3191d8"
 _TAGGED_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -44,19 +44,19 @@ _DOCKER_BUILD_TIMEOUT_SECONDS = 7_200.0
 _DOCKER_READ_TIMEOUT_SECONDS = 30.0
 _COLLECTOR_LABELS = {
     "org.edgeloopbench.state-collector.sha256": (
-        "sha256:513a0261fad1e52ce77479afd1c3196921ce558cc80e83632b68795e5639bba0"
+        "sha256:28cdd90502bb9b5d6ede8800bde5378a9f828ade09f97c08f60f49201626f6f5"
     ),
     "org.edgeloopbench.state-collector.argv": (
         "/usr/bin/python3 -I -S -B /opt/edgeloop/state_collector.py --profile fsN"
     ),
     "org.edgeloopbench.state-collector.policy-sha256": (
-        "sha256:70eeeda4091cb2da38aa8024af7c52dbacb464cf5b20a9f6bfdac5d66ecb67a9"
+        "sha256:1645f88e660e5c002af6a9b2a20aba06a8003cd4068008e38b417dd704b70794"
     ),
     "org.edgeloopbench.state-collector.root-baseline-sha256": (
         "sha256:06dcf54e33c9412b1c0bb2cf7ddab33848169e640012209b9d05c81ee1da457f"
     ),
     "org.edgeloopbench.state-collector.profile-set-sha256": (
-        "sha256:1c515db46e794a58c457ac5d906ad80cae2ecb696ce2f07932733087368b1990"
+        "sha256:19e2b86952ab1bb93d6a4648d00d200421cd328064e6caf6da4575e9a194c8d3"
     ),
 }
 _CONTEXT_ASSETS = {
@@ -69,19 +69,19 @@ _CONTEXT_ASSETS = {
         "sha256:de4642dd71f18a3b5f1bfcb7a73f99292129aa9e73a25034a49d76269cd32cad"
     ),
     "docker/intercode/setup/setup_nl2b_fs_1.sh": (
-        "sha256:3fe38c065ceb7d82a0105c413128d47788f4fd731f30ccc8a4a4d58200663c58"
+        "sha256:8a6a7e86384f0118adc30446d8fcf678137eb7de1ecc2d1a7caa6fa3bcc9a76b"
     ),
     "docker/intercode/setup/setup_nl2b_fs_2.sh": (
-        "sha256:29381bf8d1fade3ca86561f3e6bd129a9bbdddcf00f5e5236cc6358dd91d839f"
+        "sha256:6b4357910069649f9b76974f649300b0cd44053a8e592e3ddc44fdc3343abca4"
     ),
     "docker/intercode/setup/setup_nl2b_fs_3.sh": (
-        "sha256:7d55db5d64d14ea8b4b72d86fa0fa68e7ed9fdeaa461fcfe8b80ff1f011d7026"
+        "sha256:bfbe25f6d21b84adfcf09b8dd9c4516e13f993ce905d0e8816313db08b97810d"
     ),
     "docker/intercode/setup/setup_nl2b_fs_4.sh": (
         "sha256:e155eece189f409162571aa0f300a1a7f57ea216adbe8dec36e6b73affd94858"
     ),
     "docker/intercode/state_collector.py": (
-        "sha256:513a0261fad1e52ce77479afd1c3196921ce558cc80e83632b68795e5639bba0"
+        "sha256:28cdd90502bb9b5d6ede8800bde5378a9f828ade09f97c08f60f49201626f6f5"
     ),
     f"vendor/intercode/{_REVISION}/docker/docker.gitignore": (
         "sha256:5479a1cafa260c77e836e8601ba9a345d39df777dc9cb07d6a93f0ac29b69166"

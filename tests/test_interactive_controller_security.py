@@ -47,6 +47,7 @@ class SecurityFakeEnvironment:
         self.actions: list[str] = []
         self.restore_calls: list[EnvironmentCheckpoint] = []
         self.state_sha256 = digest(f"initial-{identifier}")
+        self.replay_depth = 0
         self.closed = False
 
     def execute(self, action: str) -> ActionExecution:
@@ -58,6 +59,7 @@ class SecurityFakeEnvironment:
         )
         changed = next_state != self.state_sha256
         self.state_sha256 = next_state
+        self.replay_depth += 1
         return ActionExecution(
             observation=observation,
             exit_code=0,
@@ -74,12 +76,26 @@ class SecurityFakeEnvironment:
         )
         checkpoint = EnvironmentCheckpoint(reference, self.state_sha256)
         self.owner.actions_by_checkpoint[reference] = self.actions[-1]
+        self.owner.replay_depth_by_checkpoint[reference] = self.replay_depth
         return checkpoint
 
-    def restore(self, checkpoint: EnvironmentCheckpoint) -> None:
+    def restore(
+        self,
+        checkpoint: EnvironmentCheckpoint,
+        *,
+        action_limit: int,
+    ) -> int:
+        replay_depth = self.owner.replay_depth_by_checkpoint[
+            checkpoint.reference_sha256
+        ]
+        if action_limit < replay_depth:
+            raise AssertionError("restore action limit exhausted")
         self.owner.restore_calls += 1
+        self.owner.restore_action_limits.append(action_limit)
         self.restore_calls.append(checkpoint)
         self.state_sha256 = checkpoint.state_sha256
+        self.replay_depth = replay_depth
+        return replay_depth
 
     def close(self) -> None:
         self.closed = True
@@ -96,10 +112,12 @@ class SecurityFakeFactory:
         self.rewards = rewards or {}
         self.environments: list[SecurityFakeEnvironment] = []
         self.actions_by_checkpoint: dict[str, str] = {}
+        self.replay_depth_by_checkpoint: dict[str, int] = {}
         self.execute_calls = 0
         self.checkpoint_calls = 0
         self.evaluator_calls = 0
         self.restore_calls = 0
+        self.restore_action_limits: list[int] = []
         self.terminal_selections: list[TerminalSelection] = []
 
     def create(self) -> SecurityFakeEnvironment:
@@ -321,6 +339,7 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
             policy_failure=ActionPolicyFailureKind.TIMEOUT,
             safety_recovery_performed=True,
             safety_recovery_evidence_sha256=digest("private-recovery-ledger"),
+            safety_recovery_replayed_environment_actions=2,
         )
         self.assertFalse(valid.admissible)
         invalid = (
@@ -329,6 +348,8 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
             {"admissible": True},
             {"safety_recovery_performed": False},
             {"safety_recovery_evidence_sha256": None},
+            {"safety_recovery_replayed_environment_actions": True},
+            {"safety_recovery_replayed_environment_actions": -1},
         )
         for replacement in invalid:
             values = {
@@ -530,7 +551,9 @@ class InteractiveControllerSecurityTests(unittest.TestCase):
             )
 
         self.assertEqual(factory.restore_calls, 1)
+        self.assertEqual(factory.restore_action_limits, [1])
         self.assertEqual(result.checkpoint_restores, 1)
+        self.assertEqual(result.replayed_environment_actions, 1)
         self.assertEqual(result.model_calls, len(requests))
         self.assertEqual(result.environment_actions, factory.execute_calls)
         self.assertEqual(result.checkpoint_creates, factory.checkpoint_calls)

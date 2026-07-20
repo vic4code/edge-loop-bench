@@ -24,6 +24,7 @@ echo 'Text file 5Gene 2' > /testbed/dir2/subdir2/textfile5.txt
 echo 'Text file 6' > /testbed/dir3/textfile6.txt
 echo 'Text file 7 with some random contents in it' > /testbed/textfile7.txt
 echo 'Text file in tmp' > /testbed/dir3/subdir1/subsubdir1/file.txt
+: > /testbed/recent.txt
 echo 'Text file in tmp' > /testbed/dir3/subdir1/subsubdir1/tmp/tmp.txt
 
 ## shell scripts

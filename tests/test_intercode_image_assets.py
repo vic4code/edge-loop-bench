@@ -26,18 +26,18 @@ RAW_SHA256 = {
 
 # These values bind the reviewed correction layer independently of upstream.
 DERIVED_SHA256 = {
-    "setup/setup_nl2b_fs_1.sh": "3fe38c065ceb7d82a0105c413128d47788f4fd731f30ccc8a4a4d58200663c58",
-    "setup/setup_nl2b_fs_2.sh": "29381bf8d1fade3ca86561f3e6bd129a9bbdddcf00f5e5236cc6358dd91d839f",
-    "setup/setup_nl2b_fs_3.sh": "7d55db5d64d14ea8b4b72d86fa0fa68e7ed9fdeaa461fcfe8b80ff1f011d7026",
+    "setup/setup_nl2b_fs_1.sh": "8a6a7e86384f0118adc30446d8fcf678137eb7de1ecc2d1a7caa6fa3bcc9a76b",
+    "setup/setup_nl2b_fs_2.sh": "6b4357910069649f9b76974f649300b0cd44053a8e592e3ddc44fdc3343abca4",
+    "setup/setup_nl2b_fs_3.sh": "bfbe25f6d21b84adfcf09b8dd9c4516e13f993ce905d0e8816313db08b97810d",
     "setup/setup_nl2b_fs_4.sh": "e155eece189f409162571aa0f300a1a7f57ea216adbe8dec36e6b73affd94858",
 }
 DERIVED_AUX_SHA256 = {
-    "Dockerfile.agent": "6c2b440dc7ebe277355fb21664de2a94eb0644f86698c92bcb836b88667a214f",
+    "Dockerfile.agent": "a74d041ff6fdd5d54f3a5bd6d25779af090ce63fb9c9d24483adb106b514f6d1",
     "Dockerfile.evaluator": "318fc5e51345036ada580f2552ae8fed61d37d31c9853eddcd3a893fd9c22ffa",
     "evaluator_placeholder.py": "de4642dd71f18a3b5f1bfcb7a73f99292129aa9e73a25034a49d76269cd32cad",
-    "state_collector.py": "513a0261fad1e52ce77479afd1c3196921ce558cc80e83632b68795e5639bba0",
+    "state_collector.py": "28cdd90502bb9b5d6ede8800bde5378a9f828ade09f97c08f60f49201626f6f5",
 }
-DOCKERIGNORE_SHA256 = "41f598c8c3bb3868c615a3e59c23b215a4ce3754c2127538427f43b5a3653983"
+DOCKERIGNORE_SHA256 = "875b9b99193b7c98fc25ee9ae017c771cd5a2a854f920dd0e1523ab3ba5223ce"
 
 
 def sha256(path: Path) -> str:
@@ -126,17 +126,33 @@ class InterCodeImageAssetTests(unittest.TestCase):
         self.assertNotIn("mkdir -p /work ", content)
         self.assertNotRegex(content, r"(?m)chown(?:\s+-R)?\s+65532:65532\s+/usr(?:\s|$)")
 
+    def test_agent_finalizes_sticky_root_in_the_audit_layer(self) -> None:
+        content = (DERIVED_ROOT / "Dockerfile.agent").read_text(encoding="utf-8")
+        final_phase = content.split("# The final root phase", 1)[1]
+        final_chmod = "RUN chmod 1777 / \\\n    && /usr/bin/python3"
+        audit = "--build-audit \"fs${FILE_SYSTEM_VERSION}\""
+        self.assertIn(final_chmod, final_phase)
+        self.assertIn(audit, final_phase)
+        self.assertLess(final_phase.index(final_chmod), final_phase.index(audit))
+        self.assertLess(content.index("chown -R 65532:65532"), content.index(final_chmod))
+
+    def test_agent_hardens_the_pinned_base_pebble_directory(self) -> None:
+        content = (DERIVED_ROOT / "Dockerfile.agent").read_text(encoding="utf-8")
+        hardening = "chmod 0755 /var/lib/pebble/default"
+        self.assertIn(hardening, content)
+        self.assertLess(content.index(hardening), content.index("--build-audit"))
+
     def test_agent_includes_source_pinned_root_owned_state_collector(self) -> None:
         content = (DERIVED_ROOT / "Dockerfile.agent").read_text(encoding="utf-8")
         helper_sha256 = DERIVED_AUX_SHA256["state_collector.py"]
         policy_sha256 = (
-            "sha256:70eeeda4091cb2da38aa8024af7c52dbacb464cf5b20a9f6bfdac5d66ecb67a9"
+            "sha256:1645f88e660e5c002af6a9b2a20aba06a8003cd4068008e38b417dd704b70794"
         )
         root_baseline_sha256 = (
             "sha256:06dcf54e33c9412b1c0bb2cf7ddab33848169e640012209b9d05c81ee1da457f"
         )
         profile_set_sha256 = (
-            "sha256:1c515db46e794a58c457ac5d906ad80cae2ecb696ce2f07932733087368b1990"
+            "sha256:19e2b86952ab1bb93d6a4648d00d200421cd328064e6caf6da4575e9a194c8d3"
         )
         fixed_argv = (
             "/usr/bin/python3 -I -S -B "
@@ -201,7 +217,15 @@ class InterCodeImageAssetTests(unittest.TestCase):
                 "**",
                 "!docker/",
                 "!docker/intercode/",
-                "!docker/intercode/**",
+                "!docker/intercode/Dockerfile.agent",
+                "!docker/intercode/Dockerfile.evaluator",
+                "!docker/intercode/evaluator_placeholder.py",
+                "!docker/intercode/state_collector.py",
+                "!docker/intercode/setup/",
+                "!docker/intercode/setup/setup_nl2b_fs_1.sh",
+                "!docker/intercode/setup/setup_nl2b_fs_2.sh",
+                "!docker/intercode/setup/setup_nl2b_fs_3.sh",
+                "!docker/intercode/setup/setup_nl2b_fs_4.sh",
                 "!vendor/",
                 "!vendor/intercode/",
                 f"!vendor/intercode/{INTERCODE_REVISION}/",
@@ -247,6 +271,21 @@ class InterCodeImageAssetTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, content.lower())
 
+    def test_fs1_preserves_empty_recent_timestamp_fixture(self) -> None:
+        content = (DERIVED_ROOT / "setup/setup_nl2b_fs_1.sh").read_text(
+            encoding="utf-8"
+        )
+        creation = ": > /testbed/recent.txt"
+        normalization = "find /testbed -exec touch"
+        timestamp = (
+            "touch -h -a -m -t 202305312359.59 /testbed/recent.txt"
+        )
+        self.assertIn(creation, content)
+        self.assertIn(normalization, content)
+        self.assertIn(timestamp, content)
+        self.assertLess(content.index(creation), content.index(normalization))
+        self.assertLess(content.index(creation), content.index(timestamp))
+
     def test_fs2_repairs_are_exact_and_deterministic(self) -> None:
         content = (DERIVED_ROOT / "setup/setup_nl2b_fs_2.sh").read_text(
             encoding="utf-8"
@@ -256,6 +295,21 @@ class InterCodeImageAssetTests(unittest.TestCase):
         self.assertNotIn("touch .placeholder", content)
         self.assertIn("202305022359.59", content)
         self.assertNotIn("20230522359.59", content)
+        normalization = "find /system -exec touch"
+        dated_paths = {
+            "/system/folder1/recent.txt": "202305312359.59",
+            "/system/old.txt": "202305022359.59",
+            "/system/folder1/old2.txt": "202303012359.59",
+            "/system/temp/keep.txt": "202303012159.59",
+        }
+        for path, timestamp_value in dated_paths.items():
+            with self.subTest(path=path):
+                creation = f": > {path}"
+                timestamp = f"touch -h -a -m -t {timestamp_value} {path}"
+                self.assertIn(creation, content)
+                self.assertIn(timestamp, content)
+                self.assertLess(content.index(creation), content.index(normalization))
+                self.assertLess(content.index(creation), content.index(timestamp))
 
     def test_fs3_repairs_are_exact_and_deterministic(self) -> None:
         content = (DERIVED_ROOT / "setup/setup_nl2b_fs_3.sh").read_text(
@@ -281,6 +335,24 @@ class InterCodeImageAssetTests(unittest.TestCase):
             "/workspace/new.sh",
         ):
             self.assertIn(correction, content)
+        normalization = "find /workspace /backup -exec touch"
+        archive = "tar --sort=name"
+        dated_paths = {
+            "/workspace/recent.txt": "202305302359.59",
+            "/workspace/recent1.txt": "202305312359.59",
+            "/workspace/old.txt": "202302282359.59",
+            "/workspace/old1.txt": "202304302359.59",
+            "/workspace/old2.txt": "202301312359.59",
+        }
+        for path, timestamp_value in dated_paths.items():
+            with self.subTest(path=path):
+                creation = f": > {path}"
+                timestamp = f"touch -h -a -m -t {timestamp_value} {path}"
+                self.assertIn(creation, content)
+                self.assertIn(timestamp, content)
+                self.assertLess(content.index(creation), content.index(normalization))
+                self.assertLess(content.index(creation), content.index(timestamp))
+                self.assertLess(content.index(creation), content.index(archive))
 
     def test_fs4_intentionally_creates_no_fixture_tree(self) -> None:
         lines = [

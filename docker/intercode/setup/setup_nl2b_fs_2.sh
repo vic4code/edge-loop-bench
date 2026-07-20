@@ -47,6 +47,10 @@ echo -e '#!/bin/bash\n\n# New script file' > /system/folder1/new.sh
 echo -e '1,2,3,4,5,6,7,8,9,10' > /system/folder1/data.csv
 touch /system/.DS_Store
 printf 'text1.txt\ntext3.txt\n' > /system/MANIFEST
+: > /system/folder1/recent.txt
+: > /system/old.txt
+: > /system/folder1/old2.txt
+: > /system/temp/keep.txt
 
 # Normalize before creating the deterministic archive.
 find /system -exec touch -h -a -m -t 202305312359.58 {} +

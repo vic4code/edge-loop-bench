@@ -63,7 +63,7 @@ from .intercode_v07_qualification import (
 
 
 V07_DOCKER_QUALIFICATION_AUTHORITY_REVISION = (
-    "intercode-v0.7-docker-qualification-authority-v1"
+    "intercode-v0.7-docker-qualification-authority-v2"
 )
 
 _STRATA = ("fs1", "fs2", "fs3", "fs4")

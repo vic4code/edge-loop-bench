@@ -42,7 +42,7 @@ V07_CALIBRATION_MAX_PROMPTS_TWO_MODELS = (
 )
 V07_CALIBRATION_EPISODE_COUNT = len(CAMPAIGN_MODELS) * len(V07_CALIBRATION_TASK_IDS)
 V07_CALIBRATION_JOURNAL_SCHEMA = (
-    "edgeloopbench.intercode-v0.7-calibration-journal.v3"
+    "edgeloopbench.intercode-v0.7-calibration-journal.v5"
 )
 V07_CONFIRMATORY_TASK_MULTIPLIER = 30
 V07_PLANNING_MULTIPLIER_NUMERATOR = 3
@@ -51,7 +51,7 @@ V07_ACTIVE_TIME_LIMIT_NS = 18 * 60 * 60 * 1_000_000_000
 
 _DESIGN_SCHEMA = "edgeloopbench.intercode-v0.7-calibration-design.v1"
 _JOURNAL_SCHEMA = V07_CALIBRATION_JOURNAL_SCHEMA
-_EVIDENCE_SCHEMA = "edgeloopbench.intercode-v0.7-calibration-evidence.v3"
+_EVIDENCE_SCHEMA = "edgeloopbench.intercode-v0.7-calibration-evidence.v5"
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"[A-Za-z]:[\\/]")
 _DESIGN_AUTHORITY = object()
@@ -179,7 +179,12 @@ _STATIC_CONTROLLER_EVENT_FIELDS: dict[str, frozenset[str]] = {
         }
     ),
     "safety_recovery_completed": frozenset(
-        {"attempt", "state_sha256", "recovery_evidence_sha256"}
+        {
+            "attempt",
+            "state_sha256",
+            "recovery_evidence_sha256",
+            "replayed_environment_actions",
+        }
     ),
     "attempt_defaulted": frozenset(
         {
@@ -191,13 +196,25 @@ _STATIC_CONTROLLER_EVENT_FIELDS: dict[str, frozenset[str]] = {
         }
     ),
     "checkpoint_create_requested": frozenset({"attempt"}),
-    "checkpoint_created": frozenset({"attempt", "state_sha256"}),
+    "checkpoint_created": frozenset(
+        {"attempt", "state_sha256", "replay_depth"}
+    ),
     "attempt_evaluation_requested": frozenset({"attempt", "state_sha256"}),
     "attempt_evaluated": frozenset(
         {"attempt", "reward", "official_success", "evaluation_kind"}
     ),
-    "checkpoint_restore_requested": frozenset({"attempt", "state_sha256"}),
-    "checkpoint_restored": frozenset({"attempt", "state_sha256"}),
+    "checkpoint_restore_requested": frozenset(
+        {"attempt", "target_attempt", "state_sha256", "replay_depth"}
+    ),
+    "checkpoint_restored": frozenset(
+        {
+            "attempt",
+            "target_attempt",
+            "state_sha256",
+            "replay_depth",
+            "replayed_environment_actions",
+        }
+    ),
     "environment_close_requested": frozenset({"scope"}),
     "environment_closed": frozenset({"scope"}),
     "strict_evaluation_planned": frozenset(
@@ -1296,6 +1313,7 @@ def _verify_controller_records(
                     "invalid_text",
                     "residual_process",
                     "container_terminated",
+                    "writable_layer_overflow",
                 }
                 or action["safety_recovery_performed"] is not True
             ):
@@ -1325,6 +1343,117 @@ def _verify_controller_records(
         raise V07CalibrationEvidenceError(
             "controller checkpoint/evaluator accounting is inconsistent"
         )
+    restore_requests = _unique_attempts(
+        positions.get("checkpoint_restore_requested", []),
+        "checkpoint restore request",
+    )
+    restores = _unique_attempts(
+        positions.get("checkpoint_restored", []),
+        "checkpoint restore completion",
+    )
+    if set(restore_requests) != set(restores):
+        raise V07CalibrationEvidenceError(
+            "controller checkpoint restore accounting is inconsistent"
+        )
+    if restore_requests and arm != "engineered_loop":
+        raise V07CalibrationEvidenceError(
+            "controller checkpoint restore occurred outside engineered_loop"
+        )
+    if not set(restores) <= set(checkpoints):
+        raise V07CalibrationEvidenceError(
+            "controller checkpoint restore lacks a current checkpoint"
+        )
+    replay_depth_by_attempt: dict[int, int] = {}
+    current_replay_depth = 0
+    engineered_best_attempt: int | None = None
+    engineered_best_reward: float | None = None
+    for attempt in sorted(checkpoints):
+        checkpoint_position, checkpoint = checkpoints[attempt]
+        observed_depth = _positive_integer(
+            checkpoint["replay_depth"], "checkpoint replay depth"
+        )
+        expected_depth = (
+            1
+            if arm == "independent_verified_sampling"
+            else current_replay_depth + 1
+        )
+        if observed_depth != expected_depth:
+            raise V07CalibrationEvidenceError(
+                "controller checkpoint replay depth differs from action topology"
+            )
+        replay_depth_by_attempt[attempt] = observed_depth
+        if arm != "independent_verified_sampling":
+            current_replay_depth = observed_depth
+        expected_restore_target: int | None = None
+        if arm == "engineered_loop":
+            candidate_reward = float(evaluations[attempt][1]["reward"])
+            expects_restore = (
+                engineered_best_reward is not None
+                and candidate_reward < engineered_best_reward
+            )
+            if expects_restore:
+                if engineered_best_attempt is None:  # pragma: no cover - invariant
+                    raise V07CalibrationEvidenceError(
+                        "controller best checkpoint accounting is inconsistent"
+                    )
+                expected_restore_target = engineered_best_attempt
+                if attempt not in restores:
+                    raise V07CalibrationEvidenceError(
+                        "controller restore differs from the frozen best policy"
+                    )
+            else:
+                if attempt in restores:
+                    raise V07CalibrationEvidenceError(
+                        "controller restore differs from the frozen best policy"
+                    )
+                engineered_best_attempt = attempt
+                engineered_best_reward = candidate_reward
+        if attempt not in restores:
+            continue
+
+        request_position, request = restore_requests[attempt]
+        restore_position, restore = restores[attempt]
+        evaluation_position = evaluations[attempt][0]
+        target_attempt = _positive_integer(
+            request["target_attempt"], "restore target attempt"
+        )
+        if target_attempt >= attempt or target_attempt not in replay_depth_by_attempt:
+            raise V07CalibrationEvidenceError(
+                "controller checkpoint restore target is not prior"
+            )
+        if target_attempt != expected_restore_target:
+            raise V07CalibrationEvidenceError(
+                "controller restore target differs from the frozen best policy"
+            )
+        target_position, target = checkpoints[target_attempt]
+        target_depth = replay_depth_by_attempt[target_attempt]
+        if not (
+            target_position
+            < checkpoint_position
+            < evaluation_position
+            < request_position
+            < restore_position
+        ):
+            raise V07CalibrationEvidenceError(
+                "controller checkpoint restore event order is invalid"
+            )
+        next_preflight = preflights.get(attempt + 1)
+        if next_preflight is not None and restore_position >= next_preflight[0]:
+            raise V07CalibrationEvidenceError(
+                "controller checkpoint restore completed after the next preflight"
+            )
+        if not (
+            request["state_sha256"] == target["state_sha256"]
+            and request["replay_depth"] == target_depth
+            and restore["target_attempt"] == target_attempt
+            and restore["state_sha256"] == target["state_sha256"]
+            and restore["replay_depth"] == target_depth
+            and restore["replayed_environment_actions"] == target_depth
+        ):
+            raise V07CalibrationEvidenceError(
+                "controller checkpoint restore identity or depth is inconsistent"
+            )
+        current_replay_depth = target_depth
     recoveries = _unique_attempts(
         positions.get("safety_recovery_completed", []), "safety recovery"
     )
@@ -1335,6 +1464,60 @@ def _verify_controller_records(
         raise V07CalibrationEvidenceError(
             "controller policy-failure recovery accounting is inconsistent"
         )
+    for attempt in inadmissible_attempts:
+        action_position, action = actions[attempt]
+        recovery_position, recovery = recoveries[attempt]
+        default_position, default = defaults[attempt]
+        if not action_position < recovery_position < default_position:
+            raise V07CalibrationEvidenceError(
+                "controller policy recovery event order is invalid"
+            )
+        next_preflight = preflights.get(attempt + 1)
+        if next_preflight is not None and default_position >= next_preflight[0]:
+            raise V07CalibrationEvidenceError(
+                "controller policy recovery completed after the next preflight"
+            )
+        if recovery["state_sha256"] != action["state_sha256"]:
+            raise V07CalibrationEvidenceError(
+                "controller safety recovery state differs from action state"
+            )
+        if (
+            default["reward"] != 0.0
+            or default["official_success"] is not False
+            or default["evaluation_kind"] != "action_policy_failure"
+            or default["policy_failure"] != action["policy_failure"]
+        ):
+            raise V07CalibrationEvidenceError(
+                "controller policy-failure default differs from v0.7"
+            )
+    current_replay_depth = 0
+    for attempt in sorted(actions):
+        if attempt in inadmissible_attempts:
+            expected_recovery_replay = (
+                0
+                if arm == "independent_verified_sampling"
+                else current_replay_depth
+            )
+            observed_recovery_replay = _nonnegative_integer(
+                recoveries[attempt][1]["replayed_environment_actions"],
+                "safety recovery replayed environment actions",
+            )
+            if observed_recovery_replay != expected_recovery_replay:
+                raise V07CalibrationEvidenceError(
+                    "controller safety recovery replay differs from action topology"
+                )
+            continue
+        checkpoint_depth = replay_depth_by_attempt[attempt]
+        if arm == "independent_verified_sampling":
+            current_replay_depth = 0
+            continue
+        current_replay_depth = checkpoint_depth
+        if attempt in restores:
+            target_attempt = _positive_integer(
+                restore_requests[attempt][1]["target_attempt"],
+                "restore target attempt",
+            )
+            current_replay_depth = replay_depth_by_attempt[target_attempt]
 
     terminal_rows = positions.get("terminal_finalized", [])
     stop_rows = positions.get("controller_stopped", [])
@@ -1342,6 +1525,13 @@ def _verify_controller_records(
         raise V07CalibrationEvidenceError("controller terminal evidence is incomplete")
     terminal = terminal_rows[0][1]
     stopped = stop_rows[0][1]
+    if (
+        arm == "engineered_loop"
+        and stopped["selected_attempt"] != engineered_best_attempt
+    ):
+        raise V07CalibrationEvidenceError(
+            "controller terminal selection differs from the frozen best policy"
+        )
     strict_calls = _nonnegative_integer(
         terminal["strict_evaluator_calls"], "strict evaluator calls"
     )
@@ -1393,12 +1583,26 @@ def _verify_controller_records(
     if stopped["official_success"] is not False or stopped["stop_reason"] != result.stop_reason:
         raise V07CalibrationEvidenceError("controller stop evidence differs from result")
 
+    replayed_environment_actions = sum(
+        _positive_integer(
+            event["replay_depth"],
+            "checkpoint replay depth",
+        )
+        for _position, event in positions.get("checkpoint_restored", [])
+    ) + sum(
+        _nonnegative_integer(
+            event["replayed_environment_actions"],
+            "safety recovery replayed environment actions",
+        )
+        for _position, event in positions.get("safety_recovery_completed", [])
+    )
     derived = {
         "attempts": calls,
         "model_calls": calls,
         "logical_prompt_tokens": logical_prompt_tokens,
         "logical_completion_tokens": logical_completion_tokens,
         "environment_actions": len(actions),
+        "replayed_environment_actions": replayed_environment_actions,
         "evaluator_calls": len(positions.get("attempt_evaluated", []))
         + strict_calls
         + posthoc_calls,
@@ -1439,6 +1643,8 @@ def _verify_controller_records(
         logical_prompt_tokens > _MAX_LOGICAL_PROMPT_TOKENS
         or logical_completion_tokens > _MAX_LOGICAL_COMPLETION_TOKENS
         or len(actions) > 4
+        or derived["replayed_environment_actions"]
+        > len(actions) * (len(actions) - 1) // 2
         or derived["evaluator_calls"] > _MAX_EVALUATOR_CALLS
         or derived["checkpoint_creates"] > 4
         or derived["checkpoint_restores"] > 4
@@ -1468,7 +1674,7 @@ def _validate_controller_event(event: dict[str, object]) -> None:
     for key, value in event.items():
         if key.endswith("_sha256"):
             _require_sha256(value, key)
-    for key in ("attempt", "selected_attempt"):
+    for key in ("attempt", "selected_attempt", "target_attempt"):
         if key in event and event[key] is not None:
             attempt = _positive_integer(event[key], key)
             if attempt > 4:
@@ -1493,6 +1699,8 @@ def _validate_controller_event(event: dict[str, object]) -> None:
         "allowed_context_tokens",
         "telemetry_context_tokens",
         "remaining_evaluator_calls",
+        "replay_depth",
+        "replayed_environment_actions",
         "strict_evaluator_calls",
         "posthoc_evaluator_calls",
     ):

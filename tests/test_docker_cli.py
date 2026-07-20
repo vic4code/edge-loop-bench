@@ -46,7 +46,7 @@ def limits() -> DockerLimits:
     return DockerLimits(
         memory_bytes=536_870_912,
         memory_swap_bytes=536_870_912,
-        storage_bytes=268_435_456,
+        writable_layer_watchdog_bytes=268_435_456,
         nano_cpus=1_000_000_000,
         pids_limit=64,
         nofile_soft=1024,
@@ -144,10 +144,11 @@ def inspect_payload(
             "UTSMode": "",
             "Memory": 536_870_912,
             "MemorySwap": 536_870_912,
-            "StorageOpt": {"size": "268435456"},
+            "StorageOpt": {},
             "NanoCpus": 1_000_000_000,
             "PidsLimit": 64,
             "Ulimits": [
+                {"Name": "fsize", "Soft": 16_777_216, "Hard": 16_777_216},
                 {"Name": "nofile", "Soft": 1024, "Hard": 1024},
                 {"Name": "nproc", "Soft": 64, "Hard": 64},
             ],
@@ -378,9 +379,9 @@ class DockerCliTests(unittest.TestCase):
             ("--security-opt", "seccomp=builtin"),
             ("--memory", "536870912"),
             ("--memory-swap", "536870912"),
-            ("--storage-opt", "size=268435456"),
             ("--cpus", "1"),
             ("--pids-limit", "64"),
+            ("--ulimit", "fsize=16777216:16777216"),
             ("--ulimit", "nofile=1024:1024"),
             ("--ulimit", "nproc=64:64"),
             ("--ipc", "private"),
@@ -415,9 +416,45 @@ class DockerCliTests(unittest.TestCase):
             "--network=host",
             "--pid",
             "--uts",
+            "--storage-opt",
         }
         self.assertTrue(forbidden.isdisjoint(argv))
         self.assert_no_host_shell(runner)
+
+    def test_writable_layer_probe_attests_exact_running_container_and_size(self) -> None:
+        payload = inspect_payload(running=True)
+        payload["SizeRw"] = 123_456
+        runner = FakeRunner([(0, inspect_stdout(payload), "")])
+
+        observed = self.client(runner).inspect_container_writable_layer_bytes(
+            container=trusted_container(),
+            timeout_seconds=1.0,
+        )
+
+        self.assertEqual(observed, 123_456)
+        self.assertEqual(
+            runner.calls[0][0][-5:],
+            ("container", "inspect", "--size", "--", CONTAINER_ID),
+        )
+        self.assertEqual(runner.calls[0][1]["timeout"], 1.0)
+        self.assert_no_host_shell(runner)
+
+    def test_writable_layer_probe_rejects_missing_or_invalid_size(self) -> None:
+        invalid_sizes = (None, True, -1, "123")
+        for value in invalid_sizes:
+            with self.subTest(value=value):
+                payload = inspect_payload(running=True)
+                if value is not None:
+                    payload["SizeRw"] = value
+                runner = FakeRunner([(0, inspect_stdout(payload), "")])
+
+                with self.assertRaisesRegex(
+                    DockerSecurityError, "writable layer size"
+                ):
+                    self.client(runner).inspect_container_writable_layer_bytes(
+                        container=trusted_container(),
+                        timeout_seconds=1.0,
+                    )
 
     def test_create_rejects_mutable_image_and_invalid_identity_before_subprocess(self) -> None:
         runner = FakeRunner([])
@@ -481,6 +518,9 @@ class DockerCliTests(unittest.TestCase):
                 (0, inspect_stdout(inspect_payload()), ""),
                 (0, CONTAINER_ID + "\n", ""),
                 (0, inspect_stdout(inspect_payload(running=True)), ""),
+                (0, "", ""),
+                (0, "0:0:1777\n", ""),
+                (0, inspect_stdout(inspect_payload(running=True)), ""),
             ]
         )
         container = trusted_container()
@@ -493,7 +533,91 @@ class DockerCliTests(unittest.TestCase):
             ("start", "--", CONTAINER_ID),
         )
         self.assertNotIn(NAME, runner.calls[3][0])
+        self.assertEqual(
+            runner.calls[5][0][-7:],
+            (
+                "exec",
+                "--user",
+                "0:0",
+                CONTAINER_ID,
+                "/bin/chmod",
+                "1777",
+                "/",
+            ),
+        )
+        self.assertEqual(
+            runner.calls[6][0][-8:],
+            (
+                "exec",
+                "--user",
+                "0:0",
+                CONTAINER_ID,
+                "/usr/bin/stat",
+                "--format=%u:%g:%a",
+                "--",
+                "/",
+            ),
+        )
+        self.assertEqual(
+            runner.calls[7][0][-3:],
+            ("inspect", "--", CONTAINER_ID),
+        )
+        self.assertEqual(
+            [call[0][3:5] for call in runner.calls[4:]],
+            [
+                ("container", "inspect"),
+                ("container", "exec"),
+                ("container", "exec"),
+                ("container", "inspect"),
+            ],
+        )
         self.assert_no_host_shell(runner)
+
+    def test_start_accepts_docker_desktop_runtime_null_oom_default(self) -> None:
+        running = inspect_payload(running=True)
+        running_host = running["HostConfig"]
+        assert isinstance(running_host, dict)
+        running_host["OomKillDisable"] = None
+        runner = FakeRunner(
+            local_daemon_responses()
+            + [
+                (0, inspect_stdout(inspect_payload()), ""),
+                (0, CONTAINER_ID + "\n", ""),
+                (0, inspect_stdout(running), ""),
+                (0, "", ""),
+                (0, "0:0:1777\n", ""),
+                (0, inspect_stdout(running), ""),
+            ]
+        )
+
+        started = self.client(runner).start_container(trusted_container())
+
+        self.assertEqual(started.identifier, CONTAINER_ID)
+        self.assert_no_host_shell(runner)
+
+    def test_start_rejects_missing_or_true_runtime_oom_disable(self) -> None:
+        for value in (True, "missing"):
+            with self.subTest(value=value):
+                running = inspect_payload(running=True)
+                running_host = running["HostConfig"]
+                assert isinstance(running_host, dict)
+                if value == "missing":
+                    del running_host["OomKillDisable"]
+                else:
+                    running_host["OomKillDisable"] = value
+                runner = FakeRunner(
+                    local_daemon_responses()
+                    + [
+                        (0, inspect_stdout(inspect_payload()), ""),
+                        (0, CONTAINER_ID + "\n", ""),
+                        (0, inspect_stdout(running), ""),
+                    ]
+                )
+
+                with self.assertRaisesRegex(DockerSecurityError, "OOM kill"):
+                    self.client(runner).start_container(trusted_container())
+
+                self.assert_no_host_shell(runner)
 
     def test_start_rejects_wrong_post_state_after_exact_mutation(self) -> None:
         runner = FakeRunner(
@@ -507,6 +631,75 @@ class DockerCliTests(unittest.TestCase):
 
         with self.assertRaisesRegex(DockerSecurityError, "running"):
             self.client(runner).start_container(trusted_container())
+
+    def test_start_rejects_root_mode_mutation_output_before_verification(self) -> None:
+        for stdout, stderr in (("unexpected\n", ""), ("", "unexpected\n")):
+            with self.subTest(stdout=stdout, stderr=stderr):
+                runner = FakeRunner(
+                    local_daemon_responses()
+                    + [
+                        (0, inspect_stdout(inspect_payload()), ""),
+                        (0, CONTAINER_ID + "\n", ""),
+                        (0, inspect_stdout(inspect_payload(running=True)), ""),
+                        (0, stdout, stderr),
+                    ]
+                )
+
+                with self.assertRaisesRegex(
+                    DockerSecurityError, "root mode mutation produced output"
+                ):
+                    self.client(runner).start_container(trusted_container())
+
+                self.assertFalse(
+                    any("/usr/bin/stat" in argv for argv, _ in runner.calls)
+                )
+                self.assert_no_host_shell(runner)
+
+    def test_start_rejects_root_owner_or_mode_attestation_drift(self) -> None:
+        cases = (
+            ("1:0:1777\n", "root owner or mode"),
+            ("0:1:1777\n", "root owner or mode"),
+            ("0:0:755\n", "root owner or mode"),
+            ("0:0:1777\nextra\n", "root owner or mode"),
+            ("0:0:1777\n", "root mount attestation produced stderr"),
+        )
+        for stdout, message in cases:
+            with self.subTest(stdout=stdout, message=message):
+                stderr = "unexpected\n" if "stderr" in message else ""
+                runner = FakeRunner(
+                    local_daemon_responses()
+                    + [
+                        (0, inspect_stdout(inspect_payload()), ""),
+                        (0, CONTAINER_ID + "\n", ""),
+                        (0, inspect_stdout(inspect_payload(running=True)), ""),
+                        (0, "", ""),
+                        (0, stdout, stderr),
+                    ]
+                )
+
+                with self.assertRaisesRegex(DockerSecurityError, message):
+                    self.client(runner).start_container(trusted_container())
+
+                self.assert_no_host_shell(runner)
+
+    def test_start_rejects_identity_drift_after_root_mount_attestation(self) -> None:
+        drifted = inspect_payload(identifier="d" * 64, running=True)
+        runner = FakeRunner(
+            local_daemon_responses()
+            + [
+                (0, inspect_stdout(inspect_payload()), ""),
+                (0, CONTAINER_ID + "\n", ""),
+                (0, inspect_stdout(inspect_payload(running=True)), ""),
+                (0, "", ""),
+                (0, "0:0:1777\n", ""),
+                (0, inspect_stdout(drifted), ""),
+            ]
+        )
+
+        with self.assertRaisesRegex(DockerSecurityError, "id does not match"):
+            self.client(runner).start_container(trusted_container())
+
+        self.assert_no_host_shell(runner)
 
     def test_trusted_state_uses_fixed_root_argv_and_validates_pins(self) -> None:
         runner = FakeRunner(
@@ -787,7 +980,8 @@ class DockerCliTests(unittest.TestCase):
             "seccomp": lambda item: item["HostConfig"].__setitem__("SecurityOpt", ["no-new-privileges=true"]),  # type: ignore[union-attr]
             "pid namespace": lambda item: item["HostConfig"].__setitem__("PidMode", "host"),  # type: ignore[union-attr]
             "memory": lambda item: item["HostConfig"].__setitem__("Memory", 0),  # type: ignore[union-attr]
-            "storage": lambda item: item["HostConfig"].__setitem__("StorageOpt", {}),  # type: ignore[union-attr]
+            "storage": lambda item: item["HostConfig"].__setitem__("StorageOpt", {"size": "268435456"}),  # type: ignore[union-attr]
+            "ulimits": lambda item: item["HostConfig"].__setitem__("Ulimits", []),  # type: ignore[union-attr]
             "pids": lambda item: item["HostConfig"].__setitem__("PidsLimit", 0),  # type: ignore[union-attr]
             "user": lambda item: item["Config"].__setitem__("User", "0:0"),  # type: ignore[union-attr]
         }

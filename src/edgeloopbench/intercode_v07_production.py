@@ -104,7 +104,7 @@ from .intercode_v07_study_evidence import (
 from .model_adapter import PHI4_MINI_RAW_PROFILE, QWEN35_RAW_PROFILE
 
 
-V07_PRODUCTION_RUNNER_REVISION = "intercode-v0.7-production-runner-v2"
+V07_PRODUCTION_RUNNER_REVISION = "intercode-v0.7-production-runner-v4"
 V07_PREFLIGHT_VM_PRESSURE_LEVEL = 1
 V07_PREFLIGHT_FREE_MEMORY_PERCENT_MINIMUM = 25
 V07_PREFLIGHT_DISK_FREE_BYTES_MINIMUM = 32 << 30
@@ -246,7 +246,7 @@ class V07ProductionResult:
             "analysis": self.analysis.to_dict(),
             "preflight": self.preflight.canonical_record(),
             "runner_revision": V07_PRODUCTION_RUNNER_REVISION,
-            "schema": "edgeloopbench.intercode-v0.7-production-result.v1",
+            "schema": "edgeloopbench.intercode-v0.7-production-result.v3",
             "study_evidence": self.study_evidence.canonical_record(),
         }
 

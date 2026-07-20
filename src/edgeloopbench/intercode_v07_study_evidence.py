@@ -41,7 +41,7 @@ from .intercode_v07_manifest import V07_INTERVENTION_JOURNAL_REVISION
 from .intercode_v07_study_binding import V07PreparedStudy, V07StudyBinding
 
 
-V07_STUDY_EVIDENCE_REVISION = "intercode-v0.7-study-evidence-v4"
+V07_STUDY_EVIDENCE_REVISION = "intercode-v0.7-study-evidence-v6"
 V07_INTERVENTION_DECLARATION_EVIDENCE_REVISION = (
     "intercode-v0.7-intervention-declaration-evidence-v2"
 )
@@ -82,6 +82,9 @@ class VerifiedV07StudyEvidence:
     verified_episode_count: int
     verified_envelope_count: int
     automatic_model_prompt_count: int
+    model_issued_environment_action_count: int
+    replayed_environment_action_count: int
+    physical_environment_action_count: int
     benchmark_model_human_prompt_count: int
     orchestrator_operator_event_count: int
     operational_event_count: int
@@ -145,6 +148,9 @@ class VerifiedV07StudyEvidence:
             ),
             "intervention_summary_sha256": self.intervention_summary_sha256,
             "manifest_sha256": self.manifest_sha256,
+            "model_issued_environment_action_count": (
+                self.model_issued_environment_action_count
+            ),
             "operational_event_count": self.operational_event_count,
             "orchestrator_operator_event_count": (
                 self.orchestrator_operator_event_count
@@ -153,6 +159,12 @@ class VerifiedV07StudyEvidence:
                 self.qualification_campaign_sha256
             ),
             "runtime_session_sha256": self.runtime_session_sha256,
+            "physical_environment_action_count": (
+                self.physical_environment_action_count
+            ),
+            "replayed_environment_action_count": (
+                self.replayed_environment_action_count
+            ),
             "schedule_sha256": self.schedule_sha256,
             "schema": V07_STUDY_EVIDENCE_REVISION,
             "study_binding_sha256": self.study_binding_sha256,
@@ -316,6 +328,15 @@ def verify_v07_study_evidence(
         "verified_episode_count": campaign.verified_episode_count,
         "verified_envelope_count": executions.verified_envelope_count,
         "automatic_model_prompt_count": campaign.total_model_calls,
+        "model_issued_environment_action_count": (
+            campaign.total_environment_actions
+        ),
+        "replayed_environment_action_count": (
+            campaign.total_replayed_environment_actions
+        ),
+        "physical_environment_action_count": (
+            campaign.total_physical_environment_actions
+        ),
         "benchmark_model_human_prompt_count": (
             interventions.benchmark_model_human_prompt_count
         ),
@@ -451,6 +472,9 @@ def _validate_study_evidence(evidence: VerifiedV07StudyEvidence) -> None:
         "verified_episode_count",
         "verified_envelope_count",
         "automatic_model_prompt_count",
+        "model_issued_environment_action_count",
+        "replayed_environment_action_count",
+        "physical_environment_action_count",
         "benchmark_model_human_prompt_count",
         "orchestrator_operator_event_count",
         "operational_event_count",
@@ -502,6 +526,12 @@ def _validate_study_evidence(evidence: VerifiedV07StudyEvidence) -> None:
         or campaign.tokenizer_artifacts_by_model
         != evidence.tokenizer_artifacts_by_model
         or campaign.total_model_calls != evidence.automatic_model_prompt_count
+        or campaign.total_environment_actions
+        != evidence.model_issued_environment_action_count
+        or campaign.total_replayed_environment_actions
+        != evidence.replayed_environment_action_count
+        or campaign.total_physical_environment_actions
+        != evidence.physical_environment_action_count
     ):
         raise V07StudyEvidenceError(
             "aggregate campaign evidence differs from its retained roots"

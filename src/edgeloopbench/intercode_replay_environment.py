@@ -354,6 +354,14 @@ class ReplayEnvironment:
                 raise ReplayInfrastructureError(
                     "policy recovery did not preserve the recorded state"
                 )
+            if (
+                outcome.safety_recovery_replayed_environment_actions
+                != len(self._history)
+            ):
+                self._failed = True
+                raise ReplayInfrastructureError(
+                    "policy recovery replay accounting is invalid"
+                )
             self._checkpoint_available = False
             return outcome
 
@@ -390,13 +398,27 @@ class ReplayEnvironment:
             )
         return self._latest_checkpoint
 
-    def restore(self, checkpoint: EnvironmentCheckpoint) -> None:
+    def restore(
+        self,
+        checkpoint: EnvironmentCheckpoint,
+        *,
+        action_limit: int,
+    ) -> int:
         self._require_open()
         record = self._registry._resolve(checkpoint)
         if record.scope != self._scope:
             raise ReplayInfrastructureError(
                 "checkpoint belongs to a different replay environment"
             )
+        if (
+            isinstance(action_limit, bool)
+            or not isinstance(action_limit, int)
+            or action_limit < 0
+        ):
+            raise ValueError("replay action limit must be a non-negative integer")
+        replayed_environment_actions = len(record.steps)
+        if replayed_environment_actions > action_limit:
+            raise ReplayInfrastructureError("checkpoint replay action limit exceeded")
 
         self._checkpoint_available = False
         self._retire_boundary()
@@ -432,6 +454,7 @@ class ReplayEnvironment:
         self._history = record.steps
         self._latest_checkpoint = checkpoint
         self._checkpoint_available = True
+        return replayed_environment_actions
 
     def close(self) -> None:
         if self._closed:

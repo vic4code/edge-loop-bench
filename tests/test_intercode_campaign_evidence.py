@@ -13,6 +13,7 @@ from edgeloopbench import intercode_campaign_ledger as ledger
 from edgeloopbench.interactive_controller import (
     INTERACTIVE_CONTROLLER_REVISION,
     InteractiveResult,
+    candidate_seed,
 )
 from edgeloopbench.intercode_campaign_evidence import (
     CampaignEvidenceError,
@@ -179,6 +180,7 @@ def _episode_payloads(episode: CampaignEpisode) -> list[dict[str, object]]:
             **common,
             "attempt": 1,
             "state_sha256": state_sha256,
+            "replay_depth": 1,
         },
         {
             "type": "attempt_evaluation_requested",
@@ -232,6 +234,453 @@ def _episode_payloads(episode: CampaignEpisode) -> list[dict[str, object]]:
     ]
 
 
+def _duplicate_restore_payloads(
+    episode: CampaignEpisode,
+    payloads: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Forge a rechained log with two restores on the same model attempt."""
+
+    if not (
+        episode.model_id == QWEN35_RAW_PROFILE.model
+        and episode.task_id == CAMPAIGN_TASK_IDS[0]
+        and episode.arm == "engineered_loop"
+    ):
+        return payloads
+    common = _identity(episode)
+    profile = _profile_for(episode.model_id)
+    first_state = next(
+        event["state_sha256"]
+        for event in payloads
+        if event["type"] == "checkpoint_created"
+    )
+    insertion = next(
+        index
+        for index, event in enumerate(payloads)
+        if event["type"] == "environment_close_requested"
+    )
+    additions: list[dict[str, object]] = []
+    cumulative_prompt_tokens = 101
+    for attempt in (2, 3):
+        prompt_sha256 = digest(f"duplicate-restore-prompt-{attempt}")
+        action_sha256 = digest(f"duplicate-restore-action-{attempt}")
+        state_sha256 = digest(f"duplicate-restore-state-{attempt}")
+        cumulative_prompt_tokens += 101
+        additions.extend(
+            [
+                {
+                    "type": "model_preflighted",
+                    **common,
+                    "attempt": attempt,
+                    "prompt_sha256": prompt_sha256,
+                    "prompt_tokens": 101,
+                    "token_ids_sha256": digest(
+                        f"duplicate-restore-tokens-{attempt}"
+                    ),
+                    "renderer_profile_sha256": profile.sha256,
+                    "tokenizer_artifact_sha256": TOKENIZER_ARTIFACT_BY_MODEL[
+                        episode.model_id
+                    ],
+                    "model_artifact_sha256": profile.model_artifact_sha256,
+                },
+                {
+                    "type": "model_requested",
+                    **common,
+                    "attempt": attempt,
+                    "prompt_sha256": prompt_sha256,
+                    "logical_model_calls_after": attempt,
+                    "logical_prompt_tokens_after": cumulative_prompt_tokens,
+                    "candidate_seed": candidate_seed(episode.seed, attempt),
+                    "context_sha256": digest(
+                        f"duplicate-restore-context-{attempt}"
+                    ),
+                    "max_output_tokens": 128,
+                },
+                {
+                    "type": "model_completed",
+                    **common,
+                    "attempt": attempt,
+                    "response_sha256": digest(
+                        f"duplicate-restore-response-{attempt}"
+                    ),
+                    "prompt_tokens": 101,
+                    "completion_tokens": 17,
+                    "total_duration_ns": 1_000,
+                },
+                {
+                    "type": "action_requested",
+                    **common,
+                    "attempt": attempt,
+                    "action_sha256": action_sha256,
+                },
+                {
+                    "type": "action_completed",
+                    **common,
+                    "attempt": attempt,
+                    "action_sha256": action_sha256,
+                    "output_sha256": digest(
+                        f"duplicate-restore-output-{attempt}"
+                    ),
+                    "state_sha256": state_sha256,
+                    "exit_code": 0,
+                    "admissible": True,
+                    "state_changed": True,
+                    "policy_failure": None,
+                    "safety_recovery_performed": False,
+                },
+                {
+                    "type": "checkpoint_create_requested",
+                    **common,
+                    "attempt": attempt,
+                },
+                {
+                    "type": "checkpoint_created",
+                    **common,
+                    "attempt": attempt,
+                    "state_sha256": state_sha256,
+                    "replay_depth": 2,
+                },
+                {
+                    "type": "attempt_evaluation_requested",
+                    **common,
+                    "attempt": attempt,
+                    "state_sha256": state_sha256,
+                },
+                {
+                    "type": "attempt_evaluated",
+                    **common,
+                    "attempt": attempt,
+                    "reward": 0.2,
+                    "official_success": False,
+                    "evaluation_kind": "evaluator_derived",
+                },
+                {
+                    "type": "checkpoint_restore_requested",
+                    **common,
+                    "attempt": attempt,
+                    "target_attempt": 1,
+                    "state_sha256": first_state,
+                    "replay_depth": 1,
+                },
+                {
+                    "type": "checkpoint_restored",
+                    **common,
+                    "attempt": attempt,
+                    "target_attempt": 1,
+                    "state_sha256": first_state,
+                    "replay_depth": 1,
+                    "replayed_environment_actions": 1,
+                },
+            ]
+        )
+        if attempt == 3:
+            additions.extend(additions[-2:])
+    return [*payloads[:insertion], *additions, *payloads[insertion:]]
+
+
+def _raw_policy_recovery_payloads(
+    episode: CampaignEpisode,
+    payloads: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Add one typed recovery that replays the first accepted raw action."""
+
+    if not (
+        episode.model_id == QWEN35_RAW_PROFILE.model
+        and episode.task_id == CAMPAIGN_TASK_IDS[0]
+        and episode.arm == "raw_feedback_loop"
+    ):
+        return payloads
+    common = _identity(episode)
+    profile = _profile_for(episode.model_id)
+    first_state = next(
+        event["state_sha256"]
+        for event in payloads
+        if event["type"] == "checkpoint_created"
+    )
+    prompt_sha256 = digest("raw-recovery-prompt-2")
+    action_sha256 = digest("raw-recovery-action-2")
+    additions = [
+        {
+            "type": "model_preflighted",
+            **common,
+            "attempt": 2,
+            "prompt_sha256": prompt_sha256,
+            "prompt_tokens": 101,
+            "token_ids_sha256": digest("raw-recovery-tokens-2"),
+            "renderer_profile_sha256": profile.sha256,
+            "tokenizer_artifact_sha256": TOKENIZER_ARTIFACT_BY_MODEL[
+                episode.model_id
+            ],
+            "model_artifact_sha256": profile.model_artifact_sha256,
+        },
+        {
+            "type": "model_requested",
+            **common,
+            "attempt": 2,
+            "prompt_sha256": prompt_sha256,
+            "logical_model_calls_after": 2,
+            "logical_prompt_tokens_after": 202,
+            "candidate_seed": candidate_seed(episode.seed, 2),
+            "context_sha256": digest("raw-recovery-context-2"),
+            "max_output_tokens": 128,
+        },
+        {
+            "type": "model_completed",
+            **common,
+            "attempt": 2,
+            "response_sha256": digest("raw-recovery-response-2"),
+            "prompt_tokens": 101,
+            "completion_tokens": 17,
+            "total_duration_ns": 1_000,
+        },
+        {
+            "type": "action_requested",
+            **common,
+            "attempt": 2,
+            "action_sha256": action_sha256,
+        },
+        {
+            "type": "action_completed",
+            **common,
+            "attempt": 2,
+            "action_sha256": action_sha256,
+            "output_sha256": digest(
+                "Command exceeded the sampled writable-layer safety limit."
+            ),
+            "state_sha256": first_state,
+            "exit_code": None,
+            "admissible": False,
+            "state_changed": False,
+            "policy_failure": "writable_layer_overflow",
+            "safety_recovery_performed": True,
+        },
+        {
+            "type": "safety_recovery_completed",
+            **common,
+            "attempt": 2,
+            "state_sha256": first_state,
+            "recovery_evidence_sha256": digest("raw-recovery-evidence-2"),
+            "replayed_environment_actions": 1,
+        },
+        {
+            "type": "attempt_defaulted",
+            **common,
+            "attempt": 2,
+            "reward": 0.0,
+            "official_success": False,
+            "evaluation_kind": "action_policy_failure",
+            "policy_failure": "writable_layer_overflow",
+        },
+        {
+            "type": "model_preflighted",
+            **common,
+            "attempt": 3,
+            "prompt_sha256": digest("raw-recovery-prompt-3"),
+            "prompt_tokens": 101,
+            "token_ids_sha256": digest("raw-recovery-tokens-3"),
+            "renderer_profile_sha256": profile.sha256,
+            "tokenizer_artifact_sha256": TOKENIZER_ARTIFACT_BY_MODEL[
+                episode.model_id
+            ],
+            "model_artifact_sha256": profile.model_artifact_sha256,
+        },
+        {
+            "type": "model_requested",
+            **common,
+            "attempt": 3,
+            "prompt_sha256": digest("raw-recovery-prompt-3"),
+            "logical_model_calls_after": 3,
+            "logical_prompt_tokens_after": 303,
+            "candidate_seed": candidate_seed(episode.seed, 3),
+            "context_sha256": digest("raw-recovery-context-3"),
+            "max_output_tokens": 128,
+        },
+        {
+            "type": "model_completed",
+            **common,
+            "attempt": 3,
+            "response_sha256": digest("raw-recovery-response-3"),
+            "prompt_tokens": 101,
+            "completion_tokens": 17,
+            "total_duration_ns": 1_000,
+        },
+        {
+            "type": "action_rejected",
+            **common,
+            "attempt": 3,
+            "reason": "parser_failure",
+        },
+    ]
+    insertion = next(
+        index
+        for index, event in enumerate(payloads)
+        if event["type"] == "environment_close_requested"
+    )
+    return [*payloads[:insertion], *additions, *payloads[insertion:]]
+
+
+def _late_raw_policy_recovery_payloads(
+    episode: CampaignEpisode,
+    payloads: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    payloads = _raw_policy_recovery_payloads(episode, payloads)
+    if not (
+        episode.model_id == QWEN35_RAW_PROFILE.model
+        and episode.task_id == CAMPAIGN_TASK_IDS[0]
+        and episode.arm == "raw_feedback_loop"
+    ):
+        return payloads
+    delayed = [
+        event
+        for event in payloads
+        if event["type"] in {"safety_recovery_completed", "attempt_defaulted"}
+        and event.get("attempt") == 2
+    ]
+    retained = [event for event in payloads if event not in delayed]
+    insertion = next(
+        index + 1
+        for index, event in enumerate(retained)
+        if event["type"] == "model_preflighted" and event.get("attempt") == 3
+    )
+    return [*retained[:insertion], *delayed, *retained[insertion:]]
+
+
+def _late_restore_payloads(
+    episode: CampaignEpisode,
+    payloads: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Forge a rechained log that preflights attempt 3 before restore 2."""
+
+    payloads = _duplicate_restore_payloads(episode, payloads)
+    if not (
+        episode.model_id == QWEN35_RAW_PROFILE.model
+        and episode.task_id == CAMPAIGN_TASK_IDS[0]
+        and episode.arm == "engineered_loop"
+    ):
+        return payloads
+
+    without_duplicate = _drop_duplicate_attempt_three_restore(payloads)
+
+    early_prompt = [
+        event
+        for event in without_duplicate
+        if event.get("attempt") == 3
+        and event["type"] in {"model_preflighted", "model_requested"}
+    ]
+    retained = [event for event in without_duplicate if event not in early_prompt]
+    insertion = next(
+        index + 1
+        for index, event in enumerate(retained)
+        if event.get("attempt") == 2
+        and event["type"] == "checkpoint_restore_requested"
+    )
+    return [*retained[:insertion], *early_prompt, *retained[insertion:]]
+
+
+def _drop_duplicate_attempt_three_restore(
+    payloads: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    seen_attempt_three_restores = {
+        "checkpoint_restore_requested": 0,
+        "checkpoint_restored": 0,
+    }
+    without_duplicate: list[dict[str, object]] = []
+    for event in payloads:
+        if event.get("attempt") == 3 and event["type"] in seen_attempt_three_restores:
+            event_type = str(event["type"])
+            seen_attempt_three_restores[event_type] += 1
+            if seen_attempt_three_restores[event_type] > 1:
+                continue
+        without_duplicate.append(event)
+
+    return without_duplicate
+
+
+def _wrong_best_restore_payloads(
+    episode: CampaignEpisode,
+    payloads: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Forge attempt 3 to restore the regressed attempt 2 instead of best 1."""
+
+    payloads = _duplicate_restore_payloads(episode, payloads)
+    if not (
+        episode.model_id == QWEN35_RAW_PROFILE.model
+        and episode.task_id == CAMPAIGN_TASK_IDS[0]
+        and episode.arm == "engineered_loop"
+    ):
+        return payloads
+    payloads = _drop_duplicate_attempt_three_restore(payloads)
+    second_state = next(
+        event["state_sha256"]
+        for event in payloads
+        if event["type"] == "checkpoint_created" and event.get("attempt") == 2
+    )
+    for event in payloads:
+        if event.get("attempt") == 3 and event["type"] in {
+            "checkpoint_restore_requested",
+            "checkpoint_restored",
+        }:
+            event["target_attempt"] = 2
+            event["state_sha256"] = second_state
+            event["replay_depth"] = 2
+            if event["type"] == "checkpoint_restored":
+                event["replayed_environment_actions"] = 2
+    return payloads
+
+
+def _tie_restore_payloads(
+    episode: CampaignEpisode,
+    payloads: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Forge a restore on an equal-reward candidate that must become latest best."""
+
+    payloads = _duplicate_restore_payloads(episode, payloads)
+    if not (
+        episode.model_id == QWEN35_RAW_PROFILE.model
+        and episode.task_id == CAMPAIGN_TASK_IDS[0]
+        and episode.arm == "engineered_loop"
+    ):
+        return payloads
+    payloads = _drop_duplicate_attempt_three_restore(payloads)
+    evaluation = next(
+        event
+        for event in payloads
+        if event["type"] == "attempt_evaluated" and event.get("attempt") == 2
+    )
+    evaluation["reward"] = 0.8
+    return payloads
+
+
+def _stale_tie_best_payloads(
+    episode: CampaignEpisode,
+    payloads: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Forge a later regression that targets best 1 after attempt 2 tied it."""
+
+    payloads = _tie_restore_payloads(episode, payloads)
+    if not (
+        episode.model_id == QWEN35_RAW_PROFILE.model
+        and episode.task_id == CAMPAIGN_TASK_IDS[0]
+        and episode.arm == "engineered_loop"
+    ):
+        return payloads
+    payloads = [
+        event
+        for event in payloads
+        if not (
+            event.get("attempt") == 2
+            and event["type"]
+            in {"checkpoint_restore_requested", "checkpoint_restored"}
+        )
+    ]
+    third_checkpoint = next(
+        event
+        for event in payloads
+        if event["type"] == "checkpoint_created" and event.get("attempt") == 3
+    )
+    third_checkpoint["replay_depth"] = 3
+    return payloads
+
+
 def _result_for(episode: CampaignEpisode) -> InteractiveResult:
     stop_reason = (
         "direct_complete"
@@ -250,6 +699,7 @@ def _result_for(episode: CampaignEpisode) -> InteractiveResult:
         logical_prompt_tokens=101,
         logical_completion_tokens=17,
         environment_actions=1,
+        replayed_environment_actions=0,
         evaluator_calls=2,
         checkpoint_creates=1,
         checkpoint_restores=0,
@@ -435,6 +885,9 @@ class InterCodeCampaignEvidenceTests(unittest.TestCase):
             self.assertEqual(evidence.total_model_calls, 240)
             self.assertEqual(evidence.total_logical_prompt_tokens, 24_240)
             self.assertEqual(evidence.total_logical_completion_tokens, 4_080)
+            self.assertEqual(evidence.total_environment_actions, 240)
+            self.assertEqual(evidence.total_replayed_environment_actions, 0)
+            self.assertEqual(evidence.total_physical_environment_actions, 240)
             self.assertEqual(evidence.total_human_prompts, 0)
             self.assertEqual(evidence.total_active_wall_time_ns, 240_028_920)
             self.assertRegex(evidence.campaign_log_sha256, r"^sha256:[0-9a-f]{64}$")
@@ -508,6 +961,210 @@ class InterCodeCampaignEvidenceTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(CampaignEvidenceError, "counter"):
+                verify_campaign_evidence(campaign, episodes, spec)
+
+    def test_accepts_raw_policy_recovery_replay_and_writable_overflow(self) -> None:
+        def mutate_result(
+            episode: CampaignEpisode,
+            result: InteractiveResult,
+        ) -> InteractiveResult:
+            if not (
+                episode.model_id == QWEN35_RAW_PROFILE.model
+                and episode.task_id == CAMPAIGN_TASK_IDS[0]
+                and episode.arm == "raw_feedback_loop"
+            ):
+                return result
+            return dataclasses.replace(
+                result,
+                attempts=3,
+                model_calls=3,
+                logical_prompt_tokens=303,
+                logical_completion_tokens=51,
+                environment_actions=2,
+                replayed_environment_actions=1,
+                safety_recoveries=1,
+                parser_failures=1,
+                feedback_followups=2,
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign, episodes, spec = _build_campaign(
+                Path(temporary),
+                event_mutator=_raw_policy_recovery_payloads,
+                result_mutator=mutate_result,
+            )
+
+            evidence = verify_campaign_evidence(campaign, episodes, spec)
+
+        self.assertEqual(evidence.total_environment_actions, 241)
+        self.assertEqual(evidence.total_replayed_environment_actions, 1)
+        self.assertEqual(evidence.total_physical_environment_actions, 242)
+
+    def test_rejects_policy_recovery_after_the_next_model_preflight(self) -> None:
+        def mutate_result(
+            episode: CampaignEpisode,
+            result: InteractiveResult,
+        ) -> InteractiveResult:
+            if not (
+                episode.model_id == QWEN35_RAW_PROFILE.model
+                and episode.task_id == CAMPAIGN_TASK_IDS[0]
+                and episode.arm == "raw_feedback_loop"
+            ):
+                return result
+            return dataclasses.replace(
+                result,
+                attempts=3,
+                model_calls=3,
+                logical_prompt_tokens=303,
+                logical_completion_tokens=51,
+                environment_actions=2,
+                replayed_environment_actions=1,
+                safety_recoveries=1,
+                parser_failures=1,
+                feedback_followups=2,
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign, episodes, spec = _build_campaign(
+                Path(temporary),
+                event_mutator=_late_raw_policy_recovery_payloads,
+                result_mutator=mutate_result,
+            )
+
+            with self.assertRaisesRegex(CampaignEvidenceError, "recovery"):
+                verify_campaign_evidence(campaign, episodes, spec)
+
+    def test_rejects_duplicate_checkpoint_restores_on_one_attempt(self) -> None:
+        def mutate_result(
+            episode: CampaignEpisode,
+            result: InteractiveResult,
+        ) -> InteractiveResult:
+            if not (
+                episode.model_id == QWEN35_RAW_PROFILE.model
+                and episode.task_id == CAMPAIGN_TASK_IDS[0]
+                and episode.arm == "engineered_loop"
+            ):
+                return result
+            return dataclasses.replace(
+                result,
+                attempts=3,
+                model_calls=3,
+                logical_prompt_tokens=303,
+                logical_completion_tokens=51,
+                environment_actions=3,
+                replayed_environment_actions=3,
+                evaluator_calls=4,
+                checkpoint_creates=3,
+                checkpoint_restores=3,
+                feedback_followups=2,
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign, episodes, spec = _build_campaign(
+                Path(temporary),
+                event_mutator=_duplicate_restore_payloads,
+                result_mutator=mutate_result,
+            )
+
+            with self.assertRaisesRegex(CampaignEvidenceError, "restore"):
+                verify_campaign_evidence(campaign, episodes, spec)
+
+    def test_rejects_next_prompt_preflight_before_checkpoint_restore(self) -> None:
+        def mutate_result(
+            episode: CampaignEpisode,
+            result: InteractiveResult,
+        ) -> InteractiveResult:
+            if not (
+                episode.model_id == QWEN35_RAW_PROFILE.model
+                and episode.task_id == CAMPAIGN_TASK_IDS[0]
+                and episode.arm == "engineered_loop"
+            ):
+                return result
+            return dataclasses.replace(
+                result,
+                attempts=3,
+                model_calls=3,
+                logical_prompt_tokens=303,
+                logical_completion_tokens=51,
+                environment_actions=3,
+                replayed_environment_actions=2,
+                evaluator_calls=4,
+                checkpoint_creates=3,
+                checkpoint_restores=2,
+                feedback_followups=2,
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign, episodes, spec = _build_campaign(
+                Path(temporary),
+                event_mutator=_late_restore_payloads,
+                result_mutator=mutate_result,
+            )
+
+            with self.assertRaisesRegex(CampaignEvidenceError, "restore"):
+                verify_campaign_evidence(campaign, episodes, spec)
+
+    def test_rejects_restores_that_differ_from_frozen_best_policy(self) -> None:
+        cases = (
+            (_wrong_best_restore_payloads, 3, 2),
+            (_tie_restore_payloads, 2, 2),
+            (_stale_tie_best_payloads, 1, 1),
+        )
+        for mutator, replayed_actions, restore_count in cases:
+            def mutate_result(
+                episode: CampaignEpisode,
+                result: InteractiveResult,
+            ) -> InteractiveResult:
+                if not (
+                    episode.model_id == QWEN35_RAW_PROFILE.model
+                    and episode.task_id == CAMPAIGN_TASK_IDS[0]
+                    and episode.arm == "engineered_loop"
+                ):
+                    return result
+                return dataclasses.replace(
+                    result,
+                    attempts=3,
+                    model_calls=3,
+                    logical_prompt_tokens=303,
+                    logical_completion_tokens=51,
+                    environment_actions=3,
+                    replayed_environment_actions=replayed_actions,
+                    evaluator_calls=4,
+                    checkpoint_creates=3,
+                    checkpoint_restores=restore_count,
+                    feedback_followups=2,
+                )
+
+            with self.subTest(mutator=mutator.__name__), tempfile.TemporaryDirectory() as temporary:
+                campaign, episodes, spec = _build_campaign(
+                    Path(temporary),
+                    event_mutator=mutator,
+                    result_mutator=mutate_result,
+                )
+
+                with self.assertRaisesRegex(CampaignEvidenceError, "restore|best"):
+                    verify_campaign_evidence(campaign, episodes, spec)
+
+    def test_rejects_impossible_replay_result_without_prior_model_actions(self) -> None:
+        def mutate_result(
+            episode: CampaignEpisode,
+            result: InteractiveResult,
+        ) -> InteractiveResult:
+            if episode.arm == "engineered_loop":
+                return dataclasses.replace(
+                    result,
+                    replayed_environment_actions=1,
+                    checkpoint_restores=1,
+                )
+            return result
+
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign, episodes, spec = _build_campaign(
+                Path(temporary),
+                result_mutator=mutate_result,
+            )
+
+            with self.assertRaisesRegex(CampaignEvidenceError, "campaign matrix"):
                 verify_campaign_evidence(campaign, episodes, spec)
 
     def test_rejects_infrastructure_invalid_event_in_completed_episode(self) -> None:

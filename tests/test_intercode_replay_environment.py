@@ -79,7 +79,11 @@ def candidate(
     )
 
 
-def policy_failure(state_sha256: str) -> ActionExecution:
+def policy_failure(
+    state_sha256: str,
+    *,
+    replayed_environment_actions: int = 0,
+) -> ActionExecution:
     kind = ActionPolicyFailureKind.TIMEOUT
     observation = ACTION_POLICY_OBSERVATIONS[kind]
     return ActionExecution(
@@ -92,6 +96,9 @@ def policy_failure(state_sha256: str) -> ActionExecution:
         policy_failure=kind,
         safety_recovery_performed=True,
         safety_recovery_evidence_sha256=digest("recovered"),
+        safety_recovery_replayed_environment_actions=(
+            replayed_environment_actions
+        ),
     )
 
 
@@ -217,6 +224,23 @@ class ReplayEnvironmentTests(unittest.TestCase):
         environment.close()
         self.assertEqual(factory.boundaries[0].close_calls, 1)
 
+    def test_policy_recovery_replay_count_must_equal_recorded_history(self) -> None:
+        first = candidate("first")
+        undercounted = policy_failure(
+            first.collector_state_sha256,
+            replayed_environment_actions=0,
+        )
+        factory = FakeBoundaryFactory({"first": first, "hang": undercounted})
+        environment = ReplayEnvironment(EpisodeCheckpointRegistry(), factory)
+        environment.execute("first")
+
+        with self.assertRaisesRegex(
+            ReplayInfrastructureError,
+            "policy recovery replay accounting is invalid",
+        ):
+            environment.execute("hang")
+        environment.close()
+
     def test_restore_replays_recorded_history_on_a_fresh_boundary(self) -> None:
         first = candidate("first")
         second = candidate("second")
@@ -228,10 +252,14 @@ class ReplayEnvironmentTests(unittest.TestCase):
         environment.execute("second")
         environment.checkpoint()
 
-        environment.restore(first_checkpoint)
+        replayed_environment_actions = environment.restore(
+            first_checkpoint,
+            action_limit=1,
+        )
         self.assertEqual(environment.checkpoint(), first_checkpoint)
         environment.close()
 
+        self.assertEqual(replayed_environment_actions, 1)
         self.assertEqual(len(factory.boundaries), 2)
         self.assertEqual(factory.boundaries[0].actions, ["first", "second"])
         self.assertEqual(factory.boundaries[1].actions, ["first"])
@@ -249,7 +277,7 @@ class ReplayEnvironmentTests(unittest.TestCase):
         checkpoint = environment.checkpoint()
 
         with self.assertRaises(ReplayInfrastructureError) as raised:
-            environment.restore(checkpoint)
+            environment.restore(checkpoint, action_limit=1)
         environment.close()
 
         self.assertEqual(
@@ -258,6 +286,23 @@ class ReplayEnvironmentTests(unittest.TestCase):
         )
         self.assertNotIn("SECRET", str(raised.exception))
         self.assertEqual([item.close_calls for item in factory.boundaries], [1, 1])
+
+    def test_restore_rejects_replay_above_the_action_limit_before_execution(self) -> None:
+        material = candidate("good")
+        factory = FakeBoundaryFactory({"good": material})
+        environment = ReplayEnvironment(EpisodeCheckpointRegistry(), factory)
+        environment.execute("good")
+        checkpoint = environment.checkpoint()
+
+        with self.assertRaisesRegex(
+            ReplayInfrastructureError,
+            "checkpoint replay action limit exceeded",
+        ):
+            environment.restore(checkpoint, action_limit=0)
+        environment.close()
+
+        self.assertEqual(len(factory.boundaries), 1)
+        self.assertEqual(factory.boundaries[0].actions, ["good"])
 
 
 class ReplayEvaluatorTests(unittest.TestCase):
@@ -439,6 +484,24 @@ class ReplayControllerEndToEndTests(unittest.TestCase):
                         [boundary.close_calls for boundary in factory.boundaries],
                         [1] * len(factory.boundaries),
                     )
+
+    def test_engineered_restore_accounts_for_replayed_environment_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result, factory = self._run(
+                directory,
+                strategy="engineered_loop",
+                actions=["good", "partial"],
+            )
+
+        physical_executions = sum(
+            len(boundary.actions) for boundary in factory.boundaries
+        )
+        self.assertEqual(result.environment_actions, 2)
+        self.assertEqual(result.replayed_environment_actions, 1)
+        self.assertEqual(
+            result.environment_actions + result.replayed_environment_actions,
+            physical_executions,
+        )
 
     def test_engineered_restore_mismatch_aborts_without_a_strict_call(self) -> None:
         good = candidate("good", stdout="recorded\n")

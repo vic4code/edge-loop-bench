@@ -106,6 +106,20 @@ def _touch_common_roots(
 
 
 class InterCodeStateCollectorTests(unittest.TestCase):
+    def test_acl_probe_uses_a_descriptor_even_when_supports_fd_omits_listxattr(self) -> None:
+        calls: list[int] = []
+
+        def listxattr(descriptor: int) -> list[str]:
+            calls.append(descriptor)
+            return []
+
+        with mock.patch.object(collector.os, "listxattr", listxattr, create=True), mock.patch.object(
+            collector.os, "supports_fd", set()
+        ):
+            self.assertEqual(collector._default_acl_probe(17), [])
+
+        self.assertEqual(calls, [17])
+
     def test_policy_and_profile_roots_are_explicit_and_digest_bound(self) -> None:
         self.assertEqual(
             {
@@ -130,20 +144,20 @@ class InterCodeStateCollectorTests(unittest.TestCase):
             collector.ROOT_BASELINE_SHA256,
         )
         self.assertEqual(
-            "sha256:70eeeda4091cb2da38aa8024af7c52dbacb464cf5b20a9f6bfdac5d66ecb67a9",
+            "sha256:1645f88e660e5c002af6a9b2a20aba06a8003cd4068008e38b417dd704b70794",
             collector.POLICY_SHA256,
         )
         self.assertEqual(
             {
-                "fs1": "sha256:55084cb572f3275a57a8932f11a18f1f606c092c7c9cf1a8baf75742c2232750",
-                "fs2": "sha256:d1c607dea4dd49fb639ab47c2e459a01471a6a002d6bc69fef4913cf9b014dbe",
-                "fs3": "sha256:9b0e2bac7388fa417f801b01bb21b69eda21b05a198b50bef4afd01432858b6c",
-                "fs4": "sha256:0adbd497e28b279f6657405942253c9274e5cd68c8c4102709630dfb1b429e6e",
+                "fs1": "sha256:7bb7740b35122e4b466c73ca12f04bcf90655c46282ab43a2d935e9263aded4e",
+                "fs2": "sha256:ab3c0f121799618475aa6484e153e8f8f86ddc30e221deb56dc610332ad79778",
+                "fs3": "sha256:def12284c4c14990afc64f213a68d6b3f6fbcfa1f3701dce08e36953927301ed",
+                "fs4": "sha256:1960144e663b68b433b7eb35d8c089eaf7c8cf649206517639e239dbec710c09",
             },
             dict(collector.PROFILE_SHA256),
         )
         self.assertEqual(
-            "sha256:1c515db46e794a58c457ac5d906ad80cae2ecb696ce2f07932733087368b1990",
+            "sha256:19e2b86952ab1bb93d6a4648d00d200421cd328064e6caf6da4575e9a194c8d3",
             collector.PROFILE_SET_SHA256,
         )
 
@@ -649,6 +663,17 @@ class InterCodeStateCollectorTests(unittest.TestCase):
         self.assertEqual(collector._canonical_json(payload), encoded)
         self.assertNotIn(b"must-not-enter-audit", encoded)
         self.assertNotIn(b"private-object", encoded)
+
+    def test_build_audit_allows_runtime_injected_dockerenv_to_be_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _touch_common_roots(root, write_audit=False)
+            (root / ".dockerenv").unlink()
+            payload = json.loads(_build_audit_bytes(root))
+
+        self.assertEqual(
+            [".dockerenv"], payload["runtime_injected_root_names"]
+        )
 
     def test_build_audit_rejects_uncovered_writes_acl_and_var_lock_drift(self) -> None:
         for metadata in (

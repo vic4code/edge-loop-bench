@@ -349,6 +349,7 @@ class DockerAttemptBoundary:
             policy_failure=policy_kind,
             safety_recovery_performed=True,
             safety_recovery_evidence_sha256=evidence,
+            safety_recovery_replayed_environment_actions=len(self._history),
         )
 
     def _handle_infrastructure_invalid(self, result: DockerActionResult) -> None:

@@ -18,9 +18,10 @@ from .intercode_campaign_ledger import (
 )
 
 
-V07_ANALYSIS_REVISION = "intercode-v0.7-effectiveness-analysis-v2"
+V07_ANALYSIS_REVISION = "intercode-v0.7-effectiveness-analysis-v5"
 V07_BOOTSTRAP_SEED = 20_260_716
 V07_BOOTSTRAP_REPETITIONS = 10_000
+V07_PRACTICAL_THRESHOLD_PP = 5.0
 V07_STRATUM_POPULATION = {"fs1": 55, "fs2": 45, "fs3": 56, "fs4": 24}
 V07_STRATA = tuple(V07_STRATUM_POPULATION)
 V07_POPULATION_SIZE = sum(V07_STRATUM_POPULATION.values())
@@ -46,6 +47,8 @@ class V07ArmSummary:
     total_logical_prompt_tokens: int
     total_logical_completion_tokens: int
     total_environment_actions: int
+    total_replayed_environment_actions: int
+    total_physical_environment_actions: int
     total_evaluator_calls: int
     total_checkpoint_creates: int
     total_checkpoint_restores: int
@@ -55,6 +58,9 @@ class V07ArmSummary:
     total_active_wall_time_ns: int
     weighted_mean_model_prompts: float
     weighted_mean_logical_tokens: float
+    weighted_mean_environment_actions: float
+    weighted_mean_replayed_environment_actions: float
+    weighted_mean_physical_environment_actions: float
     weighted_mean_active_wall_seconds: float
 
 
@@ -76,6 +82,7 @@ class V07ContrastSummary:
     exact_mcnemar_p_value: float
     weighted_model_prompt_delta: float
     weighted_logical_token_delta: float
+    weighted_physical_environment_action_delta: float
     weighted_active_wall_seconds_delta: float
     unresolved_handoff_delta: float
     avoided_unresolved_handoffs: int
@@ -103,6 +110,9 @@ class V07EffectivenessAnalysis:
     total_automatic_followups: int
     total_logical_prompt_tokens: int
     total_logical_completion_tokens: int
+    total_environment_actions: int
+    total_replayed_environment_actions: int
+    total_physical_environment_actions: int
     total_human_prompts: int
     total_unresolved_handoffs: int
     total_active_wall_time_ns: int
@@ -125,7 +135,7 @@ class V07EffectivenessAnalysis:
             "interpretation": self.interpretation,
             "primary_claim_status": self.primary_claim_status,
             "schedule_sha256": self.schedule_sha256,
-            "schema": "edgeloopbench.intercode-v0.7-effectiveness-analysis.v2",
+            "schema": "edgeloopbench.intercode-v0.7-effectiveness-analysis.v4",
             "total_active_wall_time_ns": self.total_active_wall_time_ns,
             "total_automatic_followups": self.total_automatic_followups,
             "total_feedback_followups": self.total_feedback_followups,
@@ -138,6 +148,13 @@ class V07EffectivenessAnalysis:
                 self.total_logical_completion_tokens
             ),
             "total_logical_prompt_tokens": self.total_logical_prompt_tokens,
+            "total_environment_actions": self.total_environment_actions,
+            "total_replayed_environment_actions": (
+                self.total_replayed_environment_actions
+            ),
+            "total_physical_environment_actions": (
+                self.total_physical_environment_actions
+            ),
             "total_model_prompts": self.total_model_prompts,
             "total_unresolved_handoffs": self.total_unresolved_handoffs,
             "verified_episode_count": self.verified_episode_count,
@@ -244,6 +261,16 @@ def analyze_v07_effectiveness(
         "total_logical_completion_tokens": sum(
             row.result.logical_completion_tokens for row in rows
         ),
+        "total_environment_actions": sum(
+            row.result.environment_actions for row in rows
+        ),
+        "total_replayed_environment_actions": sum(
+            row.result.replayed_environment_actions for row in rows
+        ),
+        "total_physical_environment_actions": sum(
+            row.result.environment_actions + row.result.replayed_environment_actions
+            for row in rows
+        ),
         "total_human_prompts": sum(row.result.human_prompts for row in rows),
         "total_unresolved_handoffs": sum(
             not row.result.strict_success for row in rows
@@ -314,6 +341,13 @@ def _summarize_arm(
         total_environment_actions=sum(
             row.result.environment_actions for row in rows
         ),
+        total_replayed_environment_actions=sum(
+            row.result.replayed_environment_actions for row in rows
+        ),
+        total_physical_environment_actions=sum(
+            row.result.environment_actions + row.result.replayed_environment_actions
+            for row in rows
+        ),
         total_evaluator_calls=sum(row.result.evaluator_calls for row in rows),
         total_checkpoint_creates=sum(
             row.result.checkpoint_creates for row in rows
@@ -332,6 +366,21 @@ def _summarize_arm(
         ),
         weighted_mean_logical_tokens=_weighted_mean(
             rows, lambda row: float(logical_tokens(row))
+        ),
+        weighted_mean_environment_actions=_weighted_mean(
+            rows,
+            lambda row: float(row.result.environment_actions),
+        ),
+        weighted_mean_replayed_environment_actions=_weighted_mean(
+            rows,
+            lambda row: float(row.result.replayed_environment_actions),
+        ),
+        weighted_mean_physical_environment_actions=_weighted_mean(
+            rows,
+            lambda row: float(
+                row.result.environment_actions
+                + row.result.replayed_environment_actions
+            ),
         ),
         weighted_mean_active_wall_seconds=_weighted_mean(
             rows, lambda row: row.active_wall_time_ns / 1_000_000_000
@@ -367,13 +416,13 @@ def _summarize_contrast(
     regressed = sum(delta == -1 for delta in deltas.values())
     p_value = _exact_mcnemar(rescued, regressed)
     positive_pattern = bool(
-        point >= 5.0
+        point >= V07_PRACTICAL_THRESHOLD_PP
         and ci_low > 0.0
         and rescued > regressed
         and p_value < 0.05
     )
     negative_pattern = bool(
-        point <= -5.0
+        point <= -V07_PRACTICAL_THRESHOLD_PP
         and ci_high < 0.0
         and regressed > rescued
         and p_value < 0.05
@@ -382,7 +431,7 @@ def _summarize_contrast(
         classification = "positive_threshold_met"
     elif negative_pattern:
         classification = "negative_harm_signal"
-    elif point > 0.0 and ci_low > 0.0:
+    elif 0.0 < point < V07_PRACTICAL_THRESHOLD_PP and ci_low > 0.0:
         classification = "positive_below_practical_threshold"
     else:
         classification = "inconclusive_not_equivalence"
@@ -402,6 +451,15 @@ def _summarize_contrast(
             + candidate[task_id].result.logical_completion_tokens
             - baseline[task_id].result.logical_prompt_tokens
             - baseline[task_id].result.logical_completion_tokens
+        )
+        for task_id in task_ids
+    }
+    physical_environment_action_deltas = {
+        task_id: (
+            candidate[task_id].result.environment_actions
+            + candidate[task_id].result.replayed_environment_actions
+            - baseline[task_id].result.environment_actions
+            - baseline[task_id].result.replayed_environment_actions
         )
         for task_id in task_ids
     }
@@ -430,6 +488,9 @@ def _summarize_contrast(
         exact_mcnemar_p_value=p_value,
         weighted_model_prompt_delta=_weighted_task_values(prompt_deltas),
         weighted_logical_token_delta=_weighted_task_values(token_deltas),
+        weighted_physical_environment_action_delta=_weighted_task_values(
+            physical_environment_action_deltas
+        ),
         weighted_active_wall_seconds_delta=_weighted_task_values(wall_deltas),
         unresolved_handoff_delta=-_weighted_task_values(deltas),
         avoided_unresolved_handoffs=rescued,
@@ -538,7 +599,7 @@ def _analysis_record(values: Mapping[str, object]) -> dict[str, object]:
         },
         "arm_summaries": [asdict(item) for item in values["arm_summaries"]],  # type: ignore[arg-type]
         "contrasts": [asdict(item) for item in values["contrasts"]],  # type: ignore[arg-type]
-        "schema": "edgeloopbench.intercode-v0.7-effectiveness-analysis.v2",
+        "schema": "edgeloopbench.intercode-v0.7-effectiveness-analysis.v4",
     }
 
 

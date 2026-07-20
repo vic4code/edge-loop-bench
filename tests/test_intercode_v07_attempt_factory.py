@@ -113,7 +113,7 @@ def execution_pins() -> V07ExecutionPins:
         "docker_limits": DockerLimits(
             memory_bytes=512 << 20,
             memory_swap_bytes=512 << 20,
-            storage_bytes=256 << 20,
+            writable_layer_watchdog_bytes=256 << 20,
             nano_cpus=1_000_000_000,
             pids_limit=64,
             nofile_soft=1024,

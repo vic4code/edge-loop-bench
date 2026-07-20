@@ -50,6 +50,7 @@ from edgeloopbench.intercode_source_inventory import (
 from edgeloopbench.intercode_v07_manifest import (
     V07_CALIBRATION_DESIGN_SHA256,
     V07_INTERVENTION_JOURNAL_REVISION,
+    V07_MANIFEST_SCHEMA_REVISION,
     V07_RUN_ID_POLICY_REVISION,
     V07_SCHEDULE_SHA256,
     V07ArtifactPins,
@@ -396,6 +397,11 @@ class InterCodeV07ManifestTests(unittest.TestCase):
             models=(model(PHI4_MINI_RAW_PROFILE), model(QWEN35_RAW_PROFILE))
         )
         record = manifest.canonical_record()
+        self.assertEqual(
+            V07_MANIFEST_SCHEMA_REVISION,
+            "intercode-v0.7-precalibration-manifest-v2",
+        )
+        self.assertEqual(record["schema"], V07_MANIFEST_SCHEMA_REVISION)
 
         self.assertEqual(record["phase"], "pre_calibration")
         self.assertEqual(record["source"]["revision"], INTERCODE_REVISION)
@@ -488,13 +494,16 @@ class InterCodeV07ManifestTests(unittest.TestCase):
             {
                 "memory_bytes": 512 << 20,
                 "memory_swap_bytes": 512 << 20,
+                "fsize_hard": 16 << 20,
+                "fsize_soft": 16 << 20,
                 "nano_cpus": 1_000_000_000,
                 "nofile_hard": 1024,
                 "nofile_soft": 1024,
                 "nproc_hard": 64,
                 "nproc_soft": 64,
                 "pids_limit": 64,
-                "storage_bytes": 256 << 20,
+                "storage_enforcement_mode": "sampled-size-rw-no-hard-quota-v1",
+                "writable_layer_watchdog_bytes": 256 << 20,
             },
         )
         self.assertEqual(
@@ -505,6 +514,8 @@ class InterCodeV07ManifestTests(unittest.TestCase):
                 "observation_limit_bytes": 2048,
                 "private_stream_limit_bytes": 4096,
                 "read_chunk_bytes": 4096,
+                "writable_layer_probe_timeout_seconds": 1.0,
+                "writable_layer_sample_interval_seconds": 0.25,
             },
         )
         self.assertEqual(
@@ -621,7 +632,7 @@ class InterCodeV07ManifestTests(unittest.TestCase):
             DockerLimits(
                 memory_bytes=1 << 30,
                 memory_swap_bytes=1 << 30,
-                storage_bytes=256 << 20,
+                writable_layer_watchdog_bytes=256 << 20,
                 nano_cpus=1_000_000_000,
                 pids_limit=64,
                 nofile_soft=1024,
@@ -632,7 +643,7 @@ class InterCodeV07ManifestTests(unittest.TestCase):
             DockerLimits(
                 memory_bytes=512 << 20,
                 memory_swap_bytes=512 << 20,
-                storage_bytes=256 << 20,
+                writable_layer_watchdog_bytes=256 << 20,
                 nano_cpus=2_000_000_000,
                 pids_limit=64,
                 nofile_soft=1024,

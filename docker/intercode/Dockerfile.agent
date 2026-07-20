@@ -65,6 +65,9 @@ RUN case "${FILE_SYSTEM_VERSION}" in 1|2|3|4) ;; *) exit 64 ;; esac \
 RUN chmod 1777 / \
     && mkdir -p /home/agent /usr/workspace \
     && chown 65532:65532 /home/agent /usr/workspace \
+    && if [[ -d /var/lib/pebble/default ]]; then \
+         chmod 0755 /var/lib/pebble/default; \
+       fi \
     && for path in /testbed /system /workspace /backup; do \
          if [[ -e "${path}" ]]; then chown -R 65532:65532 "${path}"; fi; \
        done \
@@ -90,18 +93,19 @@ RUN git init --quiet / \
 COPY docker/intercode/state_collector.py /opt/edgeloop/state_collector.py
 RUN chown 0:0 /opt/edgeloop/state_collector.py \
     && chmod 0555 /opt/edgeloop/state_collector.py
-LABEL org.edgeloopbench.state-collector.sha256="sha256:513a0261fad1e52ce77479afd1c3196921ce558cc80e83632b68795e5639bba0" \
+LABEL org.edgeloopbench.state-collector.sha256="sha256:28cdd90502bb9b5d6ede8800bde5378a9f828ade09f97c08f60f49201626f6f5" \
       org.edgeloopbench.state-collector.argv="/usr/bin/python3 -I -S -B /opt/edgeloop/state_collector.py --profile fsN" \
-      org.edgeloopbench.state-collector.policy-sha256="sha256:70eeeda4091cb2da38aa8024af7c52dbacb464cf5b20a9f6bfdac5d66ecb67a9" \
+      org.edgeloopbench.state-collector.policy-sha256="sha256:1645f88e660e5c002af6a9b2a20aba06a8003cd4068008e38b417dd704b70794" \
       org.edgeloopbench.state-collector.root-baseline-sha256="sha256:06dcf54e33c9412b1c0bb2cf7ddab33848169e640012209b9d05c81ee1da457f" \
-      org.edgeloopbench.state-collector.profile-set-sha256="sha256:1c515db46e794a58c457ac5d906ad80cae2ecb696ce2f07932733087368b1990" \
+      org.edgeloopbench.state-collector.profile-set-sha256="sha256:19e2b86952ab1bb93d6a4648d00d200421cd328064e6caf6da4575e9a194c8d3" \
       org.edgeloopbench.state-collector.profile="fs${FILE_SYSTEM_VERSION}" \
       org.edgeloopbench.filesystem-version="${FILE_SYSTEM_VERSION}"
 
 # The final root phase proves the complete writable surface. Keep the upstream
 # cwd while sticky-root mode permits new top-level outputs without permitting
 # deletion of root-owned baseline paths.
-RUN /usr/bin/python3 -I -S -B /opt/edgeloop/state_collector.py \
+RUN chmod 1777 / \
+    && /usr/bin/python3 -I -S -B /opt/edgeloop/state_collector.py \
          --build-audit "fs${FILE_SYSTEM_VERSION}"
 USER 65532:65532
 ENV HOME=/home/agent

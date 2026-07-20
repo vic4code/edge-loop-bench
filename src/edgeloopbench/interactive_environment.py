@@ -42,6 +42,7 @@ class ActionPolicyFailureKind(str, Enum):
     INVALID_TEXT = "invalid_text"
     RESIDUAL_PROCESS = "residual_process"
     CONTAINER_TERMINATED = "container_terminated"
+    WRITABLE_LAYER_OVERFLOW = "writable_layer_overflow"
 
 
 ACTION_POLICY_OBSERVATIONS = {
@@ -55,6 +56,9 @@ ACTION_POLICY_OBSERVATIONS = {
     ),
     ActionPolicyFailureKind.CONTAINER_TERMINATED: (
         "Command terminated the task container."
+    ),
+    ActionPolicyFailureKind.WRITABLE_LAYER_OVERFLOW: (
+        "Command exceeded the sampled writable-layer safety limit."
     ),
 }
 
@@ -72,6 +76,7 @@ class ActionExecution:
     policy_failure: ActionPolicyFailureKind | None = None
     safety_recovery_performed: bool = False
     safety_recovery_evidence_sha256: str | None = None
+    safety_recovery_replayed_environment_actions: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.observation, str):
@@ -93,6 +98,20 @@ class ActionExecution:
             raise ValueError("action policy failure must be typed")
         if not isinstance(self.safety_recovery_performed, bool):
             raise ValueError("action safety recovery marker must be boolean")
+        if (
+            isinstance(
+                self.safety_recovery_replayed_environment_actions,
+                bool,
+            )
+            or not isinstance(
+                self.safety_recovery_replayed_environment_actions,
+                int,
+            )
+            or self.safety_recovery_replayed_environment_actions < 0
+        ):
+            raise ValueError(
+                "action safety recovery replay count must be a non-negative integer"
+            )
         if self.safety_recovery_evidence_sha256 is not None:
             _require_sha256(
                 self.safety_recovery_evidence_sha256,
@@ -104,6 +123,7 @@ class ActionExecution:
                 or self.policy_failure is not None
                 or self.safety_recovery_performed
                 or self.safety_recovery_evidence_sha256 is not None
+                or self.safety_recovery_replayed_environment_actions != 0
             ):
                 raise ValueError("admissible action accounting is contradictory")
         elif (
@@ -249,7 +269,12 @@ class InteractiveEnvironment(Protocol):
 
     def checkpoint(self) -> EnvironmentCheckpoint: ...
 
-    def restore(self, checkpoint: EnvironmentCheckpoint) -> None: ...
+    def restore(
+        self,
+        checkpoint: EnvironmentCheckpoint,
+        *,
+        action_limit: int,
+    ) -> int: ...
 
     def close(self) -> None: ...
 

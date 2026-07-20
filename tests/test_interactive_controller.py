@@ -52,6 +52,7 @@ class FakeEnvironment:
         self.actions: list[str] = []
         self.restore_calls: list[EnvironmentCheckpoint] = []
         self.state_digest = digest("initial")
+        self.replay_depth = 0
         self.closed = False
 
     def execute(self, action: str) -> ActionExecution:
@@ -64,6 +65,8 @@ class FakeEnvironment:
         previous_state_digest = self.state_digest
         if not admissible:
             state_digest = previous_state_digest
+        else:
+            self.replay_depth += 1
         self.state_digest = state_digest
         return ActionExecution(
             observation=observation,
@@ -78,6 +81,9 @@ class FakeEnvironment:
             safety_recovery_performed=not admissible,
             safety_recovery_evidence_sha256=(
                 None if admissible else digest(f"recovery-{self.identifier}-{action}")
+            ),
+            safety_recovery_replayed_environment_actions=(
+                0 if admissible else self.replay_depth
             ),
         )
 
@@ -96,12 +102,20 @@ class FakeEnvironment:
         )
         return checkpoint
 
-    def restore(self, checkpoint: EnvironmentCheckpoint) -> None:
+    def restore(
+        self,
+        checkpoint: EnvironmentCheckpoint,
+        *,
+        action_limit: int,
+    ) -> int:
+        if action_limit < 1:
+            raise AssertionError("restore action limit exhausted")
         self.restore_calls.append(checkpoint)
         self.state_digest = checkpoint.state_sha256
         self.owner.timeline.append(
             ("restore", self.identifier, checkpoint.reference_sha256)
         )
+        return 1
 
     def close(self) -> None:
         self.closed = True
@@ -331,6 +345,7 @@ class InteractiveControllerTests(unittest.TestCase):
         self.assertEqual(result.evaluator_calls, 2)
         self.assertEqual(result.checkpoint_creates, 1)
         self.assertEqual(result.safety_recoveries, 1)
+        self.assertEqual(result.replayed_environment_actions, 0)
         self.assertEqual(result.maintenance_operations, 2)
         recoveries = [
             record for record in records
@@ -343,6 +358,7 @@ class InteractiveControllerTests(unittest.TestCase):
             recoveries[0]["recovery_evidence_sha256"],
             digest("recovery-1-hang"),
         )
+        self.assertEqual(recoveries[0]["replayed_environment_actions"], 0)
         self.assertIn(
             f"Output: {frozen_observation}\nExit status: null\nReward: 0.0",
             requests[1].prompt,
@@ -351,6 +367,42 @@ class InteractiveControllerTests(unittest.TestCase):
             [entry[0] for entry in factory.timeline],
             ["execute", "execute", "checkpoint", "close"],
         )
+
+    def test_raw_policy_recovery_replay_is_counted_before_scoring(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            factory = FakeEnvironmentFactory(
+                effects={
+                    "inspect": ("inspected", digest("inspected"), True),
+                    "hang": ("Command timed out.", digest("contaminated"), False),
+                },
+                rewards={"inspect": 0.2},
+            )
+            result, _requests = self.execute_strategy(
+                directory,
+                strategy="raw_feedback_loop",
+                outputs=[self.output("inspect"), self.output("hang")],
+                factory=factory,
+                attempts=2,
+            )
+            records = [
+                json.loads(line)
+                for line in (
+                    Path(directory) / "raw_feedback_loop.events.jsonl"
+                ).read_text(encoding="utf-8").splitlines()
+            ]
+
+        recovery = next(
+            record
+            for record in records
+            if record.get("type") == "safety_recovery_completed"
+        )
+        self.assertEqual(result.environment_actions, 2)
+        self.assertEqual(result.replayed_environment_actions, 1)
+        self.assertEqual(
+            result.environment_actions + result.replayed_environment_actions,
+            3,
+        )
+        self.assertEqual(recovery["replayed_environment_actions"], 1)
 
     def test_direct_policy_failure_has_no_selected_checkpoint_or_strict_call(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

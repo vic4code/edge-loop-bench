@@ -144,7 +144,7 @@ def execution_pins() -> V07ExecutionPins:
         "docker_limits": DockerLimits(
             memory_bytes=512 << 20,
             memory_swap_bytes=512 << 20,
-            storage_bytes=256 << 20,
+            writable_layer_watchdog_bytes=256 << 20,
             nano_cpus=1_000_000_000,
             pids_limit=64,
             nofile_soft=1024,
@@ -514,7 +514,7 @@ class InterCodeV07DockerQualificationTests(unittest.TestCase):
         )
         self.assertEqual(
             V07_DOCKER_QUALIFICATION_AUTHORITY_REVISION,
-            "intercode-v0.7-docker-qualification-authority-v1",
+            "intercode-v0.7-docker-qualification-authority-v2",
         )
         self.assertTrue(all(len(run_id) == 24 for run_id in expected))
 

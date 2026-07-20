@@ -49,6 +49,11 @@ echo -e 'This is a hidden file' > /workspace/dir1/.hidden1.txt
 echo -e 'This is another hidden file' > /workspace/.hidden.txt
 echo -e 'CREATE TABLE Persons (\nPersonID int,\nLastName varchar(255),\nFirstName varchar(255),\nAddress varchar(255),\nCity varchar(255)\n);' > /workspace/dir2/mysql/sql1.sql
 echo -e 'column1,column2,column3\nvalue1,value2,value3\nvalue4,value5,value6\nvalue7,values8,values9' > /workspace/dir2/csvfile1.csv
+: > /workspace/recent.txt
+: > /workspace/recent1.txt
+: > /workspace/old.txt
+: > /workspace/old1.txt
+: > /workspace/old2.txt
 
 # Normalize generated mtimes before archiving. Dates use UTC and are fixed.
 find /workspace /backup -exec touch -h -a -m -t 202305312359.58 {} +

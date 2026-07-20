@@ -164,10 +164,18 @@ class RecoveryEnvironment:
         self.owner.actions_by_checkpoint[checkpoint.reference_sha256] = self.last_action
         return checkpoint
 
-    def restore(self, checkpoint: EnvironmentCheckpoint) -> None:
+    def restore(
+        self,
+        checkpoint: EnvironmentCheckpoint,
+        *,
+        action_limit: int,
+    ) -> int:
+        if action_limit < 1:
+            raise AssertionError("restore action limit exhausted")
         self.owner.restore_calls += 1
         self.owner._fail("restore")
         self.state_sha256 = checkpoint.state_sha256
+        return 1
 
     def close(self) -> None:
         self.owner.close_calls += 1

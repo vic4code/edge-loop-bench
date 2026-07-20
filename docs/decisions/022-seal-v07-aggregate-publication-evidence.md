@@ -59,6 +59,11 @@ objects privately so later validation can recheck component-to-root equality;
 its canonical record contains no filesystem path, task query, model response,
 command, observation, gold material, evaluator path, or outcome details.
 
+ADR 029 supersedes this aggregate schema identity with
+`intercode-v0.7-study-evidence-v5` before scoring. Revision v5 retains v4's
+privacy and authority checks and additionally binds model-issued, replayed,
+and total physical environment-action accounting.
+
 Revision v4 additionally requires the exact manifest-pinned tokenizer artifact
 SHA-256 for each model in frozen model order. The campaign verifier derives the
 same map from all controller preflights and the aggregate verifier rejects a

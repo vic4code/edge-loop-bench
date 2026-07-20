@@ -27,7 +27,7 @@ from .intercode_campaign_ledger import (
 )
 
 
-V07_EXECUTION_EVIDENCE_REVISION = "intercode-v0.7-execution-envelope-set-v1"
+V07_EXECUTION_EVIDENCE_REVISION = "intercode-v0.7-execution-envelope-set-v3"
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _AUTHORITY = object()

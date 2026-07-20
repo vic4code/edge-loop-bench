@@ -35,16 +35,20 @@ for selected-task Docker qualification and production gold issuance.
    `PrivateTaskReference`; no API accepts a gold string.
 2. It executes the exact ordered `(task_id, replay_index)` matrix of 30 tasks by
    two replays. Each replay binds authority revision
-   `intercode-v0.7-docker-qualification-authority-v1` and uses the exact
+   `intercode-v0.7-docker-qualification-authority-v2` and uses the exact
    manifest `V07_RUN_ID_POLICY_REVISION`: a qualification campaign digest,
    one-based matrix episode index, and role `qualification` produce
    `v07-<first20-lowercase-sha256>`. The 60 IDs are deterministic, unique,
    path-free, and within the Docker boundary's 24-character policy.
 3. Every replay freezes `DockerLimits` to 512 MiB memory, no container swap,
-   256 MiB storage, one CPU, 64 PIDs, `nofile=1024`, and `nproc=64`.
-   `DockerActionLimits` are exactly 10 seconds, 4096 private bytes, 2048 visible
-   bytes, 4096-byte reads, and an eight-chunk queue. The already attested
-   Docker image and CLI policies supply `linux/arm64` and network `none`.
+   a 16 MiB `fsize` ulimit, the aggregate storage mode
+   `sampled-size-rw-no-hard-quota-v1` with a 256 MiB writable-layer watchdog,
+   one CPU, 64 PIDs, `nofile=1024`, and `nproc=64`. `DockerActionLimits` are
+   exactly 10 seconds, 4096 private bytes, 2048 visible bytes, 4096-byte reads,
+   an eight-chunk queue, a 0.25-second writable-layer sampling interval, and a
+   1-second probe timeout. The watchdog is a fail-closed safety guard, not a
+   hard aggregate quota. The already attested Docker image and CLI policies
+   supply `linux/arm64` and network `none`.
 4. Before creation, the exact run label must have no resources. The authority
    then requires one fresh exact container whose returned spec and image match,
    starts that same container, collects the initial trusted state, executes the

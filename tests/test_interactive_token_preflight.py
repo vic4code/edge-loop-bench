@@ -76,7 +76,13 @@ class TinyEnvironment:
     def checkpoint(self) -> EnvironmentCheckpoint:
         return EnvironmentCheckpoint(digest("checkpoint"), digest(self.action))
 
-    def restore(self, _checkpoint: EnvironmentCheckpoint) -> None:
+    def restore(
+        self,
+        _checkpoint: EnvironmentCheckpoint,
+        *,
+        action_limit: int,
+    ) -> int:
+        del action_limit
         raise AssertionError("restore not expected")
 
     def close(self) -> None:
@@ -204,7 +210,7 @@ class InteractiveTokenPreflightTests(unittest.TestCase):
         )
         self.assertEqual(
             records[0]["controller_revision"],
-            "interactive-controller-v4-v07-preregistered-topology",
+            "interactive-controller-v6-recovery-replay-accounting",
         )
         self.assertEqual(records[2]["reason"], "prompt_budget")
         self.assertEqual(records[2]["prompt_tokens"], 21)

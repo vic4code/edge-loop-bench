@@ -38,7 +38,7 @@ from .journal import (
 from .model_adapter import PHI4_MINI_RAW_PROFILE, QWEN35_RAW_PROFILE
 
 
-CAMPAIGN_SCHEMA_REVISION = "intercode-30task-campaign-ledger-v4"
+CAMPAIGN_SCHEMA_REVISION = "intercode-30task-campaign-ledger-v6"
 CAMPAIGN_MODELS = ("qwen3.5:4b", "phi4-mini:3.8b")
 CAMPAIGN_ARMS = (
     "direct",
@@ -59,8 +59,8 @@ CAMPAIGN_STATIC_AUDIT_SHA256 = (
 )
 CAMPAIGN_PROGRESS_REVISION = "candidate-only-progress-capped-0.8-v1"
 CAMPAIGN_STRICT_EVALUATOR_REVISION = "strict-state-output-equality-v1"
-CAMPAIGN_EPISODE_LOG_REVISION = "sealed-interactive-controller-journal-v2"
-CAMPAIGN_EXECUTION_ENVELOPE_REVISION = "intercode-v0.7-execution-envelope-v2"
+CAMPAIGN_EPISODE_LOG_REVISION = "sealed-interactive-controller-journal-v4"
+CAMPAIGN_EXECUTION_ENVELOPE_REVISION = "intercode-v0.7-execution-envelope-v4"
 CAMPAIGN_TASK_IDS = (
     "bash-fs1-032",
     "bash-fs1-008",
@@ -139,6 +139,7 @@ _RESULT_FIELDS = (
     "logical_prompt_tokens",
     "logical_completion_tokens",
     "environment_actions",
+    "replayed_environment_actions",
     "evaluator_calls",
     "checkpoint_creates",
     "checkpoint_restores",
@@ -611,6 +612,23 @@ class CampaignMatrix:
         return sum(item.result.logical_completion_tokens for item in self.episodes)
 
     @property
+    def total_environment_actions(self) -> int:
+        return sum(item.result.environment_actions for item in self.episodes)
+
+    @property
+    def total_replayed_environment_actions(self) -> int:
+        return sum(
+            item.result.replayed_environment_actions for item in self.episodes
+        )
+
+    @property
+    def total_physical_environment_actions(self) -> int:
+        return (
+            self.total_environment_actions
+            + self.total_replayed_environment_actions
+        )
+
+    @property
     def total_human_prompts(self) -> int:
         return sum(item.result.human_prompts for item in self.episodes)
 
@@ -909,6 +927,47 @@ def _serialize_result(
         )
     if not 1 <= result.model_calls <= CAMPAIGN_ATTEMPT_CAP:
         raise CampaignError("InteractiveResult model_calls exceed the frozen arm cap")
+    replay_action_cap = (
+        result.environment_actions * (result.environment_actions - 1) // 2
+    )
+    if result.replayed_environment_actions > replay_action_cap:
+        raise CampaignError(
+            "InteractiveResult replayed environment actions exceed the frozen cap"
+        )
+    if episode.arm not in {
+        "raw_feedback_loop",
+        "engineered_loop",
+    } and result.replayed_environment_actions != 0:
+        raise CampaignError(
+            "only shared-state loop arms may report replayed environment actions"
+        )
+    if (
+        result.checkpoint_restores > 0
+        and result.replayed_environment_actions == 0
+    ):
+        raise CampaignError(
+            "InteractiveResult restore and replay accounting are contradictory"
+        )
+    if result.replayed_environment_actions < result.checkpoint_restores:
+        raise CampaignError(
+            "InteractiveResult replay accounting is below the restore count"
+        )
+    if (
+        result.replayed_environment_actions > 0
+        and result.checkpoint_restores == 0
+        and result.safety_recoveries == 0
+    ):
+        raise CampaignError(
+            "InteractiveResult replay accounting lacks a maintenance source"
+        )
+    if (
+        episode.arm == "raw_feedback_loop"
+        and result.replayed_environment_actions > 0
+        and result.safety_recoveries == 0
+    ):
+        raise CampaignError(
+            "raw replay accounting requires a safety recovery"
+        )
     if episode.arm == "direct":
         if (
             result.model_calls != 1

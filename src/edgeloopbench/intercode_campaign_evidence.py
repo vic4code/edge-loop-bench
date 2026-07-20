@@ -46,7 +46,7 @@ from .journal import JournalError, inspect_journal
 from .model_adapter import PHI4_MINI_RAW_PROFILE, QWEN35_RAW_PROFILE
 
 
-EVIDENCE_SCHEMA_REVISION = "intercode-v0.7-campaign-evidence-v4"
+EVIDENCE_SCHEMA_REVISION = "intercode-v0.7-campaign-evidence-v6"
 MAX_EPISODE_LOG_BYTES = 4 * 1024 * 1024
 MAX_EPISODE_RECORDS = 128
 MAX_CAMPAIGN_LOG_BYTES = 16 * 1024 * 1024
@@ -168,7 +168,12 @@ _STATIC_EVENT_FIELDS: dict[str, frozenset[str]] = {
         }
     ),
     "safety_recovery_completed": frozenset(
-        {"attempt", "state_sha256", "recovery_evidence_sha256"}
+        {
+            "attempt",
+            "state_sha256",
+            "recovery_evidence_sha256",
+            "replayed_environment_actions",
+        }
     ),
     "attempt_defaulted": frozenset(
         {
@@ -180,13 +185,25 @@ _STATIC_EVENT_FIELDS: dict[str, frozenset[str]] = {
         }
     ),
     "checkpoint_create_requested": frozenset({"attempt"}),
-    "checkpoint_created": frozenset({"attempt", "state_sha256"}),
+    "checkpoint_created": frozenset(
+        {"attempt", "state_sha256", "replay_depth"}
+    ),
     "attempt_evaluation_requested": frozenset({"attempt", "state_sha256"}),
     "attempt_evaluated": frozenset(
         {"attempt", "reward", "official_success", "evaluation_kind"}
     ),
-    "checkpoint_restore_requested": frozenset({"attempt", "state_sha256"}),
-    "checkpoint_restored": frozenset({"attempt", "state_sha256"}),
+    "checkpoint_restore_requested": frozenset(
+        {"attempt", "target_attempt", "state_sha256", "replay_depth"}
+    ),
+    "checkpoint_restored": frozenset(
+        {
+            "attempt",
+            "target_attempt",
+            "state_sha256",
+            "replay_depth",
+            "replayed_environment_actions",
+        }
+    ),
     "environment_close_requested": frozenset({"scope"}),
     "environment_closed": frozenset({"scope"}),
     "strict_evaluation_planned": frozenset(
@@ -270,6 +287,7 @@ _POLICY_FAILURES = frozenset(
         "invalid_text",
         "residual_process",
         "container_terminated",
+        "writable_layer_overflow",
     }
 )
 _CANDIDATE_PROGRESS_VALUES = frozenset({0.0, 0.2, 0.4, 0.6, 0.8})
@@ -381,6 +399,18 @@ class VerifiedCampaignEvidence:
     @property
     def total_logical_completion_tokens(self) -> int:
         return self.matrix.total_logical_completion_tokens
+
+    @property
+    def total_environment_actions(self) -> int:
+        return self.matrix.total_environment_actions
+
+    @property
+    def total_replayed_environment_actions(self) -> int:
+        return self.matrix.total_replayed_environment_actions
+
+    @property
+    def total_physical_environment_actions(self) -> int:
+        return self.matrix.total_physical_environment_actions
 
     @property
     def total_human_prompts(self) -> int:
@@ -1087,6 +1117,8 @@ def _validate_common_scalars(event: dict[str, object]) -> None:
         _require_attempt(event["attempt"])
     if "selected_attempt" in event and event["selected_attempt"] is not None:
         _require_attempt(event["selected_attempt"])
+    if "target_attempt" in event:
+        _require_attempt(event["target_attempt"])
     for key in (
         "prompt_tokens",
         "completion_tokens",
@@ -1105,6 +1137,8 @@ def _validate_common_scalars(event: dict[str, object]) -> None:
         "allowed_context_tokens",
         "telemetry_context_tokens",
         "remaining_evaluator_calls",
+        "replay_depth",
+        "replayed_environment_actions",
         "strict_evaluator_calls",
         "posthoc_evaluator_calls",
     ):
@@ -1175,12 +1209,26 @@ def _derive_counters(
         if episode.arm in {"raw_feedback_loop", "engineered_loop"}
         else 0
     )
+    replayed_environment_actions = sum(
+        _positive_integer(
+            event["replay_depth"],
+            "checkpoint replay depth",
+        )
+        for _position, event in positions.get("checkpoint_restored", [])
+    ) + sum(
+        _require_nonnegative_integer(
+            event["replayed_environment_actions"],
+            "safety recovery replayed environment actions",
+        )
+        for _position, event in positions.get("safety_recovery_completed", [])
+    )
     return {
         "attempts": model_calls,
         "model_calls": model_calls,
         "logical_prompt_tokens": prompt_tokens,
         "logical_completion_tokens": completion_tokens,
         "environment_actions": len(actions),
+        "replayed_environment_actions": replayed_environment_actions,
         "evaluator_calls": evaluator_calls,
         "checkpoint_creates": len(positions.get("checkpoint_created", [])),
         "checkpoint_restores": len(positions.get("checkpoint_restored", [])),
@@ -1213,6 +1261,8 @@ def _compare_result(counters: dict[str, int], result: InteractiveResult) -> None
         or result.logical_completion_tokens > _MAX_LOGICAL_COMPLETION_TOKENS
         or result.model_calls > CAMPAIGN_ATTEMPT_CAP
         or result.environment_actions > CAMPAIGN_ATTEMPT_CAP
+        or result.replayed_environment_actions
+        > result.environment_actions * (result.environment_actions - 1) // 2
         or result.evaluator_calls > _MAX_EVALUATOR_CALLS
         or result.checkpoint_creates > CAMPAIGN_ATTEMPT_CAP
         or result.checkpoint_restores > CAMPAIGN_ATTEMPT_CAP
@@ -1324,6 +1374,9 @@ def _validate_action_flow(
     model_completed = _unique_attempt_events(
         positions.get("model_completed", []), "model completion"
     )
+    model_preflighted = _unique_attempt_events(
+        positions.get("model_preflighted", []), "model preflight"
+    )
     parser_failures = _unique_attempt_events(
         positions.get("action_rejected", []), "action rejection"
     )
@@ -1372,6 +1425,11 @@ def _validate_action_flow(
         default_position, default = defaults[attempt]
         if not completion_position < recovery_position < default_position:
             raise CampaignEvidenceError("policy-failure recovery order is invalid")
+        next_preflight = model_preflighted.get(attempt + 1)
+        if next_preflight is not None and default_position >= next_preflight[0]:
+            raise CampaignEvidenceError(
+                "policy recovery completed after the next model preflight"
+            )
         if recovery["state_sha256"] != completion["state_sha256"]:
             raise CampaignEvidenceError("safety recovery state differs from action state")
         if (
@@ -1430,19 +1488,149 @@ def _validate_action_flow(
         ):
             raise CampaignEvidenceError("attempt evaluation differs from v0.7 progress policy")
 
-    restore_requested = positions.get("checkpoint_restore_requested", [])
-    restored = positions.get("checkpoint_restored", [])
-    if len(restore_requested) != len(restored):
+    restore_requested = _unique_attempt_events(
+        positions.get("checkpoint_restore_requested", []),
+        "checkpoint restore request",
+    )
+    restored = _unique_attempt_events(
+        positions.get("checkpoint_restored", []),
+        "checkpoint restore completion",
+    )
+    if set(restore_requested) != set(restored):
         raise CampaignEvidenceError("checkpoint restore request/completion counts differ")
     if restore_requested and episode.arm != "engineered_loop":
         raise CampaignEvidenceError("checkpoint restore occurred outside engineered loop")
-    for (request_position, request), (restore_position, restore) in zip(
-        restore_requested, restored, strict=True
-    ):
-        if not request_position < restore_position or request["attempt"] != restore[
-            "attempt"
-        ] or request["state_sha256"] != restore["state_sha256"]:
-            raise CampaignEvidenceError("checkpoint restore evidence is inconsistent")
+    if not set(restored) <= set(checkpoints):
+        raise CampaignEvidenceError(
+            "checkpoint restore attempt lacks a current checkpoint"
+        )
+
+    replay_depth_by_attempt: dict[int, int] = {}
+    current_replay_depth = 0
+    engineered_best_attempt: int | None = None
+    engineered_best_reward: float | None = None
+    for attempt in sorted(checkpoints):
+        checkpoint_position, checkpoint = checkpoints[attempt]
+        observed_depth = _positive_integer(
+            checkpoint["replay_depth"], "checkpoint replay depth"
+        )
+        expected_depth = (
+            1
+            if episode.arm == "independent_verified_sampling"
+            else current_replay_depth + 1
+        )
+        if observed_depth != expected_depth:
+            raise CampaignEvidenceError(
+                "checkpoint replay depth differs from the action topology"
+            )
+        replay_depth_by_attempt[attempt] = observed_depth
+        if episode.arm != "independent_verified_sampling":
+            current_replay_depth = observed_depth
+        expected_restore_target: int | None = None
+        if episode.arm == "engineered_loop":
+            candidate_reward = float(evaluated[attempt][1]["reward"])
+            expects_restore = (
+                engineered_best_reward is not None
+                and candidate_reward < engineered_best_reward
+            )
+            if expects_restore:
+                if engineered_best_attempt is None:  # pragma: no cover - invariant
+                    raise CampaignEvidenceError(
+                        "engineered best checkpoint accounting is inconsistent"
+                    )
+                expected_restore_target = engineered_best_attempt
+                if attempt not in restored:
+                    raise CampaignEvidenceError(
+                        "checkpoint restore differs from the frozen best policy"
+                    )
+            else:
+                if attempt in restored:
+                    raise CampaignEvidenceError(
+                        "checkpoint restore differs from the frozen best policy"
+                    )
+                engineered_best_attempt = attempt
+                engineered_best_reward = candidate_reward
+        if attempt not in restored:
+            continue
+
+        request_position, request = restore_requested[attempt]
+        restore_position, restore = restored[attempt]
+        evaluation_position = evaluated[attempt][0]
+        target_attempt = _require_attempt(request["target_attempt"])
+        if target_attempt >= attempt or target_attempt not in replay_depth_by_attempt:
+            raise CampaignEvidenceError(
+                "checkpoint restore target is not a prior checkpoint"
+            )
+        if target_attempt != expected_restore_target:
+            raise CampaignEvidenceError(
+                "checkpoint restore target differs from the frozen best policy"
+            )
+        target_position, target = checkpoints[target_attempt]
+        target_depth = replay_depth_by_attempt[target_attempt]
+        if not (
+            target_position
+            < checkpoint_position
+            < evaluation_position
+            < request_position
+            < restore_position
+        ):
+            raise CampaignEvidenceError("checkpoint restore event order is invalid")
+        next_preflight = model_preflighted.get(attempt + 1)
+        if next_preflight is not None and restore_position >= next_preflight[0]:
+            raise CampaignEvidenceError(
+                "checkpoint restore completed after the next model preflight"
+            )
+        if not (
+            request["state_sha256"] == target["state_sha256"]
+            and request["replay_depth"] == target_depth
+            and restore["target_attempt"] == target_attempt
+            and restore["state_sha256"] == target["state_sha256"]
+            and restore["replay_depth"] == target_depth
+            and restore["replayed_environment_actions"] == target_depth
+        ):
+            raise CampaignEvidenceError(
+                "checkpoint restore identity or replay depth is inconsistent"
+            )
+        current_replay_depth = target_depth
+
+    current_replay_depth = 0
+    for attempt in sorted(completed):
+        if attempt in inadmissible:
+            expected_recovery_replay = (
+                0
+                if episode.arm == "independent_verified_sampling"
+                else current_replay_depth
+            )
+            observed_recovery_replay = _require_nonnegative_integer(
+                recoveries[attempt][1]["replayed_environment_actions"],
+                "safety recovery replayed environment actions",
+            )
+            if observed_recovery_replay != expected_recovery_replay:
+                raise CampaignEvidenceError(
+                    "safety recovery replay count differs from action topology"
+                )
+            continue
+        checkpoint_depth = replay_depth_by_attempt[attempt]
+        if episode.arm == "independent_verified_sampling":
+            current_replay_depth = 0
+            continue
+        current_replay_depth = checkpoint_depth
+        if attempt in restored:
+            target_attempt = _require_attempt(
+                restore_requested[attempt][1]["target_attempt"]
+            )
+            current_replay_depth = replay_depth_by_attempt[target_attempt]
+
+    if episode.arm == "engineered_loop":
+        terminal_requests = positions.get("terminal_finalization_requested", [])
+        if (
+            len(terminal_requests) == 1
+            and terminal_requests[0][1]["selected_attempt"]
+            != engineered_best_attempt
+        ):
+            raise CampaignEvidenceError(
+                "terminal selection differs from the frozen best policy"
+            )
 
     _validate_environment_lifecycle(positions, episode)
 

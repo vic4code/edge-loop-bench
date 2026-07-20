@@ -29,6 +29,7 @@ AGENT_GID = 65532
 ROOT_OWNER_UID = 0
 ROOT_MODE = 0o1777
 PSEUDO_MOUNT_ROOTS = ("dev", "proc", "sys")
+RUNTIME_INJECTED_ROOT_NAMES = (".dockerenv",)
 VAR_LOCK_PATH = "var/lock"
 VAR_LOCK_RESOLVED_TARGET = "run/lock"
 _MAX_AUDIT_SCAN_ENTRIES = 250_000
@@ -264,6 +265,7 @@ def _policy_record(limits: CollectionLimits) -> dict[str, object]:
             "max_scan_entries": _MAX_AUDIT_SCAN_ENTRIES,
             "pseudo_mount_roots": list(PSEUDO_MOUNT_ROOTS),
             "relative_path": AUDIT_RELATIVE_PATH,
+            "runtime_injected_root_names": list(RUNTIME_INJECTED_ROOT_NAMES),
             "schema": AUDIT_SCHEMA,
             "var_lock_resolved_target": VAR_LOCK_RESOLVED_TARGET,
         },
@@ -355,7 +357,9 @@ class _WritableSurfaceAuditor:
             children = self._directory_names(root_descriptor)
             child_names = {raw_name for raw_name, _name in children}
             required_names = {
-                name.encode("ascii") for name in IMMUTABLE_ROOT_NAMES
+                name.encode("ascii")
+                for name in IMMUTABLE_ROOT_NAMES
+                if name not in RUNTIME_INJECTED_ROOT_NAMES
             }
             if not required_names.issubset(child_names):
                 raise StateCollectionError(CollectionFailure.ROOT_BOUNDARY)
@@ -390,6 +394,7 @@ class _WritableSurfaceAuditor:
             "profile_sha256": profile_sha256,
             "pseudo_mount_roots": list(PSEUDO_MOUNT_ROOTS),
             "root_baseline_sha256": ROOT_BASELINE_SHA256,
+            "runtime_injected_root_names": list(RUNTIME_INJECTED_ROOT_NAMES),
             "scanned_entry_count": self.scanned_entries,
             "scanned_tree_sha256": "sha256:" + self.tree_digest.hexdigest(),
             "schema": AUDIT_SCHEMA,
@@ -751,6 +756,7 @@ class _StateCollector:
             "profile_sha256",
             "pseudo_mount_roots",
             "root_baseline_sha256",
+            "runtime_injected_root_names",
             "scanned_entry_count",
             "scanned_tree_sha256",
             "schema",
@@ -773,6 +779,7 @@ class _StateCollector:
             "profile_sha256": PROFILE_SHA256[self.profile],
             "pseudo_mount_roots": list(PSEUDO_MOUNT_ROOTS),
             "root_baseline_sha256": ROOT_BASELINE_SHA256,
+            "runtime_injected_root_names": list(RUNTIME_INJECTED_ROOT_NAMES),
             "schema": AUDIT_SCHEMA,
             "var_lock_resolved_target": VAR_LOCK_RESOLVED_TARGET,
         }
@@ -1327,8 +1334,6 @@ def _default_acl_probe(path: bytes | int) -> object:
         raise StateCollectionError(CollectionFailure.ACL_UNVERIFIED)
     try:
         if isinstance(path, int):
-            if probe not in os.supports_fd:
-                raise StateCollectionError(CollectionFailure.ACL_UNVERIFIED)
             return probe(path)
         return probe(path, follow_symlinks=False)
     except (NotImplementedError, TypeError) as error:

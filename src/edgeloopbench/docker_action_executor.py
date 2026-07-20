@@ -45,6 +45,9 @@ _MAX_OBSERVATION_LIMIT_BYTES = 1024 * 1024
 _MAX_READ_CHUNK_BYTES = 64 * 1024
 _MAX_IO_QUEUE_CHUNKS = 64
 _MAX_DEADLINE_SECONDS = 3600.0
+_MAX_WRITABLE_LAYER_SAMPLE_INTERVAL_SECONDS = 5.0
+_MAX_WRITABLE_LAYER_PROBE_TIMEOUT_SECONDS = 5.0
+_PROCESS_WAIT_POLL_SECONDS = 0.05
 _PROCESS_LINE = re.compile(
     rb"([1-9][0-9]*)[ \t]+([0-9]+)[ \t]+([A-Z][A-Za-z0-9+<]*)"
     rb"[ \t]+([A-Za-z0-9_.-]+)"
@@ -71,6 +74,7 @@ class InfrastructureFailure(str, Enum):
     EXECUTOR_EXCEPTION = "executor_exception"
     OBSERVATION_LEAK = "observation_leak"
     CLEANUP_AMBIGUOUS = "cleanup_ambiguous"
+    WRITABLE_LAYER_WATCHDOG = "writable_layer_watchdog"
 
 
 class ActionPolicyFailure(str, Enum):
@@ -81,6 +85,7 @@ class ActionPolicyFailure(str, Enum):
     INVALID_TEXT = "invalid_text"
     RESIDUAL_PROCESS = "residual_process"
     CONTAINER_TERMINATED = "container_terminated"
+    WRITABLE_LAYER_OVERFLOW = "writable_layer_overflow"
 
 
 class _CaptureFailure(str, Enum):
@@ -88,6 +93,8 @@ class _CaptureFailure(str, Enum):
     OUTPUT_OVERFLOW = "output_overflow"
     SPAWN_ERROR = "spawn_error"
     EXECUTOR_EXCEPTION = "executor_exception"
+    WRITABLE_LAYER_OVERFLOW = "writable_layer_overflow"
+    WRITABLE_LAYER_WATCHDOG = "writable_layer_watchdog"
 
 
 _POLICY_OBSERVATIONS = {
@@ -97,6 +104,9 @@ _POLICY_OBSERVATIONS = {
     ActionPolicyFailure.RESIDUAL_PROCESS: "Command left a residual process.",
     ActionPolicyFailure.CONTAINER_TERMINATED: (
         "Command terminated the task container."
+    ),
+    ActionPolicyFailure.WRITABLE_LAYER_OVERFLOW: (
+        "Command exceeded the sampled writable-layer safety limit."
     ),
 }
 
@@ -118,6 +128,8 @@ class DockerActionLimits:
     observation_limit_bytes: int
     read_chunk_bytes: int = 4096
     io_queue_chunks: int = 8
+    writable_layer_sample_interval_seconds: float = 0.25
+    writable_layer_probe_timeout_seconds: float = 1.0
 
     def __post_init__(self) -> None:
         _require_positive_finite(
@@ -144,6 +156,16 @@ class DockerActionLimits:
             self.io_queue_chunks,
             "io_queue_chunks",
             maximum=_MAX_IO_QUEUE_CHUNKS,
+        )
+        _require_positive_finite(
+            self.writable_layer_sample_interval_seconds,
+            "writable_layer_sample_interval_seconds",
+            maximum=_MAX_WRITABLE_LAYER_SAMPLE_INTERVAL_SECONDS,
+        )
+        _require_positive_finite(
+            self.writable_layer_probe_timeout_seconds,
+            "writable_layer_probe_timeout_seconds",
+            maximum=_MAX_WRITABLE_LAYER_PROBE_TIMEOUT_SECONDS,
         )
 
 
@@ -212,8 +234,10 @@ class DockerActionResult:
         if self.failure_stage not in {
             None,
             "prepare",
+            "pre_storage",
             "pre_audit",
             "action",
+            "post_storage",
             "post_audit",
         }:
             raise ValueError("failure stage is not a frozen public value")
@@ -273,7 +297,7 @@ class DockerActionResult:
             if (
                 self.infrastructure_failure is not None
                 or self.policy_failure is None
-                or self.failure_stage not in {"action", "post_audit"}
+                or self.failure_stage not in {"action", "post_storage", "post_audit"}
                 or self.cleanup_outcome is not CleanupOutcome.REMOVED
                 or not self.action_started
                 or self.observation != _POLICY_OBSERVATIONS[self.policy_failure]
@@ -304,7 +328,7 @@ class DockerActionResult:
                 is InfrastructureFailure.CLEANUP_AMBIGUOUS
             ):
                 raise ValueError("cleanup outcome and infrastructure reason disagree")
-            if self.failure_stage in {"prepare", "pre_audit"} and self.action_started:
+            if self.failure_stage in {"prepare", "pre_storage", "pre_audit"} and self.action_started:
                 raise ValueError("action cannot predate preparation or pre-audit")
             if self.failure_stage == "post_audit" and not self.action_started:
                 raise ValueError("post-audit failure requires a started action")
@@ -378,6 +402,10 @@ class DockerActionBoundary(Protocol):
 
     def inspect_container_running(self, *, container: DockerContainer) -> bool: ...
 
+    def inspect_container_writable_layer_bytes(
+        self, *, container: DockerContainer, timeout_seconds: float
+    ) -> int: ...
+
 
 class PopenProcess(Protocol):
     stdout: object
@@ -404,6 +432,11 @@ class _StreamItem:
     channel: str
     chunk: bytes | None = None
     failed: bool = False
+
+
+class _WritableLayerSignal(str, Enum):
+    OVERFLOW = "overflow"
+    PROBE_FAILURE = "probe_failure"
 
 
 @dataclass(frozen=True)
@@ -448,6 +481,7 @@ class DockerActionExecutor:
         expected_endpoint: str,
         popen_factory: PopenFactory = subprocess.Popen,
         thread_factory: ThreadFactory = threading.Thread,
+        watchdog_thread_factory: ThreadFactory = threading.Thread,
         monotonic: Callable[[], float] = time.monotonic,
         kill_process_group: Callable[[int, int], None] = os.killpg,
     ) -> None:
@@ -457,9 +491,14 @@ class DockerActionExecutor:
             raise ValueError("boundary must verify exact cleanup ownership")
         if not callable(getattr(boundary, "inspect_container_running", None)):
             raise ValueError("boundary must re-attest exact container state")
+        if not callable(
+            getattr(boundary, "inspect_container_writable_layer_bytes", None)
+        ):
+            raise ValueError("boundary must sample exact writable-layer state")
         if (
             not callable(popen_factory)
             or not callable(thread_factory)
+            or not callable(watchdog_thread_factory)
             or not callable(monotonic)
             or not callable(kill_process_group)
         ):
@@ -475,6 +514,7 @@ class DockerActionExecutor:
         self._boundary = boundary
         self._popen_factory = popen_factory
         self._thread_factory = thread_factory
+        self._watchdog_thread_factory = watchdog_thread_factory
         self._monotonic = monotonic
         self._kill_process_group = kill_process_group
         self._expected_docker_binary = expected_docker_binary
@@ -533,6 +573,20 @@ class DockerActionExecutor:
                 start=start,
             )
 
+        pre_storage_bytes = self._sample_writable_layer(container, limits)
+        if (
+            pre_storage_bytes is None
+            or pre_storage_bytes
+            > container.spec.limits.writable_layer_watchdog_bytes
+        ):
+            return self._invalid_result(
+                container=container,
+                capture=empty,
+                failure=InfrastructureFailure.WRITABLE_LAYER_WATCHDOG,
+                stage="pre_storage",
+                start=start,
+            )
+
         pre_audit = self._run_streaming(
             top_argv,
             deadline=deadline,
@@ -573,6 +627,7 @@ class DockerActionExecutor:
             deadline=deadline,
             stream_limit=limits.private_stream_limit_bytes + len(ACTION_START_MARKER),
             limits=limits,
+            writable_layer_container=container,
         )
         if action_capture.failure is not None and not action_capture.spawned:
             failure = (
@@ -594,7 +649,12 @@ class DockerActionExecutor:
         if not action_started:
             failure = (
                 _capture_as_infrastructure(action_capture.failure)
-                if action_capture.failure is _CaptureFailure.EXECUTOR_EXCEPTION
+                if action_capture.failure
+                in {
+                    _CaptureFailure.EXECUTOR_EXCEPTION,
+                    _CaptureFailure.WRITABLE_LAYER_OVERFLOW,
+                    _CaptureFailure.WRITABLE_LAYER_WATCHDOG,
+                }
                 else InfrastructureFailure.ACTION_NOT_STARTED
             )
             return self._invalid_result(
@@ -726,6 +786,28 @@ class DockerActionExecutor:
                 start=start,
             )
 
+        post_storage_bytes = self._sample_writable_layer(container, limits)
+        if post_storage_bytes is None:
+            return self._invalid_result(
+                container=container,
+                capture=action_capture,
+                failure=InfrastructureFailure.WRITABLE_LAYER_WATCHDOG,
+                stage="post_storage",
+                start=start,
+                action_started=True,
+            )
+        if (
+            post_storage_bytes
+            > container.spec.limits.writable_layer_watchdog_bytes
+        ):
+            return self._policy_failure_result(
+                container=container,
+                capture=action_capture,
+                failure=ActionPolicyFailure.WRITABLE_LAYER_OVERFLOW,
+                stage="post_storage",
+                start=start,
+            )
+
         observation, truncated = _bounded_observation(
             stdout_text,
             stderr_text,
@@ -793,6 +875,22 @@ class DockerActionExecutor:
             return None
         return running if isinstance(running, bool) else None
 
+    def _sample_writable_layer(
+        self,
+        container: DockerContainer,
+        limits: DockerActionLimits,
+    ) -> int | None:
+        try:
+            value = self._boundary.inspect_container_writable_layer_bytes(
+                container=container,
+                timeout_seconds=limits.writable_layer_probe_timeout_seconds,
+            )
+        except Exception:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
     def _run_streaming(
         self,
         argv: Sequence[str],
@@ -800,6 +898,7 @@ class DockerActionExecutor:
         deadline: float,
         stream_limit: int,
         limits: DockerActionLimits,
+        writable_layer_container: DockerContainer | None = None,
     ) -> _CommandCapture:
         """Drain stdout/stderr concurrently through a bounded chunk queue."""
 
@@ -900,8 +999,45 @@ class DockerActionExecutor:
         observed = {"stdout": 0, "stderr": 0}
         completed: set[str] = set()
         failure: _CaptureFailure | None = None
+        watchdog_stop = threading.Event()
+        watchdog_first_sample = threading.Event()
+        watchdog_done = threading.Event()
+        watchdog_signals: queue.Queue[_WritableLayerSignal] = queue.Queue(maxsize=1)
+        watchdog_thread: threading.Thread | None = None
+        if writable_layer_container is not None:
+            try:
+                watchdog_thread = self._watchdog_thread_factory(
+                    target=_watch_writable_layer,
+                    args=(
+                        self._boundary,
+                        writable_layer_container,
+                        writable_layer_container.spec.limits.writable_layer_watchdog_bytes,
+                        limits.writable_layer_sample_interval_seconds,
+                        limits.writable_layer_probe_timeout_seconds,
+                        watchdog_stop,
+                        watchdog_first_sample,
+                        watchdog_done,
+                        watchdog_signals,
+                    ),
+                    daemon=True,
+                    name="edgeloop-docker-size-rw-watchdog",
+                )
+                watchdog_thread.start()
+                while not watchdog_first_sample.wait(timeout=0.01):
+                    if self._read_clock() >= deadline:
+                        failure = _CaptureFailure.TIMEOUT
+                        break
+                signal = _take_writable_layer_signal(watchdog_signals)
+                if failure is None and signal is not None:
+                    failure = _capture_failure_from_writable_layer_signal(signal)
+            except Exception:
+                failure = _CaptureFailure.EXECUTOR_EXCEPTION
         try:
-            while len(completed) < 2:
+            while failure is None and len(completed) < 2:
+                signal = _take_writable_layer_signal(watchdog_signals)
+                if signal is not None:
+                    failure = _capture_failure_from_writable_layer_signal(signal)
+                    break
                 remaining = deadline - self._read_clock()
                 if remaining <= 0:
                     failure = _CaptureFailure.TIMEOUT
@@ -935,46 +1071,48 @@ class DockerActionExecutor:
             try:
                 if self._read_clock() >= deadline:
                     failure = _CaptureFailure.TIMEOUT
-                    _abort_process(
-                        process,
-                        kill_process_group=self._kill_process_group,
-                    )
                 returncode = process.poll()
-                if failure is None and returncode is None:
+                while failure is None and returncode is None:
+                    signal = _take_writable_layer_signal(watchdog_signals)
+                    if signal is not None:
+                        failure = _capture_failure_from_writable_layer_signal(signal)
+                        break
                     remaining = deadline - self._read_clock()
                     if remaining <= 0:
                         failure = _CaptureFailure.TIMEOUT
-                        _abort_process(
-                            process,
-                            kill_process_group=self._kill_process_group,
+                        break
+                    try:
+                        returncode = process.wait(
+                            timeout=min(_PROCESS_WAIT_POLL_SECONDS, remaining)
                         )
-                    else:
-                        returncode = process.wait(timeout=remaining)
-                        if self._read_clock() >= deadline:
-                            failure = _CaptureFailure.TIMEOUT
-                            _abort_process(
-                                process,
-                                kill_process_group=self._kill_process_group,
-                            )
-            except subprocess.TimeoutExpired:
-                failure = _CaptureFailure.TIMEOUT
-                _abort_process(
-                    process,
-                    kill_process_group=self._kill_process_group,
-                )
-                returncode = None
+                    except subprocess.TimeoutExpired:
+                        continue
+                if failure is None and self._read_clock() >= deadline:
+                    failure = _CaptureFailure.TIMEOUT
             except Exception:
                 failure = _CaptureFailure.EXECUTOR_EXCEPTION
+                returncode = None
+            if failure is not None:
                 _abort_process(
                     process,
                     kill_process_group=self._kill_process_group,
                 )
-                returncode = None
         stop.set()
+        watchdog_stop.set()
         _close_stream(stdout)
         _close_stream(stderr)
         for reader in started_readers:
             reader.join(timeout=0.05)
+        if watchdog_thread is not None:
+            watchdog_thread.join(
+                timeout=limits.writable_layer_probe_timeout_seconds + 0.25
+            )
+            if not watchdog_done.is_set():
+                failure = _CaptureFailure.EXECUTOR_EXCEPTION
+            elif failure is None:
+                signal = _take_writable_layer_signal(watchdog_signals)
+                if signal is not None:
+                    failure = _capture_failure_from_writable_layer_signal(signal)
 
         if failure is not None:
             returncode = _safe_poll(process)
@@ -1040,6 +1178,10 @@ class DockerActionExecutor:
                 ActionPolicyFailure.TIMEOUT,
                 ActionPolicyFailure.OUTPUT_OVERFLOW,
             }
+            or (
+                failure is ActionPolicyFailure.WRITABLE_LAYER_OVERFLOW
+                and stage == "action"
+            )
             else capture.returncode
         )
         if cleanup is CleanupOutcome.AMBIGUOUS:
@@ -1151,15 +1293,18 @@ def _derive_top_argv(
         "top",
         container.identifier,
         "-eo",
-        "pid=,ppid=,stat=,comm=",
+        "pid=PID,ppid=PPID,stat=STAT,comm=COMMAND",
     )
 
 
 def _parse_pinned_idle_baseline(data: bytes) -> tuple[_ProcessEntry, ...]:
     """Require the one stable ``tail`` process installed as container PID 1."""
 
+    lines = data.splitlines()
+    if not lines or lines[0].split() != [b"PID", b"PPID", b"STAT", b"COMMAND"]:
+        raise ValueError("Docker process audit header is malformed")
     entries: list[_ProcessEntry] = []
-    for line in data.splitlines():
+    for line in lines[1:]:
         match = _PROCESS_LINE.fullmatch(line.strip())
         if match is None:
             raise ValueError("Docker process audit output is malformed")
@@ -1236,6 +1381,83 @@ def _read_stream(
                 return
     except Exception:
         _put_stream_item(messages, _StreamItem(channel, failed=True), stop)
+
+
+def _watch_writable_layer(
+    boundary: DockerActionBoundary,
+    container: DockerContainer,
+    threshold_bytes: int,
+    sample_interval_seconds: float,
+    probe_timeout_seconds: float,
+    stop: threading.Event,
+    first_sample: threading.Event,
+    done: threading.Event,
+    signals: queue.Queue[_WritableLayerSignal],
+) -> None:
+    """Sample Docker ``SizeRw`` until stopped or one terminal signal occurs."""
+
+    try:
+        while not stop.is_set():
+            try:
+                value = boundary.inspect_container_writable_layer_bytes(
+                    container=container,
+                    timeout_seconds=probe_timeout_seconds,
+                )
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                ):
+                    raise ValueError("invalid writable-layer sample")
+            except Exception:
+                try:
+                    running = boundary.inspect_container_running(container=container)
+                except Exception:
+                    running = None
+                if running is False:
+                    first_sample.set()
+                    return
+                _offer_writable_layer_signal(
+                    signals, _WritableLayerSignal.PROBE_FAILURE
+                )
+                first_sample.set()
+                return
+            first_sample.set()
+            if value > threshold_bytes:
+                _offer_writable_layer_signal(signals, _WritableLayerSignal.OVERFLOW)
+                return
+            if stop.wait(sample_interval_seconds):
+                return
+    finally:
+        first_sample.set()
+        done.set()
+
+
+def _offer_writable_layer_signal(
+    signals: queue.Queue[_WritableLayerSignal],
+    signal_value: _WritableLayerSignal,
+) -> None:
+    try:
+        signals.put_nowait(signal_value)
+    except queue.Full:
+        return
+
+
+def _take_writable_layer_signal(
+    signals: queue.Queue[_WritableLayerSignal],
+) -> _WritableLayerSignal | None:
+    try:
+        return signals.get_nowait()
+    except queue.Empty:
+        return None
+
+
+def _capture_failure_from_writable_layer_signal(
+    signal_value: _WritableLayerSignal,
+) -> _CaptureFailure:
+    if signal_value is _WritableLayerSignal.OVERFLOW:
+        return _CaptureFailure.WRITABLE_LAYER_OVERFLOW
+    return _CaptureFailure.WRITABLE_LAYER_WATCHDOG
 
 
 def _put_stream_item(
@@ -1368,6 +1590,8 @@ def _capture_as_policy(
         return ActionPolicyFailure.TIMEOUT
     if failure is _CaptureFailure.OUTPUT_OVERFLOW:
         return ActionPolicyFailure.OUTPUT_OVERFLOW
+    if failure is _CaptureFailure.WRITABLE_LAYER_OVERFLOW:
+        return ActionPolicyFailure.WRITABLE_LAYER_OVERFLOW
     return None
 
 
@@ -1378,6 +1602,10 @@ def _capture_as_infrastructure(
         return InfrastructureFailure.SPAWN_ERROR
     if failure is _CaptureFailure.EXECUTOR_EXCEPTION:
         return InfrastructureFailure.EXECUTOR_EXCEPTION
+    if failure is _CaptureFailure.WRITABLE_LAYER_WATCHDOG:
+        return InfrastructureFailure.WRITABLE_LAYER_WATCHDOG
+    if failure is _CaptureFailure.WRITABLE_LAYER_OVERFLOW:
+        return InfrastructureFailure.WRITABLE_LAYER_WATCHDOG
     # A timeout/overflow while running the trusted audit command is daemon or
     # host infrastructure failure, never evidence about model effectiveness.
     return InfrastructureFailure.PROCESS_AUDIT

@@ -37,7 +37,13 @@ from edgeloopbench.intercode_v07_calibration import (
     evaluate_v07_planning_gate,
     verify_v07_calibration_evidence,
 )
-from edgeloopbench.journal import append_journal_event, inspect_journal, seal_journal
+from edgeloopbench.journal import (
+    GENESIS_EVENT_SHA256,
+    append_journal_event,
+    canonical_event_bytes,
+    inspect_journal,
+    seal_journal,
+)
 from edgeloopbench.model_adapter import PHI4_MINI_RAW_PROFILE, QWEN35_RAW_PROFILE
 
 
@@ -67,6 +73,73 @@ def profile_for(model_id: str):  # type: ignore[no-untyped-def]
 
 def result_record(result: InteractiveResult) -> dict[str, object]:
     return {field.name: getattr(result, field.name) for field in fields(result)}
+
+
+def rewrite_with_next_preflight_before_restore(
+    path: Path,
+    *,
+    anchor_event: str = "checkpoint_restore_requested",
+) -> None:
+    """Rechain a sealed fixture after moving attempt 3 prompt events too early."""
+
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    payloads = [
+        {
+            key: value
+            for key, value in record.items()
+            if key not in {"sequence", "previous_event_sha256", "event_sha256"}
+        }
+        for record in records[:-1]
+    ]
+    early_prompt = [
+        event
+        for event in payloads
+        if event.get("attempt") == 3
+        and event["type"] in {"model_preflighted", "model_requested"}
+    ]
+    retained = [event for event in payloads if event not in early_prompt]
+    insertion = next(
+        index + 1
+        for index, event in enumerate(retained)
+        if event.get("attempt") == 2
+        and event["type"] == anchor_event
+    )
+    reordered = [*retained[:insertion], *early_prompt, *retained[insertion:]]
+
+    previous = GENESIS_EVENT_SHA256
+    rechained: list[dict[str, object]] = []
+    for sequence, event in enumerate(reordered, 1):
+        record = {
+            **event,
+            "sequence": sequence,
+            "previous_event_sha256": previous,
+        }
+        previous = sha256(canonical_event_bytes(record)).hexdigest()
+        record["event_sha256"] = previous
+        rechained.append(record)
+    seal = {
+        "type": "journal_sealed",
+        "sealed_event_count": len(rechained),
+        "sequence": len(rechained) + 1,
+        "previous_event_sha256": previous,
+    }
+    seal["event_sha256"] = sha256(canonical_event_bytes(seal)).hexdigest()
+    rechained.append(seal)
+    path.write_text(
+        "".join(
+            json.dumps(
+                record,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+            for record in rechained
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
 
 
 def host_sample(
@@ -116,6 +189,13 @@ def write_controller_log(
     omit_strict_plan: bool,
     corrupt_progress: bool,
     corrupt_official_success: bool,
+    duplicate_restore: bool,
+    late_restore: bool,
+    wrong_best_restore: bool,
+    restore_on_tie: bool,
+    stale_tie_best: bool,
+    policy_recovery: bool,
+    late_policy_recovery: bool,
     execution_authority_sha256: str,
 ) -> InteractiveResult:
     identity = {
@@ -134,6 +214,11 @@ def write_controller_log(
 
     record("controller_started", controller_revision=INTERACTIVE_CONTROLLER_REVISION)
     successful_actions: list[int] = []
+    replayed_environment_actions = 0
+    checkpoint_restores = 0
+    safety_recoveries = 0
+    environment_actions = 0
+    current_replay_depth = 0
     cumulative_prompt_tokens = 0
     for attempt in range(1, calls + 1):
         prompt_sha256 = digest(f"{model_id}-{task_id}-{attempt}-prompt")
@@ -172,6 +257,43 @@ def write_controller_log(
             continue
         action_sha256 = digest(f"{task_id}-{arm}-{attempt}-action")
         record("action_requested", attempt=attempt, action_sha256=action_sha256)
+        environment_actions += 1
+        if (policy_recovery or late_policy_recovery) and attempt == 2:
+            recovered_state = digest(
+                f"{model_id}-{task_id}-{successful_actions[-1]}-state"
+            )
+            record(
+                "action_completed",
+                attempt=attempt,
+                action_sha256=action_sha256,
+                output_sha256=digest("writable-layer-overflow"),
+                state_sha256=recovered_state,
+                exit_code=None,
+                admissible=False,
+                state_changed=False,
+                policy_failure="writable_layer_overflow",
+                safety_recovery_performed=True,
+            )
+            record(
+                "safety_recovery_completed",
+                attempt=attempt,
+                state_sha256=recovered_state,
+                recovery_evidence_sha256=digest(
+                    f"{task_id}-{arm}-{attempt}-recovery"
+                ),
+                replayed_environment_actions=current_replay_depth,
+            )
+            record(
+                "attempt_defaulted",
+                attempt=attempt,
+                reward=0.0,
+                official_success=False,
+                evaluation_kind="action_policy_failure",
+                policy_failure="writable_layer_overflow",
+            )
+            replayed_environment_actions += current_replay_depth
+            safety_recoveries += 1
+            continue
         record(
             "action_completed",
             attempt=attempt,
@@ -187,18 +309,110 @@ def write_controller_log(
             safety_recovery_performed=False,
         )
         record("checkpoint_create_requested", attempt=attempt)
-        record("checkpoint_created", attempt=attempt, state_sha256=state_sha256)
+        current_replay_depth = (
+            1
+            if arm == "independent_verified_sampling"
+            else current_replay_depth + 1
+        )
+        record(
+            "checkpoint_created",
+            attempt=attempt,
+            state_sha256=state_sha256,
+            replay_depth=current_replay_depth,
+        )
         record("attempt_evaluation_requested", attempt=attempt, state_sha256=state_sha256)
         record(
             "attempt_evaluated",
             attempt=attempt,
-            reward=(1.0 if corrupt_progress and attempt == 1 else 0.8),
+            reward=(
+                1.0
+                if corrupt_progress and attempt == 1
+                else 0.8
+                if (restore_on_tie or stale_tie_best) and attempt == 2
+                else 0.2
+                if (
+                    duplicate_restore
+                    or late_restore
+                    or wrong_best_restore
+                    or restore_on_tie
+                    or stale_tie_best
+                )
+                and attempt > 1
+                else 0.8
+            ),
             official_success=(corrupt_official_success and attempt == 1),
             evaluation_kind="evaluator_derived",
         )
         successful_actions.append(attempt)
+        restore_mode = bool(
+            duplicate_restore
+            or late_restore
+            or wrong_best_restore
+            or restore_on_tie
+            or stale_tie_best
+        )
+        should_restore = bool(
+            restore_mode
+            and attempt > 1
+            and (not stale_tie_best or attempt == 3)
+        )
+        if should_restore:
+            target_attempt = 2 if wrong_best_restore and attempt == 3 else 1
+            target_depth = 2 if target_attempt == 2 else 1
+            target_state = digest(
+                f"{model_id}-{task_id}-{target_attempt}-state"
+            )
+            record(
+                "checkpoint_restore_requested",
+                attempt=attempt,
+                target_attempt=target_attempt,
+                state_sha256=target_state,
+                replay_depth=target_depth,
+            )
+            record(
+                "checkpoint_restored",
+                attempt=attempt,
+                target_attempt=target_attempt,
+                state_sha256=target_state,
+                replay_depth=target_depth,
+                replayed_environment_actions=target_depth,
+            )
+            replayed_environment_actions += target_depth
+            checkpoint_restores += 1
+            current_replay_depth = target_depth
+            if duplicate_restore and attempt == 3:
+                record(
+                    "checkpoint_restore_requested",
+                    attempt=attempt,
+                    target_attempt=1,
+                    state_sha256=target_state,
+                    replay_depth=1,
+                )
+                record(
+                    "checkpoint_restored",
+                    attempt=attempt,
+                    target_attempt=1,
+                    state_sha256=target_state,
+                    replay_depth=1,
+                    replayed_environment_actions=1,
+                )
+                replayed_environment_actions += 1
+                checkpoint_restores += 1
 
-    selected_attempt = successful_actions[-1] if successful_actions else None
+    selected_attempt = (
+        successful_actions[0]
+        if (
+            duplicate_restore
+            or late_restore
+            or wrong_best_restore
+            or restore_on_tie
+            or stale_tie_best
+        )
+        and successful_actions
+        else successful_actions[-1]
+        if successful_actions
+        else None
+    )
     if selected_attempt is not None and not omit_strict_plan:
         record(
             "strict_evaluation_planned",
@@ -237,6 +451,13 @@ def write_controller_log(
         official_success=False,
     )
     seal_journal(path)
+    if late_restore:
+        rewrite_with_next_preflight_before_restore(path)
+    if late_policy_recovery:
+        rewrite_with_next_preflight_before_restore(
+            path,
+            anchor_event="action_completed",
+        )
     successful_count = len(successful_actions)
     return InteractiveResult(
         run_status=("completed" if arm == "direct" else "budget_exhausted"),
@@ -247,11 +468,12 @@ def write_controller_log(
         model_calls=calls,
         logical_prompt_tokens=100 * calls,
         logical_completion_tokens=10 * calls,
-        environment_actions=successful_count,
+        environment_actions=environment_actions,
+        replayed_environment_actions=replayed_environment_actions,
         evaluator_calls=successful_count + int(selected_attempt is not None),
         checkpoint_creates=successful_count,
-        checkpoint_restores=0,
-        safety_recoveries=0,
+        checkpoint_restores=checkpoint_restores,
+        safety_recoveries=safety_recoveries,
         parser_failures=int(first_parse_failure),
         initial_prompts=1,
         independent_sample_prompts=(
@@ -276,6 +498,13 @@ def write_evidence_files(
     omit_strict_plan_episode: int | None = None,
     corrupt_progress_episode: int | None = None,
     corrupt_official_success_episode: int | None = None,
+    duplicate_restore_episode: int | None = None,
+    late_restore_episode: int | None = None,
+    wrong_best_restore_episode: int | None = None,
+    restore_on_tie_episode: int | None = None,
+    stale_tie_best_episode: int | None = None,
+    policy_recovery_episode: int | None = None,
+    late_policy_recovery_episode: int | None = None,
     active_wall_time_ns: int = 1_000_000_000,
     manifest_sha256: str = MANIFEST_SHA256,
     calibration_campaign_sha256: str = CALIBRATION_CAMPAIGN_SHA256,
@@ -308,6 +537,15 @@ def write_evidence_files(
                 corrupt_progress=episode_index == corrupt_progress_episode,
                 corrupt_official_success=(
                     episode_index == corrupt_official_success_episode
+                ),
+                duplicate_restore=episode_index == duplicate_restore_episode,
+                late_restore=episode_index == late_restore_episode,
+                wrong_best_restore=episode_index == wrong_best_restore_episode,
+                restore_on_tie=episode_index == restore_on_tie_episode,
+                stale_tie_best=episode_index == stale_tie_best_episode,
+                policy_recovery=episode_index == policy_recovery_episode,
+                late_policy_recovery=(
+                    episode_index == late_policy_recovery_episode
                 ),
                 execution_authority_sha256=manifest_sha256,
             )
@@ -445,6 +683,23 @@ class InterCodeV07CalibrationTests(unittest.TestCase):
         self.assertEqual(qwen.parsed_and_admissible_first_responses, 2)
         self.assertTrue(phi.admitted)
 
+    def test_verifier_accepts_typed_raw_policy_recovery_replay(self) -> None:
+        design = build_v07_calibration_design(load_intercode_source())
+        with tempfile.TemporaryDirectory() as directory:
+            journal, controllers = write_evidence_files(
+                Path(directory), policy_recovery_episode=3
+            )
+
+            evidence = verify_v07_calibration_evidence(
+                design,
+                precalibration_manifest_sha256=MANIFEST_SHA256,
+                calibration_campaign_sha256=CALIBRATION_CAMPAIGN_SHA256,
+                calibration_journal_path=journal,
+                controller_log_paths=controllers,
+            )
+
+        self.assertEqual(evidence.total_model_prompts, 26)
+
     def test_verifier_rejects_leak_accounting_host_manifest_and_seal_failures(self) -> None:
         design = build_v07_calibration_design(load_intercode_source())
         cases = (
@@ -461,6 +716,12 @@ class InterCodeV07CalibrationTests(unittest.TestCase):
             ({"omit_strict_plan_episode": 1}, "strict"),
             ({"corrupt_progress_episode": 1}, "progress"),
             ({"corrupt_official_success_episode": 1}, "official_success"),
+            ({"duplicate_restore_episode": 4}, "restore"),
+            ({"late_restore_episode": 4}, "restore"),
+            ({"wrong_best_restore_episode": 4}, "restore|best"),
+            ({"restore_on_tie_episode": 4}, "restore|best"),
+            ({"stale_tie_best_episode": 4}, "restore|best"),
+            ({"late_policy_recovery_episode": 3}, "recovery"),
         )
         for options, message in cases:
             with self.subTest(message=message), tempfile.TemporaryDirectory() as directory:

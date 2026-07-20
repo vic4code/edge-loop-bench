@@ -66,7 +66,7 @@ def limits() -> DockerLimits:
     return DockerLimits(
         memory_bytes=536_870_912,
         memory_swap_bytes=536_870_912,
-        storage_bytes=268_435_456,
+        writable_layer_watchdog_bytes=268_435_456,
         nano_cpus=1_000_000_000,
         pids_limit=64,
         nofile_soft=1024,
@@ -192,8 +192,14 @@ def executed(
     )
 
 
-def policy_failure() -> DockerActionResult:
-    failure = ActionPolicyFailure.TIMEOUT
+def policy_failure(
+    failure: ActionPolicyFailure = ActionPolicyFailure.TIMEOUT,
+) -> DockerActionResult:
+    observation = (
+        "Command exceeded the sampled writable-layer safety limit."
+        if failure is ActionPolicyFailure.WRITABLE_LAYER_OVERFLOW
+        else "Command timed out."
+    )
     return DockerActionResult(
         disposition=ActionDisposition.POLICY_FAILURE,
         infrastructure_failure=None,
@@ -202,7 +208,7 @@ def policy_failure() -> DockerActionResult:
         cleanup_outcome=CleanupOutcome.REMOVED,
         exit_code=None,
         action_started=True,
-        observation="Command timed out.",
+        observation=observation,
         private_stdout=b"",
         private_stderr=b"",
         stdout_bytes_observed=0,
@@ -423,6 +429,10 @@ class DockerAttemptBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(outcome.state_sha256, first_material.collector_state_sha256)
         self.assertTrue(outcome.safety_recovery_performed)
+        self.assertEqual(
+            outcome.safety_recovery_replayed_environment_actions,
+            1,
+        )
         self.assertRegex(
             outcome.safety_recovery_evidence_sha256 or "",
             r"^sha256:[0-9a-f]{64}$",
@@ -432,6 +442,43 @@ class DockerAttemptBoundaryTests(unittest.TestCase):
             [(first, "one"), (first, SECRET_ACTION), (second, "one")],
         )
         self.assertIn(("list", RUN_ID), cli.calls[5:])
+        boundary.close()
+
+    def test_writable_layer_overflow_remains_a_typed_policy_failure(self) -> None:
+        spec = container_spec()
+        first = container(FIRST_ID, spec)
+        second = container(SECOND_ID, spec)
+        cli = FakeDockerCli(
+            containers=[first, second],
+            states=[trusted_state("base"), trusted_state("base")],
+            list_results=[(), ()],
+        )
+        executor = FakeExecutor(
+            [policy_failure(ActionPolicyFailure.WRITABLE_LAYER_OVERFLOW)]
+        )
+        boundary = DockerAttemptBoundary(
+            docker_cli=cli,  # type: ignore[arg-type]
+            action_executor=executor,  # type: ignore[arg-type]
+            container_spec=spec,
+            profile="fs1",
+            action_limits=action_limits(),
+        )
+
+        outcome = boundary.execute(SECRET_ACTION)
+
+        self.assertIsInstance(outcome, ActionExecution)
+        self.assertEqual(
+            outcome.policy_failure,
+            ActionPolicyFailureKind.WRITABLE_LAYER_OVERFLOW,
+        )
+        self.assertEqual(
+            outcome.observation,
+            "Command exceeded the sampled writable-layer safety limit.",
+        )
+        self.assertEqual(
+            outcome.safety_recovery_replayed_environment_actions,
+            0,
+        )
         boundary.close()
 
     def test_replay_mismatch_cleans_new_container_and_raises_redacted_error(self) -> None:

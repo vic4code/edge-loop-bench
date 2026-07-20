@@ -135,6 +135,9 @@ class V07StudyEvidenceTests(unittest.TestCase):
             self.prepared.binding.manifest_sha256,
         )
         self.assertEqual(evidence.automatic_model_prompt_count, 240)
+        self.assertEqual(evidence.model_issued_environment_action_count, 240)
+        self.assertEqual(evidence.replayed_environment_action_count, 0)
+        self.assertEqual(evidence.physical_environment_action_count, 240)
         self.assertEqual(evidence.operational_event_count, 1)
         self.assertEqual(analysis.verified_episode_count, 240)
         self.assertEqual(

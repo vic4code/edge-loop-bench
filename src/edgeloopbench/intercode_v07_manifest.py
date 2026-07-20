@@ -16,7 +16,7 @@ from dataclasses import InitVar, dataclass
 from types import MappingProxyType
 
 from .docker_action_executor import DockerActionLimits
-from .docker_cli import DockerLimits
+from .docker_cli import DockerLimits, WRITABLE_LAYER_STORAGE_MODE
 from .interactive_controller import INTERACTIVE_CONTROLLER_REVISION
 from .intercode_campaign_ledger import (
     CAMPAIGN_ARMS,
@@ -56,7 +56,7 @@ from .model_adapter import (
 )
 
 
-V07_MANIFEST_SCHEMA_REVISION = "intercode-v0.7-precalibration-manifest-v1"
+V07_MANIFEST_SCHEMA_REVISION = "intercode-v0.7-precalibration-manifest-v2"
 V07_PROMPT_POLICY_REVISION = "intercode-v0.7-four-arm-prompt-policy-v1"
 V07_TOKENIZER_POLICY_REVISION = "ollama-llama-tokenize-v1"
 V07_LLAMA_CPP_COMMIT = "8c146a8366304c871efc26057cc90370ccf58dad"
@@ -67,7 +67,7 @@ V07_INTERVENTION_JOURNAL_REVISION = (
     "intercode-v0.7-operational-intervention-journal-v2"
 )
 V07_SCHEDULE_SHA256 = (
-    "sha256:1c1573590b509b97593a5d0668e10a09e4d6870ff7e58aaf6adb4bdc1f497653"
+    "sha256:68325d5cb1edb7a0f01a338aa05cbfc92bd3c13381bb5c47fe3cf53a4fe27129"
 )
 
 _STRATA = ("fs1", "fs2", "fs3", "fs4")
@@ -1136,13 +1136,16 @@ def _frozen_docker_limits() -> DockerLimits:
     return DockerLimits(
         memory_bytes=512 << 20,
         memory_swap_bytes=512 << 20,
-        storage_bytes=256 << 20,
+        writable_layer_watchdog_bytes=256 << 20,
         nano_cpus=1_000_000_000,
         pids_limit=64,
         nofile_soft=1024,
         nofile_hard=1024,
         nproc_soft=64,
         nproc_hard=64,
+        fsize_soft=16 << 20,
+        fsize_hard=16 << 20,
+        storage_enforcement_mode=WRITABLE_LAYER_STORAGE_MODE,
     )
 
 
@@ -1153,11 +1156,15 @@ def _frozen_docker_action_limits() -> DockerActionLimits:
         observation_limit_bytes=2048,
         read_chunk_bytes=4096,
         io_queue_chunks=8,
+        writable_layer_sample_interval_seconds=0.25,
+        writable_layer_probe_timeout_seconds=1.0,
     )
 
 
-def _docker_limits_record(limits: DockerLimits) -> dict[str, int]:
+def _docker_limits_record(limits: DockerLimits) -> dict[str, int | str]:
     return {
+        "fsize_hard": limits.fsize_hard,
+        "fsize_soft": limits.fsize_soft,
         "memory_bytes": limits.memory_bytes,
         "memory_swap_bytes": limits.memory_swap_bytes,
         "nano_cpus": limits.nano_cpus,
@@ -1166,7 +1173,8 @@ def _docker_limits_record(limits: DockerLimits) -> dict[str, int]:
         "nproc_hard": limits.nproc_hard,
         "nproc_soft": limits.nproc_soft,
         "pids_limit": limits.pids_limit,
-        "storage_bytes": limits.storage_bytes,
+        "storage_enforcement_mode": limits.storage_enforcement_mode,
+        "writable_layer_watchdog_bytes": limits.writable_layer_watchdog_bytes,
     }
 
 
@@ -1179,6 +1187,12 @@ def _docker_action_limits_record(
         "observation_limit_bytes": limits.observation_limit_bytes,
         "private_stream_limit_bytes": limits.private_stream_limit_bytes,
         "read_chunk_bytes": limits.read_chunk_bytes,
+        "writable_layer_probe_timeout_seconds": (
+            limits.writable_layer_probe_timeout_seconds
+        ),
+        "writable_layer_sample_interval_seconds": (
+            limits.writable_layer_sample_interval_seconds
+        ),
     }
 
 

@@ -365,3 +365,316 @@ loaded no model, issued no tokenizer or model request, and consumed no prompt.
 A fresh attempt must explicitly wake the VM, stop the two exact unrelated
 containers, verify an empty running set, and enter production immediately
 before the next idle transition. Existing restart policies are not edited.
+
+## Entry 012 — third production attempt exposed an fs1 fixture omission
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: Docker image build
+- Status: **instrument failure before qualification or model loading**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+Three orphaned Playwright automation daemons using temporary profiles were
+terminated without touching the user's Chrome or Atlas sessions. With Docker's
+2,048 MiB VM kept genuinely awake, VM pressure then held at level `1` and free
+memory reached 51 percent. The benchmark-owned keeper was identity-checked and
+removed before production. Attempt 3 passed preflight at pressure level `1`,
+52 percent free memory, 48,397,824,000 free bytes on the Docker-data
+filesystem, zero running containers, and a live managed Ollama ownership
+check.
+
+The first fs1 image build then failed before producing an image record. A
+separate diagnostic cache-only build reproduced the exact public fixture
+failure: the derived script assigned a fixed mtime to
+`/testbed/recent.txt` without first creating the empty file retained by the
+pinned upstream script. The attempt directory contains only preflight, source
+inventory, Docker identity, intervention-prefix, and one image-build plan
+event. No image was admitted, no task container or model was opened, and no
+model prompt was issued.
+
+ADR 024 requires the missing empty fixture to be restored, a regression test
+to fail before the implementation, every derived source pin to be updated, and
+the complete repository plus real four-image build and gold qualification to
+pass before a fresh production attempt.
+
+## Entry 013 — final-layer sticky-root invariant failed closed
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: non-scoring image diagnosis
+- Status: **instrument hardening before qualification**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+After restoring the missing fs1 file, a real cache-only build passed fixture
+setup, ownership, Git-baseline construction, and collector installation. The
+final writable-surface audit then rejected the image. An isolated, no-network,
+read-only diagnostic image stopped immediately before that audit reported `/`
+as UID 0 mode `0755`: the earlier-layer `chmod 1777 /` was not the mode seen at
+the later overlay mount boundary.
+
+ADR 025 retains the strict audit and moves sticky-root finalization into the
+same final filesystem `RUN` immediately before audit execution. A future build
+must prove both that the audit passes and that an isolated exported container
+observes UID 0 mode `01777`. This diagnostic created no scoring image,
+qualification row, model residency, or model prompt.
+
+## Entry 014 — sibling fixture and build-context audit
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: pre-production instrument review
+- Status: **instrument hardening before live image qualification**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+Before the next live build, an independent source review found the same empty
+fixture omission in four fs2 paths and five fs3 paths. It also found that the
+recursive `docker/intercode/**` exception admitted a local Python bytecode
+cache to the daemon context even though that cache was outside the recorded
+context digest. Regression tests first failed on all nine missing fixtures and
+on the broad context exception.
+
+ADR 026 explicitly restores the nine empty fixtures and replaces the recursive
+exception with a reviewed file-by-file context allowlist. The setup-script and
+`.dockerignore` identities changed, so attempt 3 remains append-only and cannot
+be resumed. No Docker task, tokenizer request, model load, or prompt was issued
+during this review.
+
+## Entry 015 — Linux ACL capability metadata failed closed
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: non-scoring fs1 image qualification
+- Status: **instrument portability fix before image admission**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+The corrected fs1 build passed fixture construction and reached the final
+writable-surface audit, which stopped with `acl_unverified`. In an isolated,
+no-network container, the pinned Ubuntu Python accepted the same open
+descriptor in `os.listxattr()` and returned an empty list, while omitting that
+callable from `os.supports_fd`. The collector had trusted the incomplete
+capability set instead of attempting the fail-closed descriptor operation.
+
+ADR 027 removes only that metadata precheck. Actual missing support, call
+failure, POSIX ACLs, or unexpected extended attributes remain hard failures.
+The collector and Dockerfile identities changed. The failed build admitted no
+image, opened no task or model runtime, and issued no prompt.
+
+## Entry 016 — four build audits passed; runtime root mode separated
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: non-scoring four-image qualification
+- Status: **build-qualified; runtime initialization under test**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+After declaring `.dockerenv` as runtime-injected and hardening the pinned
+base's unused world-writable Pebble directory, canonical fs1, fs2, fs3, and fs4
+builds each passed the strict writable-surface audit. Their diagnostic image
+IDs were respectively `sha256:cc4df6b7…`, `sha256:8db18c53…`,
+`sha256:18f7abf3…`, and `sha256:9ae1cd48…`.
+
+An isolated fs1 container with no network, read-only rootfs, all capabilities
+dropped, and no-new-privileges confirmed that the collector can produce a
+representable runtime state. The same container also proved that Docker resets
+the runtime root mount to UID 0 mode `0755`, even though the build layer and
+audit observed `01777`. ADR 028 therefore separates build-content audit from
+one fixed runtime sticky-root initialization and attestation. No Ollama process,
+model residency, task action, calibration row, or prompt was created.
+
+## Entry 017 — replay accounting and classifier amended before scoring
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: adversarial pre-scoring design review
+- Status: **schema amendment; no model outcome observed**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+The review found that checkpoint restore physically replays prior Bash actions
+but the v4 controller recorded only model-issued actions. ADR 029 adds a
+separate bounded replay counter and derives total physical tool executions.
+It also corrects the positive-result classifier so an estimate at or above the
+`+5pp` practical threshold cannot be labeled below threshold merely because
+another inferential condition failed.
+
+The current superseding identities are controller
+`interactive-controller-v5-replay-accounting`, campaign ledger
+`intercode-30task-campaign-ledger-v5`, execution envelope v3, campaign evidence
+v5, calibration evidence v4, execution-envelope set v2, study evidence v5,
+analysis v4, production runner v3, and schedule
+`sha256:6bc3f7904f1a9bc47fa5fe6244cdc6a89ff7dca61abbf439607e93b3eba3c921`.
+Entries 000, 004, and 005 remain historical rather than being rewritten. No
+model, prompt, candidate action, strict result, or treatment-dependent signal
+informed the amendment.
+
+## Entry 018 — runtime root passed; unsupported Desktop quota failed closed
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: non-scoring Docker runtime qualification
+- Status: **runtime root qualified; storage enforcement under amendment**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+An exact, diagnostic-only fs1 container was started with network `none`, all
+capabilities dropped, no-new-privileges, and UID/GID `65532:65532`. The fixed
+root-only initialization changed `/` to UID 0, GID 0, mode `01777`; its exact
+attestation passed, UID 65532 created and removed one root-level probe, the
+trusted collector passed, and the inspected security fields remained exact.
+The container was then removed by its diagnostic identity.
+
+The first invocation through the production `DockerCli` stopped before
+container creation because Docker Desktop's `overlay2` backing filesystem does
+not support the frozen per-container `--storage-opt size` request. The daemon
+reported that this option requires XFS mounted with `pquota`. No task action,
+tokenizer request, model residency, or model prompt occurred, and exact-label
+cleanup found no created container. A pre-scoring amendment must replace this
+unsupported request with an explicitly recorded, fail-closed Desktop safety
+profile without describing a sampled guard as a hard writable-layer quota.
+
+## Entry 019 — Desktop storage and lifecycle chain qualified
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: non-scoring Docker runtime qualification
+- Status: **live runtime chain passed; repository verification pending**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+ADR 030 replaces the unsupported writable-layer hard-quota claim with the
+frozen `sampled-size-rw-no-hard-quota-v1` profile: a 256 MiB sampled `SizeRw`
+watchdog, 16 MiB `RLIMIT_FSIZE`, 0.25-second sampling interval, one-second
+probe timeout, the existing 64 MiB logical-state ceiling, and exact cleanup.
+This is explicitly a sampled abort guard with possible sampling overshoot, not
+a per-container capacity guarantee.
+
+Live qualification then exposed two Docker Desktop 27.3.1 projections before
+the diagnostic action could run. A created container reported
+`OomKillDisable=false` but projected the same default as JSON `null` after
+start, and `docker top` rejected blank PID headings. ADR 031 adds a
+lifecycle-specific, typed OOM-field rule and an explicit four-column process
+header. Missing or enabled OOM-disable state and every other process-table
+shape still fail closed.
+
+After the corresponding RED/GREEN tests, an exact fs1 diagnostic passed the
+full create, security-profile validation, runtime sticky-root attestation,
+pre/during/post storage sampling, bounded UID-65532 root-level write/remove,
+post-action process audit, trusted state collection, and exact-ID cleanup.
+`SizeRw` was zero bytes before and after the removed probe. Docker Resource
+Saver had restarted the two known AgentGPT containers immediately beforehand;
+their exact identities were inspected and stopped without changing restart
+policies. No benchmark task, tokenizer request, model load, calibration row,
+formal row, or model prompt occurred.
+
+## Entry 020 — replay verifier rebuilt the frozen best policy
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: adversarial pre-scoring evidence review
+- Status: **forged replay topologies rejected; full check pending**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+Adversarial rechaining showed that aggregate replay counts and prior-checkpoint
+identity were insufficient to prove the frozen Engineered controller. The old
+verification path could accept a restore completed after the next prompt
+preflight or a restore to a prior checkpoint that was not the controller's
+best checkpoint.
+
+Campaign and calibration verification now reconstruct the reward trajectory,
+latest-on-tie best checkpoint, exact replay depth, and terminal Engineered
+selection. A restore is required only on a strict regression, must target that
+prior best, and must complete before the next model preflight. Focused tests
+reject duplicate restores, late restores, restore-on-tie, stale tie-best, and
+wrong-target journals after their chains and aggregate counters are made
+internally consistent. The focused campaign and calibration suite passed 34
+tests. No live model-dependent event informed the correction.
+
+## Entry 021 — pre-scoring repository gate passed
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: frozen-instrument release gate
+- Status: **ready for a fresh production attempt**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+After integrating the image, runtime, storage-watchdog, replay-accounting, and
+evidence-verifier corrections, `make check` passed 702 tests with one declared
+skip. Python byte-compilation and the repository's configuration validations
+also passed, as did `git diff --check`. The live Docker Desktop qualification
+chain from Entry 019 remained the runtime evidence for this source revision.
+
+No tokenizer request, model load, calibration episode, formal episode, or
+model prompt preceded this gate. The next production attempt must begin from a
+clean committed source inventory and must still pass its own append-only
+preflight, image build, and 30-task-by-two-model gold qualification before
+calibration is allowed to start.
+
+## Entry 022 — final adversarial accounting and watchdog gate passed
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: frozen-instrument release gate
+- Status: **ready for a fresh production attempt**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+A fresh-context review after Entry 021 found one remaining physical-cost
+omission: policy-failure recovery rebuilds a fresh container and replays its
+admitted action history, including in the Raw loop. It also found three
+watchdog races: post-EOF writes could delay overflow handling, a local
+controller kill could appear as model exit `-9`, and an exited-container
+`SizeRw` race could change `container_terminated` into an infrastructure
+failure. The new writable-layer policy kind also required end-to-end typed
+propagation. No model-dependent signal informed any finding.
+
+ADRs 032 and 033 record the corrections. Safety-recovery and checkpoint
+replays now share an exact typed counter and the natural four-action triangular
+cap of six. The conservative formal envelope is 720 replayed and 1,500 total
+physical actions; sealed topology verification enforces the tighter reachable
+maximum of 600 replayed and 1,380 physical actions. Raw and Engineered costs
+therefore include every deterministic Bash execution, while Direct and
+independent sampling must report zero replay.
+
+The final superseding identities are controller
+`interactive-controller-v6-recovery-replay-accounting`, campaign ledger and
+campaign evidence v6, episode journal and execution envelope v4, calibration
+journal and evidence v5, execution-envelope set v3, study evidence v6,
+analysis v5, production runner v4, and schedule
+`sha256:68325d5cb1edb7a0f01a338aa05cbfc92bd3c13381bb5c47fe3cf53a4fe27129`.
+
+The complete repository gate then passed **710 tests** with one declared skip,
+Python byte-compilation, all configuration validations, and the
+`git diff --check` whitespace gate. Independent focused runs passed 205
+integrated tests, 179 accounting
+tests, 142 adversarial verifier tests, and 38 Docker-executor tests. No
+tokenizer request, model load, calibration row, formal row, or model prompt was
+created before this gate.

@@ -41,7 +41,9 @@ INTERACTIVE_STRATEGIES = (
     "raw_feedback_loop",
     "engineered_loop",
 )
-INTERACTIVE_CONTROLLER_REVISION = "interactive-controller-v4-v07-preregistered-topology"
+INTERACTIVE_CONTROLLER_REVISION = (
+    "interactive-controller-v6-recovery-replay-accounting"
+)
 MAX_ACTION_BYTES = 8 * 1024
 _SHA256_REFERENCE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 PARSER_RETRY_OBSERVATION = (
@@ -101,6 +103,7 @@ class InteractiveResult:
     logical_prompt_tokens: int
     logical_completion_tokens: int
     environment_actions: int
+    replayed_environment_actions: int
     evaluator_calls: int
     checkpoint_creates: int
     checkpoint_restores: int
@@ -127,6 +130,7 @@ class _Counters:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     environment_actions: int = 0
+    replayed_environment_actions: int = 0
     evaluator_calls: int = 0
     checkpoint_creates: int = 0
     checkpoint_restores: int = 0
@@ -144,6 +148,7 @@ class _SelectedCheckpoint:
     official_success: bool
     evaluation_kind: AttemptEvaluationKind
     attempt: int
+    replay_depth: int
 
 
 def parse_action(model_text: str) -> str:
@@ -235,6 +240,7 @@ def run_interactive_strategy(
     action_counts: dict[str, int] = {}
     state_counts: dict[str, int] = {}
     signature_counts: dict[str, int] = {}
+    current_replay_depth = 0
     episode_error: BaseException | None = None
 
     existing_journal = inspect_journal(event_log)
@@ -505,6 +511,24 @@ def run_interactive_strategy(
                 safety_recovery_performed=execution.safety_recovery_performed,
             )
             if not execution.admissible:
+                recovery_replay_actions = (
+                    execution.safety_recovery_replayed_environment_actions
+                )
+                online_replay_action_cap = (
+                    counters.environment_actions
+                    * (counters.environment_actions - 1)
+                    // 2
+                )
+                if (
+                    recovery_replay_actions != current_replay_depth
+                    or counters.replayed_environment_actions
+                    + recovery_replay_actions
+                    > online_replay_action_cap
+                ):
+                    raise RuntimeError(
+                        "policy recovery replay accounting is invalid"
+                    )
+                counters.replayed_environment_actions += recovery_replay_actions
                 counters.safety_recoveries += 1
                 record(
                     "safety_recovery_completed",
@@ -513,6 +537,7 @@ def run_interactive_strategy(
                     recovery_evidence_sha256=(
                         execution.safety_recovery_evidence_sha256
                     ),
+                    replayed_environment_actions=recovery_replay_actions,
                 )
                 evaluation = AttemptEvaluation(
                     reward=0.0,
@@ -586,10 +611,18 @@ def run_interactive_strategy(
             record("checkpoint_create_requested", attempt=attempt)
             checkpoint = current_environment.checkpoint()
             counters.checkpoint_creates += 1
+            checkpoint_replay_depth = (
+                1
+                if strategy == "independent_verified_sampling"
+                else current_replay_depth + 1
+            )
+            if strategy != "independent_verified_sampling":
+                current_replay_depth = checkpoint_replay_depth
             record(
                 "checkpoint_created",
                 attempt=attempt,
                 state_sha256=checkpoint.state_sha256,
+                replay_depth=checkpoint_replay_depth,
             )
             record(
                 "attempt_evaluation_requested",
@@ -614,6 +647,7 @@ def run_interactive_strategy(
                 official_success=evaluation.official_success,
                 evaluation_kind=evaluation.evaluation_kind,
                 attempt=attempt,
+                replay_depth=checkpoint_replay_depth,
             )
             if strategy == "independent_verified_sampling":
                 if selected is None or candidate.reward > selected.reward:
@@ -638,17 +672,55 @@ def run_interactive_strategy(
                     record(
                         "checkpoint_restore_requested",
                         attempt=attempt,
+                        target_attempt=best.attempt,
                         state_sha256=best.checkpoint.state_sha256,
+                        replay_depth=best.replay_depth,
                     )
-                    current_environment.restore(best.checkpoint)
+                    replay_action_cap = (
+                        counters.environment_actions
+                        * (counters.environment_actions - 1)
+                        // 2
+                    )
+                    remaining_replay_action_limit = (
+                        replay_action_cap - counters.replayed_environment_actions
+                    )
+                    if (
+                        best.replay_depth <= 0
+                        or best.replay_depth > remaining_replay_action_limit
+                        or best.replay_depth >= counters.environment_actions
+                    ):
+                        raise RuntimeError(
+                            "selected checkpoint replay depth is outside the natural cap"
+                        )
+                    replayed_environment_actions = current_environment.restore(
+                        best.checkpoint,
+                        action_limit=best.replay_depth,
+                    )
+                    if (
+                        isinstance(replayed_environment_actions, bool)
+                        or not isinstance(replayed_environment_actions, int)
+                        or replayed_environment_actions != best.replay_depth
+                    ):
+                        raise RuntimeError(
+                            "environment restore replay accounting is invalid"
+                        )
+                    counters.replayed_environment_actions += (
+                        replayed_environment_actions
+                    )
                     counters.checkpoint_restores += 1
+                    current_replay_depth = best.replay_depth
                     rollback_performed = True
                     restored_state_sha256 = best.checkpoint.state_sha256
                     selected = best
                     record(
                         "checkpoint_restored",
                         attempt=attempt,
+                        target_attempt=best.attempt,
                         state_sha256=best.checkpoint.state_sha256,
+                        replay_depth=best.replay_depth,
+                        replayed_environment_actions=(
+                            replayed_environment_actions
+                        ),
                     )
                 (
                     repeated_action_count,
@@ -859,6 +931,7 @@ def run_interactive_strategy(
         logical_prompt_tokens=counters.prompt_tokens,
         logical_completion_tokens=counters.completion_tokens,
         environment_actions=counters.environment_actions,
+        replayed_environment_actions=counters.replayed_environment_actions,
         evaluator_calls=counters.evaluator_calls,
         checkpoint_creates=counters.checkpoint_creates,
         checkpoint_restores=counters.checkpoint_restores,

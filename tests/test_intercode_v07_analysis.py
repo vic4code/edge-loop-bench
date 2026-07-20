@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from collections.abc import Callable
+from dataclasses import replace
 from hashlib import sha256
 
 from edgeloopbench import intercode_campaign_evidence as evidence_module
@@ -60,6 +61,7 @@ def result_for(episode: CampaignEpisode, strict_success: bool) -> InteractiveRes
         logical_prompt_tokens=100 * calls,
         logical_completion_tokens=10 * calls,
         environment_actions=calls,
+        replayed_environment_actions=0,
         evaluator_calls=calls + 1,
         checkpoint_creates=calls,
         checkpoint_restores=0,
@@ -104,6 +106,57 @@ def verified_evidence(
 
 
 class InterCodeV07AnalysisTests(unittest.TestCase):
+    def test_replay_actions_are_distinct_and_included_in_physical_totals(self) -> None:
+        evidence = verified_evidence(lambda _episode: False)
+        rows = list(evidence.matrix.episodes)
+        index = next(
+            index
+            for index, row in enumerate(rows)
+            if row.episode.model_id == "qwen3.5:4b"
+            and row.episode.arm == "engineered_loop"
+        )
+        rows[index] = replace(
+            rows[index],
+            result=replace(
+                rows[index].result,
+                replayed_environment_actions=2,
+                checkpoint_restores=1,
+            ),
+        )
+        evidence = VerifiedCampaignEvidence(
+            CampaignMatrix(tuple(rows)),
+            evidence.campaign_log_sha256,
+            evidence.study_binding_sha256,
+            evidence.schedule_sha256,
+            evidence.episode_log_set_sha256,
+            evidence.tokenizer_artifacts_by_model,
+            evidence.verified_episode_count,
+            _authority=evidence_module._VERIFICATION_AUTHORITY,
+        )
+
+        analysis = analyze_v07_effectiveness(evidence)
+        qwen_engineered = next(
+            item
+            for item in analysis.arm_summaries
+            if item.model_id == "qwen3.5:4b" and item.arm == "engineered_loop"
+        )
+
+        self.assertEqual(analysis.total_environment_actions, 780)
+        self.assertEqual(analysis.total_replayed_environment_actions, 2)
+        self.assertEqual(analysis.total_physical_environment_actions, 782)
+        self.assertEqual(qwen_engineered.total_environment_actions, 120)
+        self.assertEqual(qwen_engineered.total_replayed_environment_actions, 2)
+        self.assertEqual(qwen_engineered.total_physical_environment_actions, 122)
+        self.assertAlmostEqual(
+            qwen_engineered.weighted_mean_physical_environment_actions,
+            4.0 + (55 / 180 / 9 * 2),
+        )
+        primary = next(item for item in analysis.contrasts if item.role == "primary")
+        self.assertAlmostEqual(
+            primary.weighted_physical_environment_action_delta,
+            55 / 180 / 9 * 2,
+        )
+
     def test_weighted_primary_statistics_and_prompt_handoff_accounting(self) -> None:
         first_phi_fs2 = next(
             task_id for task_id in CAMPAIGN_TASK_IDS if task_id.startswith("bash-fs2-")
@@ -178,6 +231,30 @@ class InterCodeV07AnalysisTests(unittest.TestCase):
         self.assertEqual(first.cross_model_claim_status, "not_supported")
         self.assertEqual(first.interpretation, "inconclusive_not_equivalence")
         self.assertEqual(first.analysis_sha256, second.analysis_sha256)
+
+    def test_above_threshold_without_inferential_support_is_not_below_threshold(self) -> None:
+        fs2 = tuple(
+            task_id for task_id in CAMPAIGN_TASK_IDS if task_id.startswith("bash-fs2-")
+        )
+
+        def success(episode: CampaignEpisode) -> bool:
+            return bool(
+                episode.model_id == "qwen3.5:4b"
+                and episode.arm == "engineered_loop"
+                and episode.task_id in fs2[:4]
+            )
+
+        analysis = analyze_v07_effectiveness(verified_evidence(success))
+        primary = next(item for item in analysis.contrasts if item.role == "primary")
+
+        self.assertEqual(primary.point_estimate_pp, 12.5)
+        self.assertGreater(primary.bootstrap_ci_low_pp, 0.0)
+        self.assertEqual(primary.exact_mcnemar_p_value, 0.125)
+        self.assertFalse(primary.positive_result)
+        self.assertEqual(
+            primary.decision_classification,
+            "inconclusive_not_equivalence",
+        )
 
     def test_clear_negative_primary_is_reported_as_harm_not_inconclusive(self) -> None:
         def success(episode: CampaignEpisode) -> bool:

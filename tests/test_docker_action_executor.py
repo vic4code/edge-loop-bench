@@ -34,7 +34,7 @@ RUN_ID = "v06-calibration-001"
 NAME = "elb-v06-calibration-001-agent-1234567890abcdef"
 IMAGE_ID = "sha256:" + "b" * 64
 IMAGE = "local/intercode-bash@sha256:" + "a" * 64
-IDLE_TOP = b"101 1 Ss tail\n"
+IDLE_TOP = b"PID PPID STAT COMMAND\n101 1 Ss tail\n"
 ACTION_STARTED_MARKER = b"\x1eELB_ACTION_STARTED_V1\x1f\n"
 DOCKER_BINARY = "/usr/local/bin/docker"
 DOCKER_ENDPOINT = "unix:///Users/test/.docker/run/docker.sock"
@@ -49,7 +49,7 @@ def trusted_container() -> DockerContainer:
         limits=DockerLimits(
             memory_bytes=536_870_912,
             memory_swap_bytes=536_870_912,
-            storage_bytes=268_435_456,
+            writable_layer_watchdog_bytes=268_435_456,
             nano_cpus=1_000_000_000,
             pids_limit=64,
             nofile_soft=1024,
@@ -73,12 +73,15 @@ class FakeBoundary:
         *,
         cleanup_error: Exception | None = None,
         running_state: bool | Exception = True,
+        writable_layer_sizes: Sequence[int | Exception] = (),
     ) -> None:
         self.cleanup_error = cleanup_error
         self.running_state = running_state
         self.prepare_calls: list[tuple[DockerContainer, str, str]] = []
         self.cleanup_calls: list[tuple[str, tuple[str, ...]]] = []
         self.state_calls: list[DockerContainer] = []
+        self.writable_layer_sizes = list(writable_layer_sizes)
+        self.writable_layer_calls: list[tuple[DockerContainer, float]] = []
 
     def prepare_exec_action(
         self, *, container: DockerContainer, action: str, cwd: str
@@ -111,6 +114,15 @@ class FakeBoundary:
             raise self.running_state
         return self.running_state
 
+    def inspect_container_writable_layer_bytes(
+        self, *, container: DockerContainer, timeout_seconds: float
+    ) -> int:
+        self.writable_layer_calls.append((container, timeout_seconds))
+        value = self.writable_layer_sizes.pop(0) if self.writable_layer_sizes else 0
+        if isinstance(value, Exception):
+            raise value
+        return value
+
     def remove_run_containers(
         self, run_id: str, identifiers: Sequence[str]
     ) -> tuple[str, ...]:
@@ -131,6 +143,7 @@ class ProcessResponse:
     advance_clock_to: float | None = None
     pid: int | None = None
     emit_start_attestation: bool = True
+    wait_for_kill: bool = False
 
 
 class ErrorStream:
@@ -161,21 +174,28 @@ class FakeProcess:
         self.returncode: int | None = None if response.hang else response.returncode
         self.pid = response.pid
         self.killed = False
+        self.terminated = threading.Event()
 
     def poll(self) -> int | None:
         return self.returncode
 
     def wait(self, timeout: float | None = None) -> int:
         if self.returncode is None:
+            if self.response.wait_for_kill and self.terminated.wait(timeout):
+                assert self.returncode is not None
+                return self.returncode
             if self.response.advance_clock_to is not None:
                 assert self.clock is not None
                 self.clock.value = self.response.advance_clock_to
+            elif self.clock is not None and timeout is not None:
+                self.clock.value += timeout
             raise subprocess.TimeoutExpired("fake", timeout)
         return self.returncode
 
     def kill(self) -> None:
         self.killed = True
         self.returncode = -9
+        self.terminated.set()
 
 
 class ManualClock:
@@ -291,6 +311,8 @@ def limits(**overrides: object) -> DockerActionLimits:
         "observation_limit_bytes": 32,
         "read_chunk_bytes": 16,
         "io_queue_chunks": 4,
+        "writable_layer_sample_interval_seconds": 0.01,
+        "writable_layer_probe_timeout_seconds": 1.0,
     }
     values.update(overrides)
     return DockerActionLimits(**values)  # type: ignore[arg-type]
@@ -326,6 +348,200 @@ def executor(
 
 
 class DockerActionExecutorTests(unittest.TestCase):
+    def test_writable_layer_watchdog_interrupts_process_after_streams_close(self) -> None:
+        threshold = trusted_container().spec.limits.writable_layer_watchdog_bytes
+        boundary = FakeBoundary(writable_layer_sizes=(0, 0, threshold + 1))
+        subject, checked, popen = executor(
+            [
+                ProcessResponse(stdout=IDLE_TOP),
+                ProcessResponse(hang=True, wait_for_kill=True),
+            ],
+            boundary=boundary,
+        )
+
+        result = subject.execute(
+            container=trusted_container(),
+            action="close streams and keep writing",
+            cwd="/testbed",
+            limits=limits(deadline_seconds=1.0),
+        )
+
+        self.assertEqual(result.disposition, ActionDisposition.POLICY_FAILURE)
+        self.assertEqual(
+            result.policy_failure,
+            ActionPolicyFailure.WRITABLE_LAYER_OVERFLOW,
+        )
+        self.assertEqual(result.failure_stage, "action")
+        self.assertIsNone(result.exit_code)
+        self.assertTrue(popen.processes[-1].killed)
+        self.assertEqual(checked.cleanup_calls, [(RUN_ID, (CONTAINER_ID,))])
+
+    def test_writable_layer_watchdog_samples_pre_during_and_post_action(self) -> None:
+        boundary = FakeBoundary(writable_layer_sizes=(10, 20, 30))
+        subject, checked, _popen = executor(
+            [
+                ProcessResponse(stdout=IDLE_TOP),
+                ProcessResponse(stdout=b"ok\n"),
+                ProcessResponse(stdout=IDLE_TOP),
+            ],
+            boundary=boundary,
+        )
+
+        result = subject.execute(
+            container=trusted_container(),
+            action="true",
+            cwd="/testbed",
+            limits=limits(),
+        )
+
+        self.assertEqual(result.disposition, ActionDisposition.EXECUTED)
+        self.assertGreaterEqual(len(checked.writable_layer_calls), 3)
+        self.assertTrue(
+            all(timeout == 1.0 for _container, timeout in checked.writable_layer_calls)
+        )
+
+    def test_early_writable_layer_overflow_kills_before_start_marker_is_drained(self) -> None:
+        threshold = trusted_container().spec.limits.writable_layer_watchdog_bytes
+        boundary = FakeBoundary(writable_layer_sizes=(0, threshold + 1))
+        subject, checked, popen = executor(
+            [
+                ProcessResponse(stdout=IDLE_TOP),
+                ProcessResponse(hang=True),
+            ],
+            boundary=boundary,
+        )
+
+        result = subject.execute(
+            container=trusted_container(),
+            action="fill writable layer",
+            cwd="/testbed",
+            limits=limits(),
+        )
+
+        self.assertEqual(result.disposition, ActionDisposition.INFRASTRUCTURE_INVALID)
+        self.assertEqual(
+            result.infrastructure_failure,
+            InfrastructureFailure.WRITABLE_LAYER_WATCHDOG,
+        )
+        self.assertIsNone(result.policy_failure)
+        self.assertFalse(result.action_started)
+        self.assertEqual(result.failure_stage, "action")
+        self.assertTrue(popen.processes[-1].killed)
+        self.assertEqual(checked.cleanup_calls, [(RUN_ID, (CONTAINER_ID,))])
+
+    def test_writable_layer_overflow_after_post_audit_fails_closed(self) -> None:
+        threshold = trusted_container().spec.limits.writable_layer_watchdog_bytes
+        boundary = FakeBoundary(writable_layer_sizes=(0, 0, threshold + 1))
+        subject, checked, popen = executor(
+            [
+                ProcessResponse(stdout=IDLE_TOP),
+                ProcessResponse(stdout=b"ok\n"),
+                ProcessResponse(stdout=IDLE_TOP),
+            ],
+            boundary=boundary,
+        )
+
+        result = subject.execute(
+            container=trusted_container(),
+            action="fill at exit",
+            cwd="/testbed",
+            limits=limits(),
+        )
+
+        self.assertEqual(result.disposition, ActionDisposition.POLICY_FAILURE)
+        self.assertEqual(
+            result.policy_failure,
+            ActionPolicyFailure.WRITABLE_LAYER_OVERFLOW,
+        )
+        self.assertEqual(result.failure_stage, "post_storage")
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(len(popen.calls), 3)
+        self.assertEqual(checked.cleanup_calls, [(RUN_ID, (CONTAINER_ID,))])
+
+    def test_writable_layer_probe_failure_during_action_kills_and_cleans(self) -> None:
+        boundary = FakeBoundary(
+            writable_layer_sizes=(0, RuntimeError("private daemon detail"))
+        )
+        subject, checked, popen = executor(
+            [
+                ProcessResponse(stdout=IDLE_TOP),
+                ProcessResponse(hang=True),
+            ],
+            boundary=boundary,
+        )
+
+        result = subject.execute(
+            container=trusted_container(),
+            action="keep writing",
+            cwd="/testbed",
+            limits=limits(),
+        )
+
+        self.assertEqual(result.disposition, ActionDisposition.INFRASTRUCTURE_INVALID)
+        self.assertEqual(
+            result.infrastructure_failure,
+            InfrastructureFailure.WRITABLE_LAYER_WATCHDOG,
+        )
+        self.assertEqual(result.failure_stage, "action")
+        self.assertFalse(result.action_started)
+        self.assertTrue(popen.processes[-1].killed)
+        self.assertNotIn("private daemon detail", repr(result))
+        self.assertEqual(checked.cleanup_calls, [(RUN_ID, (CONTAINER_ID,))])
+
+    def test_writable_probe_defers_attested_container_exit_to_post_audit(self) -> None:
+        boundary = FakeBoundary(
+            running_state=False,
+            writable_layer_sizes=(0, RuntimeError("container is not running")),
+        )
+        subject, checked, _popen = executor(
+            [
+                ProcessResponse(stdout=IDLE_TOP),
+                ProcessResponse(returncode=137),
+                ProcessResponse(returncode=1),
+            ],
+            boundary=boundary,
+        )
+
+        result = subject.execute(
+            container=trusted_container(),
+            action="kill 1",
+            cwd="/testbed",
+            limits=limits(),
+        )
+
+        self.assertEqual(result.disposition, ActionDisposition.POLICY_FAILURE)
+        self.assertEqual(
+            result.policy_failure,
+            ActionPolicyFailure.CONTAINER_TERMINATED,
+        )
+        self.assertEqual(result.failure_stage, "post_audit")
+        self.assertEqual(result.exit_code, 137)
+        self.assertGreaterEqual(len(checked.state_calls), 2)
+        self.assertEqual(checked.cleanup_calls, [(RUN_ID, (CONTAINER_ID,))])
+
+    def test_writable_layer_probe_failure_is_infrastructure_invalid_and_cleans(self) -> None:
+        boundary = FakeBoundary(
+            writable_layer_sizes=(RuntimeError("private daemon detail"),)
+        )
+        subject, checked, popen = executor([], boundary=boundary)
+
+        result = subject.execute(
+            container=trusted_container(),
+            action="true",
+            cwd="/testbed",
+            limits=limits(),
+        )
+
+        self.assertEqual(result.disposition, ActionDisposition.INFRASTRUCTURE_INVALID)
+        self.assertEqual(
+            result.infrastructure_failure,
+            InfrastructureFailure.WRITABLE_LAYER_WATCHDOG,
+        )
+        self.assertEqual(result.failure_stage, "pre_storage")
+        self.assertEqual(popen.calls, [])
+        self.assertNotIn("private daemon detail", repr(result))
+        self.assertEqual(checked.cleanup_calls, [(RUN_ID, (CONTAINER_ID,))])
+
     def test_clean_docker_exec_failure_without_start_attestation_is_not_an_attempt(self) -> None:
         subject, boundary, _popen = executor(
             [
@@ -1070,7 +1286,13 @@ class DockerActionExecutorTests(unittest.TestCase):
             self.assertEqual(argv.count(hostile), 1 if argv == action_argv else 0)
         self.assertEqual(
             popen.calls[0][0][-5:],
-            ("container", "top", CONTAINER_ID, "-eo", "pid=,ppid=,stat=,comm="),
+            (
+                "container",
+                "top",
+                CONTAINER_ID,
+                "-eo",
+                "pid=PID,ppid=PPID,stat=STAT,comm=COMMAND",
+            ),
         )
 
     def test_defective_boundary_cannot_change_host_binary_endpoint_or_exec_shape(self) -> None:
@@ -1141,6 +1363,8 @@ class DockerActionExecutorTests(unittest.TestCase):
             {"observation_limit_bytes": 0},
             {"read_chunk_bytes": 0},
             {"io_queue_chunks": 0},
+            {"writable_layer_sample_interval_seconds": 0},
+            {"writable_layer_probe_timeout_seconds": 0},
         )
         for override in invalid:
             with self.subTest(override=override):

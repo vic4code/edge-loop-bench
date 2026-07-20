@@ -16,9 +16,11 @@ adapter requires a new preregistration and cannot be inserted into this study.
 
 ## 1. Question and scope
 
-Under the same per-episode logical-token and action ceilings, does a frozen
-engineered feedback loop improve final strict success over a raw feedback loop,
-and are either better than additional independent samples or one Direct call?
+Under the same per-episode logical-token, model-call, and model-issued-action
+ceilings, does a frozen engineered feedback loop improve final strict success
+over a raw feedback loop, and are either better than additional independent
+samples or one Direct call? Deterministic checkpoint replay executions are
+recorded separately rather than misreported as model-issued actions.
 
 The four arms are:
 
@@ -186,7 +188,9 @@ unused capacity unused. The exact per-episode ceiling is:
 
 | Resource | Ceiling |
 | --- | ---: |
-| Attempts / model calls / environment actions | 4 |
+| Attempts / model calls / model-issued environment actions | 4 |
+| Replayed environment actions (stateful loop maximum) | 6 |
+| Physical environment actions (stateful loop maximum) | 10 |
 | Per-call context | 4,096 logical tokens |
 | Per-call completion | 512 logical tokens |
 | Episode logical prompt tokens | 16,380 |
@@ -204,6 +208,21 @@ Unused calls remain unused after a policy or no-progress stop. The final
 manifest separately pins prompt templates, parser, controller, budgets,
 runtime, model artifacts, tokenizer/chat templates, weight quantization, and
 KV-cache quantization.
+
+A checkpoint restore or safety recovery reconstructs an admitted prefix in a
+fresh environment. Those deterministic Bash executions are not new model
+decisions, so they do not consume the four model-issued-action slots. They are
+nevertheless physical tool executions: every recovery journals its exact
+replay count, the shared episode cap is `K * (K - 1) / 2 = 6`, and reporting
+gives model-issued, replayed, and total physical actions separately. Direct and
+independent sampling carry no cross-call state and therefore replay zero
+actions. The Raw topology has a tighter four-action maximum of four replays;
+Engineered can reach six through checkpoint restoration. The frozen
+conservative formal envelope is therefore 780 model-issued plus 720 replayed
+actions, or 1,500 physical environment actions. Exact topology validation
+tightens the reachable replay maximum to 600 (240 Raw plus 360 Engineered), so
+the reachable physical maximum is 1,380; both the conservative gate and the
+observed totals are retained in evidence.
 
 ## 5. Limited calibration and wall-time gate
 
@@ -371,7 +390,8 @@ Record these counters separately:
 - additional independent-sample prompt;
 - automatic feedback-conditioned follow-up;
 - complete logical prompt and completion tokens;
-- model-issued actions, progress evaluations, strict evaluations, and wall time;
+- model-issued actions, deterministic replayed actions, their physical total,
+  progress evaluations, strict evaluations, and wall time;
 - actual human interventions during the campaign;
 - valid final strict failures as unresolved handoffs;
 - paired rescues, regressions, net rescues, and avoided unresolved handoffs.
@@ -380,6 +400,70 @@ An unresolved handoff is not retroactively converted into a human prompt. No
 counterfactual “manual prompts saved” value is reported. The operational claim,
 if supported, is limited to observed automatic prompt orchestration and paired
 avoided unresolved handoffs.
+
+### Pre-scoring amendment on 2026-07-20
+
+Before any tokenizer request, model load, calibration episode, or confirmatory
+episode, an adversarial accounting review found that rollback replay executions
+were physically performed but not represented in `InteractiveResult`. The
+controller/evidence schemas were amended to add the bounded replay counter and
+the cost language above was narrowed from generic equal action ceilings to
+equal model-issued-action ceilings. The same review corrected the reporting
+classifier so `positive_below_practical_threshold` requires a point estimate
+strictly below `+5.0` points; an above-threshold estimate that fails another
+positive-result condition is `inconclusive_not_equivalence`. No prompt,
+candidate, strict outcome, or model-dependent signal informed either change.
+
+The sealed-evidence verifiers also reconstruct the exact Engineered restore
+policy from event order, candidate rewards, checkpoint identities, and replay
+depths. A restore must complete before the next prompt preflight, must occur
+only on a strict regression, and must target the best prior checkpoint; an
+equal reward makes the latest checkpoint the new best. Rechained journals with
+duplicate, late, tie, stale-best, wrong-target, or wrong-terminal-selection
+events are rejected even when their aggregate counters balance.
+
+A second outcome-independent review found that model-caused policy failures
+also recreate a fresh environment and replay the previously admitted prefix.
+The typed action result, controller journal, campaign ledger, calibration
+evidence, and analysis now include that safety-recovery replay count. Verifiers
+reconstruct it from the arm and current admitted depth; Raw and Engineered may
+report it, while Direct and independent sampling must report zero. The shared
+triangular replay cap remains six because one attempt can take the safety-
+recovery branch or the checkpoint-restore branch, never both. This correction
+and its superseding scope are recorded in
+[ADR 032](decisions/032-account-for-safety-recovery-replays.md).
+
+### Docker storage-policy amendment on 2026-07-20
+
+The first qualification lifecycle stopped at container creation, before any
+prompt, model load, candidate, or scored outcome, because the admitted Docker
+Desktop `overlay2` backend does not support the requested per-container
+`--storage-opt size` quota. Before restarting qualification, the unsupported
+flag and hard-quota claim were replaced by the frozen mode
+`sampled-size-rw-no-hard-quota-v1`: an attested 16 MiB soft/hard `fsize` ulimit
+plus exact-container `SizeRw` sampling before, every 0.25 seconds during, and
+after each action, with a 1-second probe timeout and a 256 MiB threshold. Any
+probe ambiguity fails closed; a during-action signal terminates execution and
+triggers exact-label cleanup. This sampled watchdog can overshoot between
+probes and is explicitly **not** a hard aggregate quota.
+
+The amended canonical execution record pins the mode, threshold, ulimit,
+cadence, and timeout. It advances the pre-calibration manifest schema to
+`intercode-v0.7-precalibration-manifest-v2` and the replay authority to
+`intercode-v0.7-docker-qualification-authority-v2`; their derived identities
+therefore cannot accept or mix evidence from the attempted v1 lifecycle.
+Qualification restarts from a fresh source inventory. No prompt, controller,
+task, arm, model, budget, evaluator, or outcome rule changed. The rationale and
+upstream capability constraints are recorded in
+[ADR 030](decisions/030-replace-unsupported-storage-quota-with-sampled-watchdog.md).
+
+A final watchdog review added bounded 50 ms process polling after output EOF,
+removed controller-generated `-9` values from action-stage overflow results,
+preserved completed-command exit codes for post-storage overflow, and made an
+attested exited-container probe race flow to the frozen
+`container_terminated` policy result. Probe or lifecycle ambiguity still fails
+closed. [ADR 033](decisions/033-preserve-watchdog-semantics-across-process-races.md)
+records the outcome-independent change.
 
 ## 9. Stop gates before model scoring
 
