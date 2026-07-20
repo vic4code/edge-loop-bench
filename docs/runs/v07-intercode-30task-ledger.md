@@ -678,3 +678,85 @@ integrated tests, 179 accounting
 tests, 142 adversarial verifier tests, and 38 Docker-executor tests. No
 tokenizer request, model load, calibration row, formal row, or model prompt was
 created before this gate.
+
+## Entry 023 — Docker wake race isolated before image mutation
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: production host admission, attempts 4 and 5
+- Status: **safety stops; stable admission protocol established**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+Attempts 4 and 5 each passed repository preflight but stopped at full host
+admission. Waking Docker Desktop asynchronously restarted the same two known
+AgentGPT containers; one admission also observed VM pressure level `2`. The
+controller refused image build and created only its append-only intervention,
+preflight, and source-inventory records.
+
+The orchestrator was narrowed to the two previously inventoried exact
+container IDs and compose identities. It stops only those IDs when they are
+running, changes no restart policy, rejects every unknown running container,
+and requires six consecutive normal-pressure, empty-container, empty-Ollama
+samples five seconds apart before handing control to production. This bounded
+stabilization allowed the next attempt to pass full admission. No image,
+tokenizer request, model load, task action, calibration row, formal row, or
+model prompt was created in attempts 4 or 5.
+
+## Entry 024 — Docker iidfile protocol amended before scoring
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: production image build, attempts 6 and 7
+- Status: **reproducible infrastructure stop; v3 correction under verification**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+Attempts 6 and 7 each passed the stable host admission and completed the
+pinned cached fs1 Docker build. Both then stopped before image inspection or
+an image event: the private v2 manifest retained only its plan header and the
+71-byte full image-ID file. Repetition under normal pressure proved this was a
+deterministic compatibility failure rather than host pressure.
+
+An isolated no-network cached build showed that Docker CLI 27.3.1 removes the
+precreated mode-`0600` iidfile and creates a new mode-`0644` inode; the held
+reservation becomes unlinked. The pinned Docker source confirms the same
+remove-then-write behavior. ADR 034 replaces the impossible same-inode rule
+with a private-parent-anchored remove/recreate protocol, advances image plan
+and manifest schemas to v3, and binds the protocol and `0644` to `0600` mode
+transition into the plan digest. Symlink, FIFO, directory, hard-link, owner,
+mode, size, parent, path, and content drift remain fail-closed.
+
+The failed attempt directories remain unedited diagnostic artifacts. No
+tokenizer request, Ollama listener, resident model, qualification task,
+calibration row, formal row, or model prompt existed in either attempt, so the
+amendment could not use model outcomes. A new production root is required;
+neither v2 manifest is eligible for resume.
+
+## Entry 025 — iidfile v3 repository gate passed
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: corrected-instrument release gate
+- Status: **ready for a fresh production attempt**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+The complete corrected repository passed **719 tests** with one declared skip,
+Python byte-compilation, all configuration validations, and the sample summary
+check. The focused image-build and v0.7 image-provenance suite passed 30 tests;
+the image tests include Docker remove/recreate, FIFO nonblocking refusal,
+symlink and hard-link refusal, exact mode and size gates, parent and output
+replacement, torn payload, same-inode concurrent mutation, and redacted
+operating-system failures. `git diff --check` also passed.
+
+This gate still contains no model outcome: no tokenizer request, Ollama model
+load, calibration row, confirmatory row, or model prompt has occurred. The next
+permitted action is a clean committed v3 production attempt under the same
+stable-normal host admission protocol.

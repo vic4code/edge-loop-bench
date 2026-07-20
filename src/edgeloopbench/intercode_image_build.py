@@ -35,7 +35,9 @@ DOCKERIGNORE_SHA256 = (
 _REVISION = "c3e46d827cfc9d4c704ec078f7abf9f41e3191d8"
 _TAGGED_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
-_MANIFEST_SCHEMA = "edgeloopbench.intercode-image-build-manifest.v2"
+_PLAN_SCHEMA = "edgeloopbench.intercode-image-build-plan.v3"
+_MANIFEST_SCHEMA = "edgeloopbench.intercode-image-build-manifest.v3"
+_IIDFILE_PROTOCOL_REVISION = "docker-remove-recreate-private-parent-v1"
 _VERIFIED_BUILD_SCHEMA = "edgeloopbench.intercode-image-build-verification.v1"
 _MAX_MANIFEST_BYTES = 1 << 20
 _MAX_DOCKER_STDOUT_BYTES = 8 << 20
@@ -205,7 +207,7 @@ class InterCodeImageBuildPlan:
 
     def _core_record(self) -> dict[str, object]:
         return {
-            "schema": "edgeloopbench.intercode-image-build-plan.v2",
+            "schema": _PLAN_SCHEMA,
             "platform": self.platform,
             "docker": {
                 "binary_sha256": self.docker_binary_sha256,
@@ -217,6 +219,11 @@ class InterCodeImageBuildPlan:
                 "context_sha256": self.context_sha256,
                 "dockerfile_sha256": self.dockerfile_sha256,
                 "dockerignore_sha256": self.dockerignore_sha256,
+            },
+            "iidfile": {
+                "protocol_revision": _IIDFILE_PROTOCOL_REVISION,
+                "projected_mode": "0644",
+                "normalized_mode": "0600",
             },
             "entries": [
                 {
@@ -520,32 +527,67 @@ class _RepositoryBuildLock:
 
 
 class _IidFile:
-    """Precreated inode retained while Docker writes one exact image ID."""
+    """Safely adopt Docker's remove-and-recreate iidfile projection."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        try:
-            self.descriptor = os.open(path, flags, 0o600)
-        except OSError as error:
-            raise InterCodeImageBuildError("Docker iidfile is present or unsafe") from error
-        self.metadata = os.fstat(self.descriptor)
-        if (
-            not stat.S_ISREG(self.metadata.st_mode)
-            or self.metadata.st_nlink != 1
-            or stat.S_IMODE(self.metadata.st_mode) != 0o600
-        ):
-            os.close(self.descriptor)
-            raise InterCodeImageBuildError("Docker iidfile identity is unsafe")
+        self.descriptor = -1
+        self.output_descriptor = -1
+        self.parent_descriptor = -1
         self._closed = False
+        parent_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        parent_flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            self.parent_descriptor = os.open(path.parent, parent_flags)
+            self.parent_metadata = os.fstat(self.parent_descriptor)
+            self._validate_parent(self.parent_metadata, initial=True)
+            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            self.descriptor = os.open(
+                path.name,
+                flags,
+                0o600,
+                dir_fd=self.parent_descriptor,
+            )
+            self.metadata = os.fstat(self.descriptor)
+            self._validate_reservation(self.metadata, replaced=False)
+            self._revalidate_parent()
+            link = os.stat(
+                path.name,
+                dir_fd=self.parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (link.st_dev, link.st_ino) != (
+                self.metadata.st_dev,
+                self.metadata.st_ino,
+            ):
+                raise InterCodeImageBuildError("Docker iidfile reservation path changed")
+        except OSError as error:
+            self.close()
+            raise InterCodeImageBuildError("Docker iidfile is present or unsafe") from error
+        except BaseException:
+            self.close()
+            raise
 
     def read_image_id(self) -> str:
-        self._revalidate()
-        os.lseek(self.descriptor, 0, os.SEEK_SET)
-        payload = os.read(self.descriptor, 74)
-        if len(payload) > 72 or os.read(self.descriptor, 1):
-            raise InterCodeImageBuildError("Docker iidfile exceeds its bound")
+        try:
+            return self._read_image_id()
+        except InterCodeImageBuildError:
+            raise
+        except OSError as error:
+            raise InterCodeImageBuildError(
+                "Docker iidfile could not be securely read"
+            ) from error
+
+    def _read_image_id(self) -> str:
+        if self.output_descriptor < 0:
+            self._adopt_projected_output()
+        self._revalidate_output()
+        payload = self._read_output()
+        self._revalidate_output()
+        if self._read_output() != payload:
+            raise InterCodeImageBuildError("Docker iidfile changed while it was read")
+        self._revalidate_output()
         try:
             value = payload.decode("ascii")
         except UnicodeDecodeError as error:
@@ -554,31 +596,169 @@ class _IidFile:
             value = value[:-1]
         if _IMAGE_ID.fullmatch(value) is None:
             raise InterCodeImageBuildError("Docker iidfile does not contain one full image ID")
-        self._revalidate()
         return value
 
     def remove_after_success(self) -> None:
-        self._revalidate()
-        os.unlink(self.path)
+        try:
+            self._remove_after_success()
+        except InterCodeImageBuildError:
+            raise
+        except OSError as error:
+            raise InterCodeImageBuildError(
+                "Docker iidfile could not be securely removed"
+            ) from error
+
+    def _remove_after_success(self) -> None:
+        self._revalidate_output()
+        os.unlink(self.path.name, dir_fd=self.parent_descriptor)
+        after = os.fstat(self.output_descriptor)
+        if (
+            (after.st_dev, after.st_ino)
+            != (self.output_metadata.st_dev, self.output_metadata.st_ino)
+            or after.st_nlink != 0
+        ):
+            raise InterCodeImageBuildError("Docker iidfile removal identity changed")
+        try:
+            os.stat(
+                self.path.name,
+                dir_fd=self.parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            raise InterCodeImageBuildError("Docker iidfile path survived removal")
         self.close()
 
     def close(self) -> None:
-        if not self._closed:
-            os.close(self.descriptor)
-            self._closed = True
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self.output_descriptor >= 0:
+                os.close(self.output_descriptor)
+        finally:
+            try:
+                if self.descriptor >= 0:
+                    os.close(self.descriptor)
+            finally:
+                if self.parent_descriptor >= 0:
+                    os.close(self.parent_descriptor)
 
-    def _revalidate(self) -> None:
-        after = os.fstat(self.descriptor)
-        link = os.stat(self.path, follow_symlinks=False)
+    def _adopt_projected_output(self) -> None:
+        self._revalidate_parent()
+        self._validate_reservation(os.fstat(self.descriptor), replaced=True)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            descriptor = os.open(
+                self.path.name,
+                flags,
+                dir_fd=self.parent_descriptor,
+            )
+        except OSError as error:
+            raise InterCodeImageBuildError(
+                "Docker iidfile projection is absent or unsafe"
+            ) from error
+        try:
+            projected = os.fstat(descriptor)
+            self._validate_output_metadata(projected, projected=True)
+            link = os.stat(
+                self.path.name,
+                dir_fd=self.parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (link.st_dev, link.st_ino) != (projected.st_dev, projected.st_ino):
+                raise InterCodeImageBuildError("Docker iidfile projection path changed")
+            os.fchmod(descriptor, 0o600)
+            normalized = os.fstat(descriptor)
+            self._validate_output_metadata(normalized, projected=False)
+            self.output_descriptor = descriptor
+            self.output_metadata = normalized
+            try:
+                self._revalidate_output()
+            except BaseException:
+                self.output_descriptor = -1
+                raise
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def _read_output(self) -> bytes:
+        os.lseek(self.output_descriptor, 0, os.SEEK_SET)
+        payload = os.read(self.output_descriptor, 74)
+        if len(payload) > 72 or os.read(self.output_descriptor, 1):
+            raise InterCodeImageBuildError("Docker iidfile exceeds its bound")
+        return payload
+
+    def _revalidate_parent(self) -> None:
+        metadata = os.fstat(self.parent_descriptor)
+        self._validate_parent(metadata, initial=False)
+        link = os.stat(self.path.parent, follow_symlinks=False)
+        if (link.st_dev, link.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise InterCodeImageBuildError("Docker iidfile parent path changed")
+
+    def _validate_parent(self, metadata: os.stat_result, *, initial: bool) -> None:
         if (
-            not stat.S_ISREG(after.st_mode)
-            or after.st_nlink != 1
-            or stat.S_IMODE(after.st_mode) != 0o600
-            or (link.st_dev, link.st_ino) != (after.st_dev, after.st_ino)
-            or (self.metadata.st_dev, self.metadata.st_ino)
-            != (after.st_dev, after.st_ino)
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
         ):
-            raise InterCodeImageBuildError("Docker iidfile identity changed")
+            raise InterCodeImageBuildError("Docker iidfile parent identity is unsafe")
+        if not initial and (metadata.st_dev, metadata.st_ino) != (
+            self.parent_metadata.st_dev,
+            self.parent_metadata.st_ino,
+        ):
+            raise InterCodeImageBuildError("Docker iidfile parent identity changed")
+
+    def _validate_reservation(
+        self,
+        metadata: os.stat_result,
+        *,
+        replaced: bool,
+    ) -> None:
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != (0 if replaced else 1)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size != 0
+            or (metadata.st_dev, metadata.st_ino)
+            != (self.metadata.st_dev, self.metadata.st_ino)
+        ):
+            raise InterCodeImageBuildError("Docker iidfile reservation identity changed")
+
+    def _validate_output_metadata(
+        self,
+        metadata: os.stat_result,
+        *,
+        projected: bool,
+    ) -> None:
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != (0o644 if projected else 0o600)
+            or metadata.st_size > 72
+        ):
+            raise InterCodeImageBuildError("Docker iidfile projection identity is unsafe")
+
+    def _revalidate_output(self) -> None:
+        self._revalidate_parent()
+        self._validate_reservation(os.fstat(self.descriptor), replaced=True)
+        metadata = os.fstat(self.output_descriptor)
+        self._validate_output_metadata(metadata, projected=False)
+        link = os.stat(
+            self.path.name,
+            dir_fd=self.parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            (metadata.st_dev, metadata.st_ino)
+            != (self.output_metadata.st_dev, self.output_metadata.st_ino)
+            or (link.st_dev, link.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            raise InterCodeImageBuildError("Docker iidfile projection identity changed")
 
 
 def _manifest_header(plan: InterCodeImageBuildPlan) -> dict[str, object]:

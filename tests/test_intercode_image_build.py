@@ -271,7 +271,13 @@ class FakeDockerRunner:
             )
             iidfile = Path(arguments[arguments.index("--iidfile") + 1])
             metadata = iidfile.stat()
-            if stat.S_IMODE(metadata.st_mode) != 0o600:
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_nlink != 1
+                or metadata.st_size != 0
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
                 raise AssertionError("iidfile was not precreated mode 0600")
             plan_label = next(
                 arguments[index + 1]
@@ -282,7 +288,9 @@ class FakeDockerRunner:
                 )
             )
             image_id = tagged(f"{plan_label}:fs{version}".encode())
+            iidfile.unlink()
             iidfile.write_text(image_id, encoding="ascii")
+            iidfile.chmod(0o644)
             labels = {
                 "org.opencontainers.image.source": (
                     "https://github.com/princeton-nlp/intercode"
@@ -338,6 +346,189 @@ class FakeDockerRunner:
         raise AssertionError(f"unexpected Docker argv: {tuple(argv)!r}")
 
 
+class InterCodeIidFileTests(unittest.TestCase):
+    @staticmethod
+    def project(
+        path: Path,
+        payload: bytes = b"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        *,
+        mode: int = 0o644,
+    ) -> None:
+        path.unlink()
+        path.write_bytes(payload)
+        path.chmod(mode)
+
+    def test_accepts_docker_remove_and_recreate_inside_private_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "private"
+            parent.mkdir(mode=0o700)
+            path = parent / "image.iid"
+            iid = image_build_module._IidFile(path)
+            try:
+                reserved = path.stat(follow_symlinks=False)
+                image_id = "sha256:" + "a" * 64
+                self.project(path)
+                projected = path.stat(follow_symlinks=False)
+
+                self.assertNotEqual(
+                    (reserved.st_dev, reserved.st_ino),
+                    (projected.st_dev, projected.st_ino),
+                )
+                self.assertEqual(iid.read_image_id(), image_id)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                iid.remove_after_success()
+                self.assertFalse(path.exists())
+            finally:
+                iid.close()
+
+    def test_rejects_in_place_write_that_does_not_replace_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "private"
+            parent.mkdir(mode=0o700)
+            path = parent / "image.iid"
+            iid = image_build_module._IidFile(path)
+            try:
+                path.write_text("sha256:" + "a" * 64, encoding="ascii")
+                with self.assertRaises(InterCodeImageBuildError):
+                    iid.read_image_id()
+            finally:
+                iid.close()
+
+    def test_rejects_unsafe_docker_projection_types_modes_and_sizes(self) -> None:
+        cases = ("symlink", "fifo", "hardlink", "mode", "oversized")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                parent = Path(directory) / "private"
+                parent.mkdir(mode=0o700)
+                path = parent / "image.iid"
+                iid = image_build_module._IidFile(path)
+                try:
+                    if case == "symlink":
+                        target = parent / "target"
+                        target.write_bytes(b"sha256:" + b"a" * 64)
+                        target.chmod(0o644)
+                        path.unlink()
+                        path.symlink_to(target)
+                    elif case == "fifo":
+                        path.unlink()
+                        os.mkfifo(path, 0o644)
+                    elif case == "hardlink":
+                        target = parent / "target"
+                        target.write_bytes(b"sha256:" + b"a" * 64)
+                        target.chmod(0o644)
+                        path.unlink()
+                        os.link(target, path)
+                    elif case == "mode":
+                        self.project(path, mode=0o600)
+                    else:
+                        self.project(path, b"x" * 73)
+                    with self.assertRaises(InterCodeImageBuildError):
+                        iid.read_image_id()
+                finally:
+                    iid.close()
+
+    def test_rejects_torn_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "private"
+            parent.mkdir(mode=0o700)
+            path = parent / "image.iid"
+            iid = image_build_module._IidFile(path)
+            try:
+                self.project(path, b"sha256:" + b"a" * 63)
+                with self.assertRaises(InterCodeImageBuildError):
+                    iid.read_image_id()
+            finally:
+                iid.close()
+
+    def test_rejects_parent_path_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "private"
+            parent.mkdir(mode=0o700)
+            path = parent / "image.iid"
+            iid = image_build_module._IidFile(path)
+            self.project(path)
+            original = parent.with_name("private-original")
+            parent.rename(original)
+            parent.mkdir(mode=0o700)
+            try:
+                with self.assertRaises(InterCodeImageBuildError):
+                    iid.read_image_id()
+            finally:
+                iid.close()
+
+    def test_rejects_missing_parent_without_leaking_its_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "private"
+            parent.mkdir(mode=0o700)
+            path = parent / "image.iid"
+            iid = image_build_module._IidFile(path)
+            self.project(path)
+            parent.rename(parent.with_name("private-original"))
+            try:
+                with self.assertRaises(InterCodeImageBuildError) as captured:
+                    iid.read_image_id()
+                self.assertNotIn(directory, str(captured.exception))
+            finally:
+                iid.close()
+
+    def test_rejects_output_path_replacement_after_adoption(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "private"
+            parent.mkdir(mode=0o700)
+            path = parent / "image.iid"
+            iid = image_build_module._IidFile(path)
+            try:
+                self.project(path)
+                self.assertEqual(iid.read_image_id(), "sha256:" + "a" * 64)
+                path.unlink()
+                path.write_bytes(b"sha256:" + b"a" * 64)
+                path.chmod(0o600)
+                with self.assertRaises(InterCodeImageBuildError):
+                    iid.remove_after_success()
+            finally:
+                iid.close()
+
+    def test_rejects_parent_mode_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "private"
+            parent.mkdir(mode=0o700)
+            path = parent / "image.iid"
+            iid = image_build_module._IidFile(path)
+            try:
+                self.project(path)
+                parent.chmod(0o755)
+                with self.assertRaises(InterCodeImageBuildError):
+                    iid.read_image_id()
+            finally:
+                iid.close()
+
+    def test_rejects_same_inode_content_change_between_bounded_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "private"
+            parent.mkdir(mode=0o700)
+            path = parent / "image.iid"
+            iid = image_build_module._IidFile(path)
+            try:
+                self.project(path)
+                real_read = iid._read_output
+                calls = 0
+
+                def mutating_read() -> bytes:
+                    nonlocal calls
+                    payload = real_read()
+                    if calls == 0:
+                        path.write_bytes(b"sha256:" + b"b" * 64)
+                        path.chmod(0o600)
+                    calls += 1
+                    return payload
+
+                with mock.patch.object(iid, "_read_output", side_effect=mutating_read):
+                    with self.assertRaises(InterCodeImageBuildError):
+                        iid.read_image_id()
+            finally:
+                iid.close()
+
+
 class InterCodeImageBuildPlanTests(unittest.TestCase):
     def test_plan_is_path_free_deterministic_and_has_four_id_only_builds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -348,7 +539,15 @@ class InterCodeImageBuildPlanTests(unittest.TestCase):
         self.assertEqual(first.canonical_record(), second.canonical_record())
         self.assertEqual(
             first.canonical_record()["schema"],
-            "edgeloopbench.intercode-image-build-plan.v2",
+            "edgeloopbench.intercode-image-build-plan.v3",
+        )
+        self.assertEqual(
+            first.canonical_record()["iidfile"],
+            {
+                "protocol_revision": "docker-remove-recreate-private-parent-v1",
+                "projected_mode": "0644",
+                "normalized_mode": "0600",
+            },
         )
         self.assertEqual(first.platform, "linux/arm64")
         self.assertEqual(first.dockerfile_sha256, DOCKERFILE_AGENT_SHA256)
@@ -542,7 +741,7 @@ class InterCodeImageBuildExecutionTests(unittest.TestCase):
             self.assertTrue(
                 all(
                     json.loads(line)["schema"]
-                    == "edgeloopbench.intercode-image-build-manifest.v2"
+                    == "edgeloopbench.intercode-image-build-manifest.v3"
                     for line in manifest_text.splitlines()
                 )
             )

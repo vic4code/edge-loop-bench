@@ -252,12 +252,15 @@ a check-to-mutation race that can overwrite a concurrently created tag. The
 private iidfile's full content-addressed image ID is the sole image authority.
 A manifest-missing stratum always executes its exact pinned build; it never
 adopts an existing image by label, tag, prefix, or predicted ID.
-The corrected plan and manifest schemas are both `v2`; obsolete tag-bearing
-`v1` records are not migrated or resumed.
+The corrected plan and manifest schemas are both `v3`; obsolete tag-bearing
+`v1` records and same-inode iidfile `v2` records are not migrated or resumed.
+The plan digest binds iidfile protocol revision
+`docker-remove-recreate-private-parent-v1`, projected mode `0644`, and
+normalized mode `0600`.
 
 `--execute` must use the existing `HostTelemetryCollector` and
 `HostSafetyPolicy` immediately before every possible build. The final
-admission occurs after input re-hashing, iidfile creation, and every other
+admission occurs after input re-hashing, iidfile reservation, and every other
 potentially slow preparation step, directly before the `image build` process
 is invoked. Admission is quiescent and fail-closed: VM pressure is exactly
 `1`, there are zero resident
@@ -277,15 +280,22 @@ Every build uses fixed `shell=False` argv, the real pinned client, explicit
 `Dockerfile.agent`, one exact `FILE_SYSTEM_VERSION`, and no `--tag`. After a
 successful build, the full image ID is inspected directly. Each build receives
 a fixed per-stratum `--iidfile` beneath the
-manifest's private mode-`0700` parent. The controller proves that pathname
-absent, creates a mode-`0600` regular file with `O_EXCL` and `O_NOFOLLOW`,
-retains its inode, bounds and exactly parses the full `sha256:` image ID, and
-revalidates pathname/inode identity. Docker stdout is never the authority for
-the image identity. The image is admitted only when ID, OS, architecture, agent and
-network-policy labels, filesystem version, fs-specific collector profile, and
-all collector source/policy/root/profile-set/argv pins are exact. Binary and
-build-input hashes are rechecked around each mutation and inspection; symlink,
-path, or content drift fails closed.
+manifest's private mode-`0700` parent. The controller retains that parent
+descriptor, proves the basename absent, and reserves it as an empty
+mode-`0600` regular inode with `O_EXCL` and `O_NOFOLLOW`. The pinned Docker CLI
+then performs its documented remove-and-recreate behavior: the reservation
+must become an otherwise unchanged unlinked inode, and the new basename must
+be an owner-controlled, single-link regular inode of exact observed mode
+`0644` and at most 72 bytes. The controller opens it relative to the retained
+parent with `O_NOFOLLOW` and `O_NONBLOCK`, immediately normalizes that same
+inode to `0600`, bounded-reads it twice, requires identical full `sha256:`
+content, and revalidates parent, pathname, reservation, and output identities.
+Docker stdout is never the authority for the image identity. The image is
+admitted only when ID, OS, architecture, agent and network-policy labels,
+filesystem version, fs-specific collector profile, and all collector
+source/policy/root/profile-set/argv pins are exact. Binary and build-input
+hashes are rechecked around each mutation and inspection; symlink, FIFO,
+directory, hard-link, owner, mode, path, or content drift fails closed.
 
 The private manifest is mode `0600`, canonical JSONL, append-only, sequenced,
 and hash-chained. Its first event binds the complete plan; each later event
@@ -303,11 +313,13 @@ partial or tampered state and stop without mutation. The utility never
 truncates, repairs, retags, prunes, or deletes an existing image.
 
 Offline tests use real temporary files plus bounded fake telemetry/Docker
-runners. They prove default plan-only behavior, exact ID-only argv and
-inspections, last-moment quiescent admission, resume from a valid prefix,
-refusal of torn/tampered/replaced journal state, unrelated-container refusal,
-symlink and context-drift refusal, and the absence of every image-tagging or
-image-deletion command. A real build remains blocked until
+runners. They reproduce Docker's remove-and-recreate iidfile projection and
+prove default plan-only behavior, exact ID-only argv and inspections,
+last-moment quiescent admission, resume from a valid prefix, refusal of unsafe
+iidfile types, links, modes, sizes, concurrent mutations, torn/tampered/replaced
+journal state, unrelated-container refusal, symlink and context-drift refusal,
+and the absence of every image-tagging or image-deletion command. A real build
+remains blocked until
 those tests and the repository checks pass and an operator explicitly invokes
 `--execute` with reviewed live pins.
 
