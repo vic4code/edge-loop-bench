@@ -897,3 +897,36 @@ and the committed source identity. Its external steward may stop only the two
 pre-inventoried full container IDs, records each successful stop as an
 `operational_reconciliation`, refuses every unknown running ID, and exits
 before Docker image work begins.
+
+## Entry 030 — attempt 11 captured the post-reconciliation pressure stop
+
+- Date: 2026-07-20, Asia/Taipei
+- Phase: production host admission, attempt 11
+- Status: **safety stop; stable normal-pressure window required**
+- Measured model prompts: **0**
+- Calibration episodes: **0/8**
+- Confirmatory episodes: **0/240**
+- Performance result: **none**
+- Uplift claim: **not permitted**
+
+Attempt 11 used clean pushed commit `87db6b8` and a fresh artifact root. Its
+preflight passed at pressure level `1`, 45% free memory, and 44,251,799,552
+free disk bytes. The first full admission sample remained at pressure `1` and
+observed exactly the two configured stewarded AgentGPT IDs; policy correctly
+recorded `STOP`, classified only that denial as retryable, and waited without
+performing a container mutation.
+
+The external steward rechecked the complete running set, stopped only those two
+full identities, verified both were no longer running with restart policies
+unchanged, and appended two `operational_reconciliation` events. The next raw
+sample, 30.686 seconds later, contained no running container but reported VM
+pressure level `2` with 42% free memory. Because `VM_PRESSURE` is never a
+retryable admission reason, production appended `hard_denial`, sealed the
+five-record admission journal, closed its managed empty Ollama runtime, and
+exited before Docker identity or image planning.
+
+The artifact contains only preflight, source inventory, intervention, and
+sealed admission evidence. It has no image manifest, tokenizer request,
+resident model, qualification row, calibration row, formal row, or model
+prompt. A fresh attempt may begin only after an external pressure-`1` window;
+the host threshold is not relaxed in response to this stop.
